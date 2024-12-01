@@ -81,7 +81,7 @@ call :downloadfile "libwebp-%WEBP%.tar.gz" "https://storage.googleapis.com/downl
 call :downloadfile "libzip-%LIBZIP%.tar.gz" "https://github.com/nih-at/libzip/releases/download/v%LIBZIP%/libzip-%LIBZIP%.tar.gz" c0e6fa52a62ba11efd30262290dc6970947aef32e0cc294ee50e9005ceac092a || goto error
 call :downloadfile "zlib%ZLIBSHORT%.zip" "https://zlib.net/zlib%ZLIBSHORT%.zip" 72af66d44fcc14c22013b46b814d5d2514673dda3d115e64b690c1ad636e7b17 || goto error
 call :downloadfile "zstd-%ZSTD%.zip" "https://github.com/facebook/zstd/archive/refs/tags/v%ZSTD%.zip" 3b1c3b46e416d36931efd34663122d7f51b550c87f74de2d38249516fe7d8be5 || goto error
-call :downloadfile "zstd-fd5f8106a58601a963ee816e6a57aa7c61fafc53.patch" https://github.com/facebook/zstd/commit/fd5f8106a58601a963ee816e6a57aa7c61fafc53.patch 675f144b11f8ab2424b64bed8ccdca5d3f35b9326046fa7a883925dd180f0651 || goto error
+call :downloadfile "zstd-fd5f8106a58601a963ee816e6a57aa7c61fafc53.patch" https://github.com/facebook/zstd/commit/fd5f8106a58601a963ee816e6a57aa7c61fafc53.patch 8df152f4969b308546306c074628de761f0b80265de7de534e3822fab22d7535 || goto error
 
 call :downloadfile "cpuinfo-%CPUINFO%.zip" "https://github.com/pytorch/cpuinfo/archive/%CPUINFO%.zip" 13146ae7983d767a678dd01b0d6af591e77cec82babd41264b9164ab808d7d41 || goto error
 call :downloadfile "discord-rpc-%DISCORD_RPC%.zip" "https://github.com/stenzek/discord-rpc/archive/%DISCORD_RPC%.zip" 61e185e75d37b360c314125bcdf4697192d15e2d5209db3306ed6cd736d508b3 || goto error
