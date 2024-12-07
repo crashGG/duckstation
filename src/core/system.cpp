@@ -4244,6 +4244,8 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
        g_settings.gpu_disable_texture_copy_to_self != old_settings.gpu_disable_texture_copy_to_self ||
        g_settings.gpu_disable_memory_import != old_settings.gpu_disable_memory_import ||
        g_settings.gpu_disable_raster_order_views != old_settings.gpu_disable_raster_order_views ||
+       g_settings.gpu_disable_compute_shaders != old_settings.gpu_disable_compute_shaders ||
+       g_settings.gpu_disable_compressed_textures != old_settings.gpu_disable_compressed_textures ||
        g_settings.display_exclusive_fullscreen_control != old_settings.display_exclusive_fullscreen_control))
   {
     // if debug device/threaded presentation change, we need to recreate the whole display
@@ -4256,6 +4258,8 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
        g_settings.gpu_disable_texture_copy_to_self != old_settings.gpu_disable_texture_copy_to_self ||
        g_settings.gpu_disable_memory_import != old_settings.gpu_disable_memory_import ||
        g_settings.gpu_disable_raster_order_views != old_settings.gpu_disable_raster_order_views ||
+       g_settings.gpu_disable_compute_shaders != old_settings.gpu_disable_compute_shaders ||
+       g_settings.gpu_disable_compressed_textures != old_settings.gpu_disable_compressed_textures ||
        g_settings.display_exclusive_fullscreen_control != old_settings.display_exclusive_fullscreen_control);
 
     Host::AddIconOSDMessage("RendererSwitch", ICON_FA_PAINT_ROLLER,
@@ -4698,6 +4702,10 @@ void System::WarnAboutUnsafeSettings()
         APPEND_SUBMESSAGE(TRANSLATE_SV("System", "Video timings set to default."));
       if (g_settings.gpu_widescreen_hack)
         APPEND_SUBMESSAGE(TRANSLATE_SV("System", "Widescreen rendering disabled."));
+      if (g_settings.gpu_pgxp_enable)
+        APPEND_SUBMESSAGE(TRANSLATE_SV("System", "PGXP disabled."));
+      if (g_settings.gpu_texture_cache)
+        APPEND_SUBMESSAGE(TRANSLATE_SV("System", "GPU texture cache disabled."));
       if (g_settings.display_24bit_chroma_smoothing)
         APPEND_SUBMESSAGE(TRANSLATE_SV("System", "FMV chroma smoothing disabled."));
       if (g_settings.cdrom_read_speedup != 1)
