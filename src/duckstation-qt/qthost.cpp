@@ -1412,7 +1412,7 @@ void EmuThread::saveState(const QString& filename, bool block_until_done /* = fa
     return;
 
   Error error;
-  if (!System::SaveState(filename.toUtf8().data(), &error, g_settings.create_save_state_backups))
+  if (!System::SaveState(filename.toStdString(), &error, g_settings.create_save_state_backups, false))
     emit errorReported(tr("Error"), tr("Failed to save state: %1").arg(QString::fromStdString(error.GetDescription())));
 }
 
@@ -1432,7 +1432,7 @@ void EmuThread::saveState(bool global, qint32 slot, bool block_until_done /* = f
   if (!System::SaveState((global ? System::GetGlobalSaveStateFileName(slot) :
                                    System::GetGameSaveStateFileName(System::GetGameSerial(), slot))
                            .c_str(),
-                         &error, g_settings.create_save_state_backups))
+                         &error, g_settings.create_save_state_backups, false))
   {
     emit errorReported(tr("Error"), tr("Failed to save state: %1").arg(QString::fromStdString(error.GetDescription())));
   }
@@ -1915,6 +1915,18 @@ bool Host::ConfirmMessage(std::string_view title, std::string_view message)
 
   return emit g_emu_thread->messageConfirmed(QString::fromUtf8(title.data(), title.size()),
                                              QString::fromUtf8(message.data(), message.size()));
+}
+
+void Host::ConfirmMessageAsync(std::string_view title, std::string_view message, ConfirmMessageAsyncCallback callback)
+{
+  QtHost::RunOnUIThread([title = QtUtils::StringViewToQString(title), message = QtUtils::StringViewToQString(message),
+                         callback = std::move(callback)]() mutable {
+    auto lock = g_main_window->pauseAndLockSystem();
+
+    const bool result = (QMessageBox::question(lock.getDialogParent(), title, message) != QMessageBox::No);
+
+    callback(result);
+  });
 }
 
 void Host::OpenURL(std::string_view url)
