@@ -17,30 +17,27 @@
 
 #include "util/state_wrapper.h"
 
+#include "IconsPromptFont.h"
 #include "fmt/format.h"
 
-static const Controller::ControllerInfo s_none_info = {ControllerType::None,
-                                                       "None",
-                                                       TRANSLATE_NOOP("ControllerType", "Not Connected"),
-                                                       nullptr,
-                                                       {},
-                                                       {},
-                                                       Controller::VibrationCapabilities::NoVibration};
+static const Controller::ControllerInfo s_none_info = {
+  ControllerType::None, "None", TRANSLATE_NOOP("ControllerType", "Not Connected"), ICON_PF_QUESTION, {}, {}};
 
-static const Controller::ControllerInfo* s_controller_info[] = {
-  &s_none_info,
-  &DigitalController::INFO,
-  &AnalogController::INFO,
-  &AnalogJoystick::INFO,
-  &NeGcon::INFO,
-  &NeGconRumble::INFO,
-  &GunCon::INFO,
-  &PlayStationMouse::INFO,
-  &Justifier::INFO,
-  &DigitalController::INFO_POPN,
-  &DigitalController::INFO_DDGO,
-  &JogCon::INFO,
-};
+static constexpr std::array<const Controller::ControllerInfo*, static_cast<size_t>(ControllerType::Count)>
+  s_controller_info = {{
+    &s_none_info,
+    &DigitalController::INFO,
+    &AnalogController::INFO,
+    &AnalogJoystick::INFO,
+    &GunCon::INFO,
+    &PlayStationMouse::INFO,
+    &NeGcon::INFO,
+    &NeGconRumble::INFO,
+    &Justifier::INFO,
+    &DigitalController::INFO_POPN,
+    &DigitalController::INFO_DDGO,
+    &JogCon::INFO,
+  }};
 
 const std::array<u32, NUM_CONTROLLER_AND_CARD_PORTS> Controller::PortDisplayOrder = {{0, 2, 3, 4, 1, 5, 6, 7}};
 
@@ -91,6 +88,11 @@ void Controller::SetBindState(u32 index, float value)
 u32 Controller::GetButtonStateBits() const
 {
   return 0;
+}
+
+float Controller::GetVibrationMotorState(u32 index) const
+{
+  return 0.0f;
 }
 
 bool Controller::InAnalogMode() const
@@ -151,21 +153,10 @@ std::unique_ptr<Controller> Controller::Create(ControllerType type, u32 index)
   }
 }
 
-const char* Controller::GetDefaultPadType(u32 pad)
+const Controller::ControllerInfo& Controller::GetControllerInfo(ControllerType type)
 {
-  return GetControllerInfo((pad == 0) ? Settings::DEFAULT_CONTROLLER_1_TYPE : Settings::DEFAULT_CONTROLLER_2_TYPE)
-    ->name;
-}
-
-const Controller::ControllerInfo* Controller::GetControllerInfo(ControllerType type)
-{
-  for (const ControllerInfo* info : s_controller_info)
-  {
-    if (type == info->type)
-      return info;
-  }
-
-  return nullptr;
+  DebugAssert(type < ControllerType::Count && s_controller_info[static_cast<size_t>(type)]);
+  return *s_controller_info[static_cast<size_t>(type)];
 }
 
 const Controller::ControllerInfo* Controller::GetControllerInfo(std::string_view name)
@@ -179,28 +170,10 @@ const Controller::ControllerInfo* Controller::GetControllerInfo(std::string_view
   return nullptr;
 }
 
-std::vector<std::pair<std::string, std::string>> Controller::GetControllerTypeNames()
+const std::array<const Controller::ControllerInfo*, static_cast<size_t>(ControllerType::Count)>&
+Controller::GetControllerInfoList()
 {
-  std::vector<std::pair<std::string, std::string>> ret;
-  for (const ControllerInfo* info : s_controller_info)
-    ret.emplace_back(info->name, Host::TranslateToString("ControllerType", info->display_name));
-
-  return ret;
-}
-
-std::optional<u32> Controller::GetBindIndex(ControllerType type, std::string_view bind_name)
-{
-  const ControllerInfo* info = GetControllerInfo(type);
-  if (!info)
-    return std::nullopt;
-
-  for (u32 i = 0; i < static_cast<u32>(info->bindings.size()); i++)
-  {
-    if (bind_name == info->bindings[i].name)
-      return i;
-  }
-
-  return std::nullopt;
+  return s_controller_info;
 }
 
 std::tuple<u32, u32> Controller::ConvertPadToPortAndSlot(u32 index)

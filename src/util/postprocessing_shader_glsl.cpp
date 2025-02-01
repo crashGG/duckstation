@@ -170,7 +170,8 @@ bool PostProcessing::GLSLShader::CompilePipeline(GPUTexture::Format format, u32 
 GPUDevice::PresentResult PostProcessing::GLSLShader::Apply(GPUTexture* input_color, GPUTexture* input_depth,
                                                            GPUTexture* final_target, GSVector4i final_rect,
                                                            s32 orig_width, s32 orig_height, s32 native_width,
-                                                           s32 native_height, u32 target_width, u32 target_height)
+                                                           s32 native_height, u32 target_width, u32 target_height,
+                                                           float time)
 {
   GL_SCOPE_FMT("GLSL Shader {}", m_name);
 
@@ -184,18 +185,22 @@ GPUDevice::PresentResult PostProcessing::GLSLShader::Apply(GPUTexture* input_col
   else
   {
     g_gpu_device->SetRenderTargets(&final_target, 1, nullptr);
-    g_gpu_device->ClearRenderTarget(final_target, 0); // TODO: Could use an invalidate here too.
+    g_gpu_device->ClearRenderTarget(final_target, GPUDevice::DEFAULT_CLEAR_COLOR); // TODO: Could use an invalidate here too.
   }
 
   g_gpu_device->SetPipeline(m_pipeline.get());
   g_gpu_device->SetTextureSampler(0, input_color, m_sampler.get());
-  g_gpu_device->SetViewportAndScissor(final_rect);
+
+  // need to flip the rect, since we're not drawing the entire fb
+  const GSVector4i real_final_rect =
+    g_gpu_device->UsesLowerLeftOrigin() ? g_gpu_device->FlipToLowerLeft(final_rect, target_height) : final_rect;
+  g_gpu_device->SetViewportAndScissor(real_final_rect);
 
   const u32 uniforms_size = GetUniformsSize();
   void* uniforms = g_gpu_device->MapUniformBuffer(uniforms_size);
-  FillUniformBuffer(uniforms, final_rect.left, final_rect.top, final_rect.width(), final_rect.height(), target_width,
-                    target_height, orig_width, orig_height, native_width, native_height,
-                    static_cast<float>(PostProcessing::GetTimer().GetTimeSeconds()));
+  FillUniformBuffer(uniforms, real_final_rect.left, real_final_rect.top, real_final_rect.width(),
+                    real_final_rect.height(), target_width, target_height, orig_width, orig_height, native_width,
+                    native_height, time);
   g_gpu_device->UnmapUniformBuffer(uniforms_size);
   g_gpu_device->Draw(3, 0);
   return GPUDevice::PresentResult::OK;

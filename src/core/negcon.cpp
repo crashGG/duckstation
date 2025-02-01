@@ -10,6 +10,7 @@
 #include "common/assert.h"
 #include "common/bitutils.h"
 #include "common/log.h"
+#include "common/settings_interface.h"
 
 #include "IconsPromptFont.h"
 
@@ -261,14 +262,14 @@ std::unique_ptr<NeGcon> NeGcon::Create(u32 index)
 
 static const Controller::ControllerBindingInfo s_binding_info[] = {
 #define BUTTON(name, display_name, icon_name, button, genb)                                                            \
-  {                                                                                                                    \
-    name, display_name, icon_name, static_cast<u32>(button), InputBindingInfo::Type::Button, genb                      \
-  }
+  {name, display_name, icon_name, static_cast<u32>(button), InputBindingInfo::Type::Button, genb}
 #define AXIS(name, display_name, icon_name, halfaxis, genb)                                                            \
-  {                                                                                                                    \
-    name, display_name, icon_name, static_cast<u32>(NeGcon::Button::Count) + static_cast<u32>(halfaxis),               \
-      InputBindingInfo::Type::HalfAxis, genb                                                                           \
-  }
+  {name,                                                                                                               \
+   display_name,                                                                                                       \
+   icon_name,                                                                                                          \
+   static_cast<u32>(NeGcon::Button::Count) + static_cast<u32>(halfaxis),                                               \
+   InputBindingInfo::Type::HalfAxis,                                                                                   \
+   genb}
 
   // clang-format off
   BUTTON("Up", TRANSLATE_NOOP("NeGcon", "D-Pad Up"), ICON_PF_DPAD_UP, NeGcon::Button::Up, GenericInputBinding::DPadUp),
@@ -342,8 +343,8 @@ static const SettingInfo s_settings[] = {
 };
 
 const Controller::ControllerInfo NeGcon::INFO = {
-  ControllerType::NeGcon, "NeGcon",   TRANSLATE_NOOP("ControllerType", "NeGcon"),    ICON_PF_GAMEPAD,
-  s_binding_info,         s_settings, Controller::VibrationCapabilities::NoVibration};
+  ControllerType::NeGcon, "NeGcon",       TRANSLATE_NOOP("ControllerType", "NeGcon"),
+  ICON_PF_GAMEPAD,        s_binding_info, s_settings};
 
 void NeGcon::LoadSettings(const SettingsInterface& si, const char* section, bool initial)
 {

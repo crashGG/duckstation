@@ -233,10 +233,11 @@ GPUSwapChain::GPUSwapChain(const WindowInfo& wi, GPUVSyncMode vsync_mode, bool a
 
 GPUSwapChain::~GPUSwapChain() = default;
 
-GSVector4i GPUSwapChain::PreRotateClipRect(const GSVector4i& v)
+GSVector4i GPUSwapChain::PreRotateClipRect(WindowInfo::PreRotation prerotation, const GSVector2i surface_size,
+                                           const GSVector4i& v)
 {
   GSVector4i new_clip;
-  switch (m_window_info.surface_prerotation)
+  switch (prerotation)
   {
     case WindowInfo::PreRotation::Identity:
       new_clip = v;
@@ -245,7 +246,7 @@ GSVector4i GPUSwapChain::PreRotateClipRect(const GSVector4i& v)
     case WindowInfo::PreRotation::Rotate90Clockwise:
     {
       const s32 height = (v.w - v.y);
-      const s32 y = m_window_info.surface_height - v.y - height;
+      const s32 y = surface_size.y - v.y - height;
       new_clip = GSVector4i(y, v.x, y + height, v.z);
     }
     break;
@@ -254,8 +255,8 @@ GSVector4i GPUSwapChain::PreRotateClipRect(const GSVector4i& v)
     {
       const s32 width = (v.z - v.x);
       const s32 height = (v.w - v.y);
-      const s32 x = m_window_info.surface_width - v.x - width;
-      const s32 y = m_window_info.surface_height - v.y - height;
+      const s32 x = surface_size.x - v.x - width;
+      const s32 y = surface_size.y - v.y - height;
       new_clip = GSVector4i(x, y, x + width, y + height);
     }
     break;
@@ -263,7 +264,7 @@ GSVector4i GPUSwapChain::PreRotateClipRect(const GSVector4i& v)
     case WindowInfo::PreRotation::Rotate270Clockwise:
     {
       const s32 width = (v.z - v.x);
-      const s32 x = m_window_info.surface_width - v.x - width;
+      const s32 x = surface_size.x - v.x - width;
       new_clip = GSVector4i(v.y, x, v.w, x + width);
     }
     break;
@@ -272,6 +273,11 @@ GSVector4i GPUSwapChain::PreRotateClipRect(const GSVector4i& v)
   }
 
   return new_clip;
+}
+
+bool GPUSwapChain::IsExclusiveFullscreen() const
+{
+  return false;
 }
 
 bool GPUSwapChain::ShouldSkipPresentingFrame()
@@ -385,6 +391,17 @@ const char* GPUDevice::ShaderLanguageToString(GPUShaderLanguage language)
   }
 }
 
+const char* GPUDevice::VSyncModeToString(GPUVSyncMode mode)
+{
+  static constexpr std::array<const char*, static_cast<size_t>(GPUVSyncMode::Count)> vsync_modes = {{
+    "Disabled",
+    "FIFO",
+    "Mailbox",
+  }};
+
+  return vsync_modes[static_cast<size_t>(mode)];
+}
+
 bool GPUDevice::IsSameRenderAPI(RenderAPI lhs, RenderAPI rhs)
 {
   return (lhs == rhs || ((lhs == RenderAPI::OpenGL || lhs == RenderAPI::OpenGLES) &&
@@ -492,11 +509,6 @@ bool GPUDevice::RecreateMainSwapChain(const WindowInfo& wi, GPUVSyncMode vsync_m
 void GPUDevice::DestroyMainSwapChain()
 {
   m_main_swap_chain.reset();
-}
-
-bool GPUDevice::SupportsExclusiveFullscreen() const
-{
-  return false;
 }
 
 void GPUDevice::OpenShaderCache(std::string_view base_path, u32 version)
@@ -638,12 +650,24 @@ bool GPUDevice::GetPipelineCacheData(DynamicHeapArray<u8>* data, Error* error)
 
 bool GPUDevice::CreateResources(Error* error)
 {
-  if (!(m_nearest_sampler = CreateSampler(GPUSampler::GetNearestConfig(), error)) ||
-      !(m_linear_sampler = CreateSampler(GPUSampler::GetLinearConfig(), error)))
+  // Backend may initialize null texture itself if it needs it.
+  if (!m_empty_texture &&
+      !(m_empty_texture = CreateTexture(1, 1, 1, 1, 1, GPUTexture::Type::Texture, GPUTexture::Format::RGBA8,
+                                        GPUTexture::Flags::None, nullptr, 0, error)))
+  {
+    Error::AddPrefix(error, "Failed to create null texture: ");
+    return false;
+  }
+  GL_OBJECT_NAME(m_empty_texture, "Null Texture");
+
+  if (!(m_nearest_sampler = GetSampler(GPUSampler::GetNearestConfig(), error)) ||
+      !(m_linear_sampler = GetSampler(GPUSampler::GetLinearConfig(), error)))
   {
     Error::AddPrefix(error, "Failed to create samplers: ");
     return false;
   }
+  GL_OBJECT_NAME(m_nearest_sampler, "Nearest Sampler");
+  GL_OBJECT_NAME(m_linear_sampler, "Nearest Sampler");
 
   const RenderAPI render_api = GetRenderAPI();
   ShaderGen shadergen(render_api, ShaderGen::GetShaderLanguageForAPI(render_api), m_features.dual_source_blend,
@@ -700,13 +724,16 @@ bool GPUDevice::CreateResources(Error* error)
 
 void GPUDevice::DestroyResources()
 {
+  m_empty_texture.reset();
+
   m_imgui_font_texture.reset();
   m_imgui_pipeline.reset();
 
   m_imgui_pipeline.reset();
 
-  m_linear_sampler.reset();
-  m_nearest_sampler.reset();
+  m_linear_sampler = nullptr;
+  m_nearest_sampler = nullptr;
+  m_sampler_map.clear();
 
   m_shader_cache.Close();
 }
@@ -725,12 +752,11 @@ void GPUDevice::RenderImGui(GPUSwapChain* swap_chain)
   SetPipeline(m_imgui_pipeline.get());
   SetViewport(0, 0, swap_chain->GetPostRotatedWidth(), post_rotated_height);
 
+  const bool prerotated = (swap_chain->GetPreRotation() != WindowInfo::PreRotation::Identity);
   GSMatrix4x4 mproj = GSMatrix4x4::OffCenterOrthographicProjection(
     0.0f, 0.0f, static_cast<float>(swap_chain->GetWidth()), static_cast<float>(swap_chain->GetHeight()), 0.0f, 1.0f);
-  if (swap_chain->GetPreRotation() != WindowInfo::PreRotation::Identity)
-  {
+  if (prerotated)
     mproj = GSMatrix4x4::RotationZ(WindowInfo::GetZRotationForPreRotation(swap_chain->GetPreRotation())) * mproj;
-  }
   PushUniformBuffer(&mproj, sizeof(mproj));
 
   // Render command lists
@@ -747,19 +773,33 @@ void GPUDevice::RenderImGui(GPUSwapChain* swap_chain)
     for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++)
     {
       const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
-      DebugAssert(!pcmd->UserCallback);
 
-      if (pcmd->ElemCount == 0 || pcmd->ClipRect.z <= pcmd->ClipRect.x || pcmd->ClipRect.w <= pcmd->ClipRect.y)
+      if ((pcmd->ElemCount == 0 && !pcmd->UserCallback) || pcmd->ClipRect.z <= pcmd->ClipRect.x ||
+          pcmd->ClipRect.w <= pcmd->ClipRect.y)
+      {
         continue;
+      }
 
       GSVector4i clip = GSVector4i(GSVector4::load<false>(&pcmd->ClipRect.x));
-      clip = swap_chain->PreRotateClipRect(clip);
+
+      if (prerotated)
+        clip = GPUSwapChain::PreRotateClipRect(swap_chain->GetPreRotation(), swap_chain->GetSizeVec(), clip);
       if (flip)
         clip = FlipToLowerLeft(clip, post_rotated_height);
 
       SetScissor(clip);
-      SetTextureSampler(0, reinterpret_cast<GPUTexture*>(pcmd->TextureId), m_linear_sampler.get());
-      DrawIndexed(pcmd->ElemCount, base_index + pcmd->IdxOffset, base_vertex + pcmd->VtxOffset);
+      SetTextureSampler(0, reinterpret_cast<GPUTexture*>(pcmd->TextureId), m_linear_sampler);
+
+      if (pcmd->UserCallback) [[unlikely]]
+      {
+        pcmd->UserCallback(cmd_list, pcmd);
+        PushUniformBuffer(&mproj, sizeof(mproj));
+        SetPipeline(m_imgui_pipeline.get());
+      }
+      else
+      {
+        DrawIndexed(pcmd->ElemCount, base_index + pcmd->IdxOffset, base_vertex + pcmd->VtxOffset);
+      }
     }
   }
 }
@@ -878,7 +918,7 @@ std::optional<GPUDevice::ExclusiveFullscreenMode> GPUDevice::ExclusiveFullscreen
     std::optional<u32> owidth = StringUtil::FromChars<u32>(str.substr(0, sep1));
     sep1++;
 
-    while (sep1 < str.length() && std::isspace(str[sep1]))
+    while (sep1 < str.length() && StringUtil::IsWhitespace(str[sep1]))
       sep1++;
 
     if (owidth.has_value() && sep1 < str.length())
@@ -889,7 +929,7 @@ std::optional<GPUDevice::ExclusiveFullscreenMode> GPUDevice::ExclusiveFullscreen
         std::optional<u32> oheight = StringUtil::FromChars<u32>(str.substr(sep1, sep2 - sep1));
         sep2++;
 
-        while (sep2 < str.length() && std::isspace(str[sep2]))
+        while (sep2 < str.length() && StringUtil::IsWhitespace(str[sep2]))
           sep2++;
 
         if (oheight.has_value() && sep2 < str.length())
@@ -990,6 +1030,25 @@ GSVector4i GPUDevice::FlipToLowerLeft(GSVector4i rc, s32 target_height)
   return rc;
 }
 
+GPUSampler* GPUDevice::GetSampler(const GPUSampler::Config& config, Error* error /* = nullptr */)
+{
+  auto it = m_sampler_map.find(config.key);
+  if (it != m_sampler_map.end())
+  {
+    if (!it->second) [[unlikely]]
+      Error::SetStringView(error, "Sampler previously failed creation.");
+
+    return it->second.get();
+  }
+
+  std::unique_ptr<GPUSampler> sampler = g_gpu_device->CreateSampler(config, error);
+  if (sampler)
+    GL_OBJECT_NAME_FMT(sampler, "Sampler {:016X}", config.key);
+
+  it = m_sampler_map.emplace(config.key, std::move(sampler)).first;
+  return it->second.get();
+}
+
 bool GPUDevice::IsTexturePoolType(GPUTexture::Type type)
 {
   return (type == GPUTexture::Type::Texture);
@@ -1017,7 +1076,7 @@ std::unique_ptr<GPUTexture> GPUDevice::FetchTexture(u32 width, u32 height, u32 l
 
   TexturePool::iterator it;
 
-  if (is_texture && m_features.prefer_unused_textures)
+  if (is_texture && data && m_features.prefer_unused_textures)
   {
     // Try to find a texture that wasn't used this frame first.
     for (it = m_texture_pool.begin(); it != m_texture_pool.end(); ++it)
@@ -1211,6 +1270,12 @@ bool GPUDevice::ResizeTexture(std::unique_ptr<GPUTexture>* tex, u32 new_width, u
                               GPUTexture::Format format, GPUTexture::Flags flags, bool preserve /* = true */)
 {
   GPUTexture* old_tex = tex->get();
+  if (old_tex && old_tex->GetWidth() == new_width && old_tex->GetHeight() == new_height && old_tex->GetType() == type &&
+      old_tex->GetFormat() == format && old_tex->GetFlags() == flags)
+  {
+    return true;
+  }
+
   DebugAssert(!old_tex || (old_tex->GetLayers() == 1 && old_tex->GetLevels() == 1 && old_tex->GetSamples() == 1));
   std::unique_ptr<GPUTexture> new_tex = FetchTexture(new_width, new_height, 1, 1, 1, type, format, flags);
   if (!new_tex) [[unlikely]]

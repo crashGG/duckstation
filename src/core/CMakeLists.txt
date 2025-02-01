@@ -57,14 +57,17 @@ add_library(core
   gpu_hw_shadergen.h
   gpu_hw_texture_cache.cpp
   gpu_hw_texture_cache.h
+  gpu_presenter.cpp
+  gpu_presenter.h
   gpu_shadergen.cpp
   gpu_shadergen.h
   gpu_sw.cpp
   gpu_sw.h
-  gpu_sw_backend.cpp
-  gpu_sw_backend.h
   gpu_sw_rasterizer.cpp
   gpu_sw_rasterizer.h
+  gpu_thread.cpp
+  gpu_thread.h
+  gpu_thread_commands.h
   gpu_types.h
   guncon.cpp
   guncon.h
@@ -73,8 +76,6 @@ add_library(core
   gte_types.h
   host.cpp
   host.h
-  host_interface_progress_callback.cpp
-  host_interface_progress_callback.h
   hotkeys.cpp
   input_types.h
   imgui_overlays.cpp

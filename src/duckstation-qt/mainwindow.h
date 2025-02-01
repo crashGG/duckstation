@@ -80,6 +80,9 @@ public:
   explicit MainWindow();
   ~MainWindow();
 
+  /// Disable createPopupMenu(), the menu is bogus.
+  QMenu* createPopupMenu() override;
+
   /// Performs update check if enabled in settings.
   void startupUpdateCheck();
 
@@ -146,6 +149,7 @@ private Q_SLOTS:
   void onMediaCaptureStarted();
   void onMediaCaptureStopped();
   void onAchievementsLoginRequested(Achievements::LoginRequestReason reason);
+  void onAchievementsLoginSuccess(const QString& username, quint32 points, quint32 sc_points, quint32 unread_messages);
   void onAchievementsChallengeModeChanged(bool enabled);
   bool onCreateAuxiliaryRenderWindow(RenderAPI render_api, qint32 x, qint32 y, quint32 width, quint32 height,
                                      const QString& title, const QString& icon_name,
@@ -154,6 +158,8 @@ private Q_SLOTS:
   void onDestroyAuxiliaryRenderWindow(Host::AuxiliaryRenderWindowHandle handle, QPoint* pos, QSize* size);
 
   void onApplicationStateChanged(Qt::ApplicationState state);
+
+  void onToolbarContextMenuRequested(const QPoint& pos);
 
   void onStartFileActionTriggered();
   void onStartDiscActionTriggered();
@@ -168,7 +174,7 @@ private Q_SLOTS:
   void onCheatsActionTriggered();
   void onCheatsMenuAboutToShow();
   void onStartFullscreenUITriggered();
-  void onFullscreenUIStateChange(bool running);
+  void onFullscreenUIStartedOrStopped(bool running);
   void onRemoveDiscActionTriggered();
   void onScanForNewGamesTriggered();
   void onViewToolbarActionToggled(bool checked);
@@ -192,9 +198,11 @@ private Q_SLOTS:
   void onToolsOpenDataDirectoryTriggered();
   void onToolsOpenTextureDirectoryTriggered();
   void onSettingsTriggeredFromToolbar();
+  void onSettingsControllerProfilesTriggered();
 
   void onGameListRefreshComplete();
   void onGameListRefreshProgress(const QString& status, int current, int total);
+  void onGameListLayoutChanged();
   void onGameListSelectionChanged();
   void onGameListEntryActivated();
   void onGameListEntryContextMenuRequested(const QPoint& point);
@@ -224,7 +232,9 @@ private:
   void setupAdditionalUi();
   void connectSignals();
 
+  void updateToolbarActions();
   void updateEmulationActions(bool starting, bool running, bool cheevos_challenge_mode);
+  void updateShortcutActions(bool starting);
   void updateStatusBarWidgetVisibility();
   void updateWindowTitle();
   void updateWindowState(bool force_visible = false);
@@ -312,6 +322,7 @@ private:
 
   SettingsWindow* m_settings_window = nullptr;
   ControllerSettingsWindow* m_controller_settings_window = nullptr;
+  ControllerSettingsWindow* m_input_profile_editor_window = nullptr;
 
   AutoUpdaterDialog* m_auto_updater_dialog = nullptr;
   MemoryCardEditorWindow* m_memory_card_editor_window = nullptr;

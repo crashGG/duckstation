@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #pragma once
+
 #include "input_source.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #include <array>
 #include <functional>
@@ -27,8 +28,8 @@ public:
   void Shutdown() override;
 
   void PollEvents() override;
-  std::vector<std::pair<std::string, std::string>> EnumerateDevices() override;
-  std::vector<InputBindingKey> EnumerateMotors() override;
+  InputManager::DeviceList EnumerateDevices() override;
+  InputManager::VibrationMotorList EnumerateVibrationMotors(std::optional<InputBindingKey> for_device) override;
   bool GetGenericBindingMapping(std::string_view device, GenericInputBindingMapping* mapping) override;
   void UpdateMotorState(InputBindingKey key, float intensity) override;
   void UpdateMotorState(InputBindingKey large_key, InputBindingKey small_key, float large_intensity,
@@ -37,7 +38,7 @@ public:
   bool ContainsDevice(std::string_view device) const override;
   std::optional<InputBindingKey> ParseKeyString(std::string_view device, std::string_view binding) override;
   TinyString ConvertKeyToString(InputBindingKey key) override;
-  TinyString ConvertKeyToIcon(InputBindingKey key) override;
+  TinyString ConvertKeyToIcon(InputBindingKey key, InputManager::BindingIconMappingFunction mapper) override;
 
   std::unique_ptr<ForceFeedbackDevice> CreateForceFeedbackDevice(std::string_view device, Error* error) override;
 
@@ -50,23 +51,29 @@ public:
 
   static bool IsHandledInputEvent(const SDL_Event* ev);
 
+  static void CopySettings(SettingsInterface& dest_si, const SettingsInterface& src_si);
+
   static bool ALLOW_EVENT_POLLING;
 
 private:
   struct ControllerData
   {
     SDL_Haptic* haptic;
-    SDL_GameController* game_controller;
+    SDL_Gamepad* gamepad;
     SDL_Joystick* joystick;
     u16 rumble_intensity[2];
     int haptic_left_right_effect;
     int joystick_id;
     int player_id;
-    bool use_game_controller_rumble;
+    float last_touch_x;
+    float last_touch_y;
+    bool use_gamepad_rumble : 1;
+    bool has_led : 1;
 
     // Used to disable Joystick controls that are used in GameController inputs so we don't get double events
     std::vector<bool> joy_button_used_in_gc;
     std::vector<bool> joy_axis_used_in_gc;
+    std::vector<bool> joy_hat_used_in_gc;
 
     // Track last hat state so we can send "unpressed" events.
     std::vector<u8> last_hat_state;
@@ -85,8 +92,9 @@ private:
 
   bool OpenDevice(int index, bool is_gamecontroller);
   bool CloseDevice(int joystick_index);
-  bool HandleControllerAxisEvent(const SDL_ControllerAxisEvent* ev);
-  bool HandleControllerButtonEvent(const SDL_ControllerButtonEvent* ev);
+  bool HandleGamepadAxisMotionEvent(const SDL_GamepadAxisEvent* ev);
+  bool HandleGamepadButtonEvent(const SDL_GamepadButtonEvent* ev);
+  bool HandleGamepadTouchpadEvent(const SDL_GamepadTouchpadEvent* ev);
   bool HandleJoystickAxisEvent(const SDL_JoyAxisEvent* ev);
   bool HandleJoystickButtonEvent(const SDL_JoyButtonEvent* ev);
   bool HandleJoystickHatEvent(const SDL_JoyHatEvent* ev);
@@ -100,6 +108,7 @@ private:
   bool m_sdl_subsystem_initialized = false;
   bool m_controller_enhanced_mode = false;
   bool m_controller_ps5_player_led = false;
+  bool m_controller_touchpad_as_pointer = false;
 
 #ifdef __APPLE__
   bool m_enable_iokit_driver = false;

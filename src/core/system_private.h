@@ -7,24 +7,31 @@
 
 #include <functional>
 
+class GPUBackend;
+struct GPUBackendFramePresentationParameters;
+
 namespace System {
 
 /// Memory save states - only for internal use.
 struct MemorySaveState
 {
-  std::unique_ptr<GPUTexture> vram_texture;
   DynamicHeapArray<u8> state_data;
   size_t state_size;
+
+  std::unique_ptr<GPUTexture> vram_texture;
+  DynamicHeapArray<u8> gpu_state_data;
+  size_t gpu_state_size;
 };
 
-bool SaveMemoryState(MemorySaveState* mss);
-bool LoadMemoryState(const MemorySaveState& mss);
+MemorySaveState& AllocateMemoryState();
+MemorySaveState& GetFirstMemoryState();
+MemorySaveState& PopMemoryState();
+bool AllocateMemoryStates(size_t state_count, bool recycle_old_textures);
+void FreeMemoryStateStorage(bool release_memory, bool release_textures, bool recycle_textures);
+void LoadMemoryState(MemorySaveState& mss, bool update_display);
+void SaveMemoryState(MemorySaveState& mss);
 
-/// Returns the maximum size of a save state, considering the current configuration.
-size_t GetMaxSaveStateSize();
-
-bool DoState(StateWrapper& sw, GPUTexture** host_texture, bool update_display, bool is_memory_state);
-
+bool IsRunaheadActive();
 void IncrementFrameNumber();
 void IncrementInternalFrameNumber();
 void FrameDone();
@@ -33,11 +40,18 @@ void FrameDone();
 GPUVSyncMode GetEffectiveVSyncMode();
 bool ShouldAllowPresentThrottle();
 
+/// Retrieves timing information for frame presentation on the GPU thread.
+/// Returns false if this frame should not be presented or the command buffer flushed.
+bool GetFramePresentationParameters(GPUBackendFramePresentationParameters* frame);
+
 /// Call when host display size changes.
 void DisplayWindowResized();
 
 /// Updates the internal GTE aspect ratio. Use with "match display" aspect ratio setting.
 void UpdateGTEAspectRatio();
+
+/// Immediately terminates the virtual machine, no state is saved.
+void AbnormalShutdown(const std::string_view reason);
 
 /// Performs mandatory hardware checks.
 bool PerformEarlyHardwareChecks(Error* error);
@@ -49,7 +63,7 @@ bool ProcessStartup(Error* error);
 void ProcessShutdown();
 
 /// Called on CPU thread initialization.
-bool CPUThreadInitialize(Error* error);
+bool CPUThreadInitialize(Error* error, u32 async_worker_thread_count);
 
 /// Called on CPU thread shutdown.
 void CPUThreadShutdown();
@@ -57,12 +71,11 @@ void CPUThreadShutdown();
 /// Returns a handle to the CPU thread.
 const Threading::ThreadHandle& GetCPUThreadHandle();
 
+/// Changes the CPU thread handle, use with care.
+void SetCPUThreadHandle(Threading::ThreadHandle handle);
+
 /// Polls input, updates subsystems which are present while paused/inactive.
 void IdlePollUpdate();
-
-/// Task threads, asynchronous work which will block system shutdown.
-void QueueTaskOnThread(std::function<void()> task);
-void RemoveSelfFromTaskThreads();
 
 } // namespace System
 
@@ -89,11 +102,11 @@ void OnSystemPaused();
 /// Called when the VM is resumed after being paused.
 void OnSystemResumed();
 
-/// Called when the pause state changes, or fullscreen UI opens.
-void OnIdleStateChanged();
+/// Called when the VM abnormally exits because an error has occurred, and it cannot continue.
+void OnSystemAbnormalShutdown(const std::string_view reason);
 
 /// Called when performance metrics are updated, approximately once a second.
-void OnPerformanceCountersUpdated();
+void OnPerformanceCountersUpdated(const GPUBackend* gpu_backend);
 
 /// Provided by the host; called when the running executable changes.
 void OnGameChanged(const std::string& disc_path, const std::string& game_serial, const std::string& game_name);

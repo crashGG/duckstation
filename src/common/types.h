@@ -93,9 +93,24 @@ char (&__countof_ArraySizeHelper(T (&array)[N]))[N];
   } while (0)
 #endif
 
+// __restrict, potentially enables optimization by hinting the compiler that the object is unique.
+#ifdef _MSC_VER
+#define RESTRICT __restrict
+#else
+#define RESTRICT __restrict__
+#endif
+
+// msvc requires a different attribute, of course
+#ifdef _MSC_VER
+#define NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
+#else
+#define NO_UNIQUE_ADDRESS [[no_unique_address]]
+#endif
+
 // disable warnings that show up at warning level 4
 // TODO: Move to build system instead
 #ifdef _MSC_VER
+#pragma warning(disable : 4200) // warning C4200: nonstandard extension used: zero-sized array in struct/union
 #pragma warning(disable : 4201) // warning C4201: nonstandard extension used : nameless struct/union
 #pragma warning(disable : 4100) // warning C4100: 'Platform' : unreferenced formal parameter
 #pragma warning(disable : 4355) // warning C4355: 'this' : used in base member initializer list

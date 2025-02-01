@@ -1,12 +1,17 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "core/achievements.h"
+#include "core/bus.h"
 #include "core/controller.h"
 #include "core/fullscreen_ui.h"
 #include "core/game_list.h"
 #include "core/gpu.h"
+#include "core/gpu_backend.h"
+#include "core/gpu_presenter.h"
+#include "core/gpu_thread.h"
 #include "core/host.h"
+#include "core/spu.h"
 #include "core/system.h"
 #include "core/system_private.h"
 
@@ -26,7 +31,9 @@
 #include "common/log.h"
 #include "common/memory_settings_interface.h"
 #include "common/path.h"
+#include "common/sha256_digest.h"
 #include "common/string_util.h"
+#include "common/threading.h"
 #include "common/timer.h"
 
 #include "fmt/format.h"
@@ -37,6 +44,7 @@
 LOG_CHANNEL(Host);
 
 namespace RegTestHost {
+
 static bool ParseCommandLineParameters(int argc, char* argv[], std::optional<SystemBootParameters>& autoboot);
 static void PrintCommandLineVersion();
 static void PrintCommandLineHelp(const char* progname);
@@ -45,10 +53,14 @@ static void InitializeEarlyConsole();
 static void HookSignals();
 static bool SetFolders();
 static bool SetNewDataRoot(const std::string& filename);
-static std::string GetFrameDumpFilename(u32 frame);
+static void DumpSystemStateHashes();
+static std::string GetFrameDumpPath(u32 frame);
+static void GPUThreadEntryPoint();
+
 } // namespace RegTestHost
 
 static std::unique_ptr<MemorySettingsInterface> s_base_settings_interface;
+static Threading::Thread s_gpu_thread;
 
 static u32 s_frames_to_run = 60 * 60;
 static u32 s_frames_remaining = 0;
@@ -100,8 +112,8 @@ bool RegTestHost::InitializeConfig()
   g_settings.Save(si, false);
   si.SetStringValue("GPU", "Renderer", Settings::GetRendererName(GPURenderer::Software));
   si.SetBoolValue("GPU", "DisableShaderCache", true);
-  si.SetStringValue("Pad1", "Type", Controller::GetControllerInfo(ControllerType::AnalogController)->name);
-  si.SetStringValue("Pad2", "Type", Controller::GetControllerInfo(ControllerType::None)->name);
+  si.SetStringValue("Pad1", "Type", Controller::GetControllerInfo(ControllerType::AnalogController).name);
+  si.SetStringValue("Pad2", "Type", Controller::GetControllerInfo(ControllerType::None).name);
   si.SetStringValue("MemoryCards", "Card1Type", Settings::GetMemoryCardTypeName(MemoryCardType::NonPersistent));
   si.SetStringValue("MemoryCards", "Card2Type", Settings::GetMemoryCardTypeName(MemoryCardType::None));
   si.SetStringValue("ControllerPorts", "MultitapMode", Settings::GetMultitapModeName(MultitapMode::Disabled));
@@ -119,9 +131,6 @@ bool RegTestHost::InitializeConfig()
 
   EmuFolders::LoadConfig(*s_base_settings_interface.get());
   EmuFolders::EnsureFoldersExist();
-
-  // imgui setup, make sure it doesn't bug out
-  ImGuiManager::SetFontPathAndRange(std::string(), {0x0020, 0x00FF, 0x2022, 0x2022, 0, 0});
 
   return true;
 }
@@ -150,7 +159,8 @@ bool Host::ConfirmMessage(std::string_view title, std::string_view message)
   return true;
 }
 
-void Host::ConfirmMessageAsync(std::string_view title, std::string_view message, ConfirmMessageAsyncCallback callback)
+void Host::ConfirmMessageAsync(std::string_view title, std::string_view message, ConfirmMessageAsyncCallback callback,
+                               std::string_view yes_text, std::string_view no_text)
 {
   if (!title.empty() && !message.empty())
     ERROR_LOG("ConfirmMessage: {}: {}", title, message);
@@ -281,12 +291,17 @@ void Host::OnSystemResumed()
   //
 }
 
-void Host::OnIdleStateChanged()
+void Host::OnSystemAbnormalShutdown(const std::string_view reason)
+{
+  // Already logged in core.
+}
+
+void Host::OnGPUThreadRunIdleChanged(bool is_active)
 {
   //
 }
 
-void Host::OnPerformanceCountersUpdated()
+void Host::OnPerformanceCountersUpdated(const GPUBackend* gpu_backend)
 {
   //
 }
@@ -312,7 +327,10 @@ void Host::PumpMessagesOnCPUThread()
 {
   s_frames_remaining--;
   if (s_frames_remaining == 0)
+  {
+    RegTestHost::DumpSystemStateHashes();
     System::ShutdownSystem(false);
+  }
 }
 
 void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false */)
@@ -362,6 +380,16 @@ void Host::ReleaseRenderWindow()
   //
 }
 
+void Host::BeginTextInput()
+{
+  //
+}
+
+void Host::EndTextInput()
+{
+  //
+}
+
 bool Host::CreateAuxiliaryRenderWindow(s32 x, s32 y, u32 width, u32 height, std::string_view title,
                                        std::string_view icon_name, AuxiliaryRenderWindowUserData userdata,
                                        AuxiliaryRenderWindowHandle* handle, WindowInfo* wi, Error* error)
@@ -375,14 +403,94 @@ void Host::DestroyAuxiliaryRenderWindow(AuxiliaryRenderWindowHandle handle, s32*
 {
 }
 
-void Host::FrameDone()
+void Host::FrameDoneOnGPUThread(GPUBackend* gpu_backend, u32 frame_number)
 {
-  const u32 frame = System::GetFrameNumber();
-  if (s_frame_dump_interval > 0 && (s_frame_dump_interval == 1 || (frame % s_frame_dump_interval) == 0))
+  const GPUPresenter& presenter = gpu_backend->GetPresenter();
+  if (s_frame_dump_interval == 0 || (frame_number % s_frame_dump_interval) != 0 || !presenter.HasDisplayTexture())
+    return;
+
+  // Need to take a copy of the display texture.
+  GPUTexture* const read_texture = presenter.GetDisplayTexture();
+  const u32 read_x = static_cast<u32>(presenter.GetDisplayTextureViewX());
+  const u32 read_y = static_cast<u32>(presenter.GetDisplayTextureViewY());
+  const u32 read_width = static_cast<u32>(presenter.GetDisplayTextureViewWidth());
+  const u32 read_height = static_cast<u32>(presenter.GetDisplayTextureViewHeight());
+  const ImageFormat read_format = GPUTexture::GetImageFormatForTextureFormat(read_texture->GetFormat());
+  if (read_format == ImageFormat::None)
+    return;
+
+  Image image(read_width, read_height, read_format);
+  std::unique_ptr<GPUDownloadTexture> dltex;
+  if (g_gpu_device->GetFeatures().memory_import)
   {
-    std::string dump_filename(RegTestHost::GetFrameDumpFilename(frame));
-    g_gpu->WriteDisplayTextureToFile(std::move(dump_filename));
+    dltex = g_gpu_device->CreateDownloadTexture(read_width, read_height, read_texture->GetFormat(), image.GetPixels(),
+                                                image.GetStorageSize(), image.GetPitch());
   }
+  if (!dltex)
+  {
+    if (!(dltex = g_gpu_device->CreateDownloadTexture(read_width, read_height, read_texture->GetFormat())))
+    {
+      ERROR_LOG("Failed to create {}x{} {} download texture", read_width, read_height,
+                GPUTexture::GetFormatName(read_texture->GetFormat()));
+      return;
+    }
+  }
+
+  dltex->CopyFromTexture(0, 0, read_texture, read_x, read_y, read_width, read_height, 0, 0, !dltex->IsImported());
+  if (!dltex->ReadTexels(0, 0, read_width, read_height, image.GetPixels(), image.GetPitch()))
+  {
+    ERROR_LOG("Failed to read {}x{} download texture", read_width, read_height);
+    gpu_backend->RestoreDeviceContext();
+    return;
+  }
+
+  // no more GPU calls
+  gpu_backend->RestoreDeviceContext();
+
+  Error error;
+  const std::string path = RegTestHost::GetFrameDumpPath(frame_number);
+  auto fp = FileSystem::OpenManagedCFile(path.c_str(), "wb", &error);
+  if (!fp)
+  {
+    ERROR_LOG("Can't open file '{}': {}", Path::GetFileName(path), error.GetDescription());
+    return;
+  }
+
+  System::QueueAsyncTask([path = std::move(path), fp = fp.release(), flip_y = g_gpu_device->UsesLowerLeftOrigin(),
+                          image = std::move(image)]() mutable {
+    Error error;
+
+    if (flip_y)
+      image.FlipY();
+
+    if (image.GetFormat() != ImageFormat::RGBA8)
+    {
+      std::optional<Image> convert_image = image.ConvertToRGBA8(&error);
+      if (!convert_image.has_value())
+      {
+        ERROR_LOG("Failed to convert {} screenshot to RGBA8: {}", Image::GetFormatName(image.GetFormat()),
+                  error.GetDescription());
+        image.Invalidate();
+      }
+      else
+      {
+        image = std::move(convert_image.value());
+      }
+    }
+
+    bool result = false;
+    if (image.IsValid())
+    {
+      image.SetAllPixelsOpaque();
+
+      result = image.SaveToFile(path.c_str(), fp, Image::DEFAULT_SAVE_QUALITY, &error);
+      if (!result)
+        ERROR_LOG("Failed to save screenshot to '{}': '{}'", Path::GetFileName(path), error.GetDescription());
+    }
+
+    std::fclose(fp);
+    return result;
+  });
 }
 
 void Host::OpenURL(std::string_view url)
@@ -462,7 +570,7 @@ void Host::AddFixedInputBindings(const SettingsInterface& si)
   // noop
 }
 
-void Host::OnInputDeviceConnected(std::string_view identifier, std::string_view device_name)
+void Host::OnInputDeviceConnected(InputBindingKey key, std::string_view identifier, std::string_view device_name)
 {
   // noop
 }
@@ -487,6 +595,11 @@ void Host::CancelGameListRefresh()
   // noop
 }
 
+void Host::OnGameListEntriesChanged(std::span<const u32> changed_indices)
+{
+  // noop
+}
+
 BEGIN_HOTKEY_LIST(g_host_hotkeys)
 END_HOTKEY_LIST()
 
@@ -506,6 +619,38 @@ void RegTestHost::HookSignals()
 {
   std::signal(SIGINT, SignalHandler);
   std::signal(SIGTERM, SignalHandler);
+}
+
+void RegTestHost::GPUThreadEntryPoint()
+{
+  Threading::SetNameOfCurrentThread("CPU Thread");
+  GPUThread::Internal::GPUThreadEntryPoint();
+}
+
+void RegTestHost::DumpSystemStateHashes()
+{
+  Error error;
+
+  // don't save full state on gpu dump, it's not going to be complete...
+  if (!System::IsReplayingGPUDump())
+  {
+    DynamicHeapArray<u8> state_data(System::GetMaxSaveStateSize());
+    size_t state_data_size;
+    if (!System::SaveStateDataToBuffer(state_data, &state_data_size, &error))
+    {
+      ERROR_LOG("Failed to save system state: {}", error.GetDescription());
+      return;
+    }
+
+    INFO_LOG("Save State Hash: {}",
+             SHA256Digest::DigestToString(SHA256Digest::GetDigest(state_data.cspan(0, state_data_size))));
+    INFO_LOG("RAM Hash: {}",
+             SHA256Digest::DigestToString(SHA256Digest::GetDigest(std::span<const u8>(Bus::g_ram, Bus::g_ram_size))));
+    INFO_LOG("SPU RAM Hash: {}", SHA256Digest::DigestToString(SHA256Digest::GetDigest(SPU::GetRAM())));
+  }
+
+  INFO_LOG("VRAM Hash: {}", SHA256Digest::DigestToString(SHA256Digest::GetDigest(
+                              std::span<const u8>(reinterpret_cast<const u8*>(g_vram), VRAM_SIZE))));
 }
 
 void RegTestHost::InitializeEarlyConsole()
@@ -538,7 +683,11 @@ void RegTestHost::PrintCommandLineHelp(const char* progname)
   std::fprintf(stderr, "  -dumpinterval: Dumps every N frames.\n");
   std::fprintf(stderr, "  -frames: Sets the number of frames to execute.\n");
   std::fprintf(stderr, "  -log <level>: Sets the log level. Defaults to verbose.\n");
+  std::fprintf(stderr, "  -console: Enables console logging output.\n");
+  std::fprintf(stderr, "  -pgxp: Enables PGXP.\n");
+  std::fprintf(stderr, "  -pgxp-cpu: Forces PGXP CPU mode.\n");
   std::fprintf(stderr, "  -renderer <renderer>: Sets the graphics renderer. Default to software.\n");
+  std::fprintf(stderr, "  -upscale <multiplier>: Enables upscaled rendering at the specified multiplier.\n");
   std::fprintf(stderr, "  --: Signals that no more arguments will follow and the remaining\n"
                        "    parameters make up the filename. Use when the filename contains\n"
                        "    spaces or starts with a dash.\n");
@@ -619,7 +768,7 @@ bool RegTestHost::ParseCommandLineParameters(int argc, char* argv[], std::option
         s_base_settings_interface->SetStringValue("Logging", "LogLevel", Settings::GetLogLevelName(level.value()));
         continue;
       }
-      else if (CHECK_ARG_PARAM("-console"))
+      else if (CHECK_ARG("-console"))
       {
         Log::SetConsoleOutputParams(true);
         s_base_settings_interface->SetBoolValue("Logging", "LogToConsole", true);
@@ -702,14 +851,6 @@ bool RegTestHost::ParseCommandLineParameters(int argc, char* argv[], std::option
 
 bool RegTestHost::SetNewDataRoot(const std::string& filename)
 {
-  Error error;
-  std::unique_ptr<CDImage> image = CDImage::Open(filename.c_str(), false, &error);
-  if (!image)
-  {
-    ERROR_LOG("Failed to open CD image '{}' to set data root: {}", Path::GetFileName(filename), error.GetDescription());
-    return false;
-  }
-
   if (!s_dump_base_directory.empty())
   {
     std::string game_subdir = Path::SanitizeFileName(Path::GetFileTitle(filename));
@@ -734,7 +875,7 @@ bool RegTestHost::SetNewDataRoot(const std::string& filename)
   return true;
 }
 
-std::string RegTestHost::GetFrameDumpFilename(u32 frame)
+std::string RegTestHost::GetFrameDumpPath(u32 frame)
 {
   return Path::Combine(EmuFolders::DataRoot, fmt::format("frame_{:05d}.png", frame));
 }
@@ -766,13 +907,15 @@ int main(int argc, char* argv[])
   if (!RegTestHost::SetNewDataRoot(autoboot->filename))
     return EXIT_FAILURE;
 
-  if (!System::CPUThreadInitialize(&startup_error))
+  // Only one async worker.
+  if (!System::CPUThreadInitialize(&startup_error, 1))
   {
     ERROR_LOG("CPUThreadInitialize() failed: {}", startup_error.GetDescription());
     return EXIT_FAILURE;
   }
 
   RegTestHost::HookSignals();
+  s_gpu_thread.Start(&RegTestHost::GPUThreadEntryPoint);
 
   Error error;
   int result = -1;
@@ -781,6 +924,13 @@ int main(int argc, char* argv[])
   {
     ERROR_LOG("Failed to boot system: {}", error.GetDescription());
     goto cleanup;
+  }
+
+  if (System::IsReplayingGPUDump() && !s_dump_base_directory.empty())
+  {
+    INFO_LOG("Replaying GPU dump, dumping all frames.");
+    s_frame_dump_interval = 1;
+    s_frames_to_run = static_cast<u32>(System::GetGPUDumpFrameCount());
   }
 
   if (s_frame_dump_interval > 0)
@@ -813,6 +963,12 @@ int main(int argc, char* argv[])
   result = 0;
 
 cleanup:
+  if (s_gpu_thread.Joinable())
+  {
+    GPUThread::Internal::RequestShutdown();
+    s_gpu_thread.Join();
+  }
+
   System::CPUThreadShutdown();
   System::ProcessShutdown();
   return result;

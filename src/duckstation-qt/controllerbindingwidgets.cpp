@@ -61,23 +61,14 @@ ControllerBindingWidget::~ControllerBindingWidget() = default;
 
 void ControllerBindingWidget::populateControllerTypes()
 {
-  for (u32 i = 0; i < static_cast<u32>(ControllerType::Count); i++)
-  {
-    const ControllerType ctype = static_cast<ControllerType>(i);
-    const Controller::ControllerInfo* cinfo = Controller::GetControllerInfo(ctype);
-    if (!cinfo)
-      continue;
-
-    m_ui.controllerType->addItem(QString::fromUtf8(cinfo->GetDisplayName()), QVariant(static_cast<int>(i)));
-  }
+  for (const Controller::ControllerInfo* cinfo : Controller::GetControllerInfoList())
+    m_ui.controllerType->addItem(QString::fromUtf8(cinfo->GetDisplayName()), QVariant(static_cast<int>(cinfo->type)));
 
   m_controller_info = Controller::GetControllerInfo(
-    m_dialog->getStringValue(m_config_section.c_str(), "Type", Controller::GetDefaultPadType(m_port_number)));
+    m_dialog->getStringValue(m_config_section.c_str(), "Type",
+                             Controller::GetControllerInfo(Settings::GetDefaultControllerType(m_port_number)).name));
   if (!m_controller_info)
-  {
-    m_controller_info = Controller::GetControllerInfo(m_port_number == 0 ? Settings::DEFAULT_CONTROLLER_1_TYPE :
-                                                                           Settings::DEFAULT_CONTROLLER_2_TYPE);
-  }
+    m_controller_info = &Controller::GetControllerInfo(Settings::GetDefaultControllerType(m_port_number));
 
   const int index = m_ui.controllerType->findData(QVariant(static_cast<int>(m_controller_info->type)));
   if (index >= 0 && index != m_ui.controllerType->currentIndex())
@@ -247,8 +238,7 @@ void ControllerBindingWidget::onTypeChanged()
   if (!ok || index < 0 || index >= static_cast<int>(ControllerType::Count))
     return;
 
-  m_controller_info = Controller::GetControllerInfo(static_cast<ControllerType>(index));
-  DebugAssert(m_controller_info);
+  m_controller_info = &Controller::GetControllerInfo(static_cast<ControllerType>(index));
 
   SettingsInterface* sif = m_dialog->getEditingSettingsInterface();
   if (sif)
@@ -272,22 +262,23 @@ void ControllerBindingWidget::onAutomaticBindingClicked()
   QMenu menu(this);
   bool added = false;
 
-  const auto& device_list = m_dialog->isEditingGameSettings() ?
-                              g_main_window->getControllerSettingsWindow()->getDeviceList() :
-                              m_dialog->getDeviceList();
-  for (const auto& [identifier, device_name] : device_list)
+  for (const InputDeviceListModel::Device& dev : g_emu_thread->getInputDeviceListModel()->getDeviceList())
   {
     // we set it as data, because the device list could get invalidated while the menu is up
-    const QString qidentifier = QString::fromStdString(identifier);
-    QAction* action =
-      menu.addAction(QStringLiteral("%1 (%2)").arg(qidentifier).arg(QString::fromStdString(device_name)));
-    action->setData(qidentifier);
+    QAction* action = menu.addAction(QStringLiteral("%1 (%2)").arg(dev.identifier).arg(dev.display_name));
+    action->setIcon(InputDeviceListModel::getIconForKey(dev.key));
+    action->setData(dev.identifier);
     connect(action, &QAction::triggered, this,
             [this, action]() { doDeviceAutomaticBinding(action->data().toString()); });
     added = true;
   }
 
-  if (!added)
+  if (added)
+  {
+    QAction* action = menu.addAction(tr("Multiple devices..."));
+    connect(action, &QAction::triggered, this, &ControllerBindingWidget::onMultipleDeviceAutomaticBindingTriggered);
+  }
+  else
   {
     QAction* action = menu.addAction(tr("No devices available"));
     action->setEnabled(false);
@@ -360,11 +351,11 @@ void ControllerBindingWidget::doDeviceAutomaticBinding(const QString& device)
   if (m_dialog->isEditingGlobalSettings())
   {
     auto lock = Host::GetSettingsLock();
-    result = InputManager::MapController(*Host::Internal::GetBaseSettingsLayer(), m_port_number, mapping);
+    result = InputManager::MapController(*Host::Internal::GetBaseSettingsLayer(), m_port_number, mapping, true);
   }
   else
   {
-    result = InputManager::MapController(*m_dialog->getEditingSettingsInterface(), m_port_number, mapping);
+    result = InputManager::MapController(*m_dialog->getEditingSettingsInterface(), m_port_number, mapping, true);
     QtHost::SaveGameSettings(m_dialog->getEditingSettingsInterface(), false);
     g_emu_thread->reloadInputBindings();
   }
@@ -372,6 +363,104 @@ void ControllerBindingWidget::doDeviceAutomaticBinding(const QString& device)
   // force a refresh after mapping
   if (result)
     saveAndRefresh();
+}
+
+void ControllerBindingWidget::onMultipleDeviceAutomaticBindingTriggered()
+{
+  // force a refresh after mapping
+  if (doMultipleDeviceAutomaticBinding(this, m_dialog, m_port_number))
+    onTypeChanged();
+}
+
+bool ControllerBindingWidget::doMultipleDeviceAutomaticBinding(QWidget* parent, ControllerSettingsWindow* parent_dialog,
+                                                               u32 port)
+{
+  QDialog dialog(parent);
+
+  QVBoxLayout* layout = new QVBoxLayout(&dialog);
+  QLabel help(tr("Select the devices from the list below that you want to bind to this controller."), &dialog);
+  layout->addWidget(&help);
+
+  QListWidget list(&dialog);
+  list.setSelectionMode(QListWidget::SingleSelection);
+  layout->addWidget(&list);
+
+  for (const InputDeviceListModel::Device& dev : g_emu_thread->getInputDeviceListModel()->getDeviceList())
+  {
+    QListWidgetItem* item = new QListWidgetItem;
+    item->setText(QStringLiteral("%1 (%2)").arg(dev.identifier).arg(dev.display_name));
+    item->setData(Qt::UserRole, dev.identifier);
+    item->setIcon(InputDeviceListModel::getIconForKey(dev.key));
+    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+    item->setCheckState(Qt::Unchecked);
+    list.addItem(item);
+  }
+
+  QDialogButtonBox bb(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  connect(&bb, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(&bb, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  layout->addWidget(&bb);
+
+  if (dialog.exec() == 0)
+    return false;
+
+  auto lock = Host::GetSettingsLock();
+  const bool global = (!parent_dialog || parent_dialog->isEditingGlobalSettings());
+  SettingsInterface& si =
+    *(global ? Host::Internal::GetBaseSettingsLayer() : parent_dialog->getEditingSettingsInterface());
+
+  // first device should clear mappings
+  bool tried_any = false;
+  bool mapped_any = false;
+  const int count = list.count();
+  for (int i = 0; i < count; i++)
+  {
+    QListWidgetItem* item = list.item(i);
+    if (item->checkState() != Qt::Checked)
+      continue;
+
+    tried_any = true;
+
+    const QString identifier = item->data(Qt::UserRole).toString();
+    std::vector<std::pair<GenericInputBinding, std::string>> mapping =
+      InputManager::GetGenericBindingMapping(identifier.toStdString());
+    if (mapping.empty())
+    {
+      lock.unlock();
+      QMessageBox::critical(QtUtils::GetRootWidget(parent), tr("Automatic Mapping"),
+                            tr("No generic bindings were generated for device '%1'. The controller/source may not "
+                               "support automatic mapping.")
+                              .arg(identifier));
+      lock.lock();
+      continue;
+    }
+
+    mapped_any |= InputManager::MapController(si, port, mapping, !mapped_any);
+  }
+
+  lock.unlock();
+
+  if (!tried_any)
+  {
+    QMessageBox::information(QtUtils::GetRootWidget(parent), tr("Automatic Mapping"), tr("No devices were selected."));
+    return false;
+  }
+
+  if (mapped_any)
+  {
+    if (global)
+    {
+      QtHost::SaveGameSettings(&si, false);
+      g_emu_thread->reloadGameSettings(false);
+    }
+    else
+    {
+      QtHost::QueueSettingsSave();
+      g_emu_thread->reloadInputBindings();
+    }
+  }
+
+  return mapped_any;
 }
 
 void ControllerBindingWidget::saveAndRefresh()
@@ -406,7 +495,7 @@ void ControllerBindingWidget::createBindingWidgets(QWidget* parent)
   {
     if (bi.type == InputBindingInfo::Type::Axis || bi.type == InputBindingInfo::Type::HalfAxis ||
         bi.type == InputBindingInfo::Type::Pointer || bi.type == InputBindingInfo::Type::RelativePointer ||
-        bi.type == InputBindingInfo::Type::Device)
+        bi.type == InputBindingInfo::Type::Device || bi.type == InputBindingInfo::Type::Motor)
     {
       if (!axis_gbox)
       {
@@ -416,7 +505,12 @@ void ControllerBindingWidget::createBindingWidgets(QWidget* parent)
 
       QGroupBox* gbox = new QGroupBox(QString::fromUtf8(m_controller_info->GetBindingDisplayName(bi)), axis_gbox);
       QVBoxLayout* temp = new QVBoxLayout(gbox);
-      InputBindingWidget* widget = new InputBindingWidget(gbox, sif, bi.type, getConfigSection(), bi.name);
+      QWidget* widget;
+      if (bi.type != InputBindingInfo::Type::Motor)
+        widget = new InputBindingWidget(gbox, sif, bi.type, getConfigSection(), bi.name);
+      else
+        widget = new InputVibrationBindingWidget(gbox, getDialog(), getConfigSection(), bi.name);
+
       temp->addWidget(widget);
       axis_layout->addWidget(gbox, row, column);
       if ((++column) == NUM_AXIS_COLUMNS)
@@ -426,41 +520,7 @@ void ControllerBindingWidget::createBindingWidgets(QWidget* parent)
       }
     }
   }
-  if (m_controller_info->vibration_caps != Controller::VibrationCapabilities::NoVibration)
-  {
-    const bool dual_motors = (m_controller_info->vibration_caps == Controller::VibrationCapabilities::LargeSmallMotors);
-    if (!axis_gbox)
-    {
-      axis_gbox = new QGroupBox(tr("Axes"), scrollarea_widget);
-      axis_layout = new QGridLayout(axis_gbox);
-    }
 
-    QGroupBox* gbox = new QGroupBox(dual_motors ? tr("Large Motor") : tr("Vibration"), axis_gbox);
-    QVBoxLayout* temp = new QVBoxLayout(gbox);
-    InputVibrationBindingWidget* widget =
-      new InputVibrationBindingWidget(gbox, getDialog(), getConfigSection(), dual_motors ? "LargeMotor" : "Motor");
-    temp->addWidget(widget);
-    axis_layout->addWidget(gbox, row, column);
-    if ((++column) == NUM_AXIS_COLUMNS)
-    {
-      column = 0;
-      row++;
-    }
-
-    if (m_controller_info->vibration_caps == Controller::VibrationCapabilities::LargeSmallMotors)
-    {
-      gbox = new QGroupBox(tr("Small Motor"), axis_gbox);
-      temp = new QVBoxLayout(gbox);
-      widget = new InputVibrationBindingWidget(gbox, getDialog(), getConfigSection(), "SmallMotor");
-      temp->addWidget(widget);
-      axis_layout->addWidget(gbox, row, column);
-      if ((++column) == NUM_AXIS_COLUMNS)
-      {
-        column = 0;
-        row++;
-      }
-    }
-  }
   if (axis_gbox)
     axis_layout->addItem(new QSpacerItem(1, 1, QSizePolicy::Minimum, QSizePolicy::Expanding), ++row, 0);
 
@@ -531,34 +591,12 @@ void ControllerBindingWidget::bindBindingWidgets(QWidget* parent)
 
       widget->initialize(sif, bi.type, config_section, bi.name);
     }
-  }
-
-  switch (m_controller_info->vibration_caps)
-  {
-    case Controller::VibrationCapabilities::LargeSmallMotors:
+    else if (bi.type == InputBindingInfo::Type::Motor)
     {
-      InputVibrationBindingWidget* widget =
-        parent->findChild<InputVibrationBindingWidget*>(QStringLiteral("LargeMotor"));
+      InputVibrationBindingWidget* widget = parent->findChild<InputVibrationBindingWidget*>(QString::fromUtf8(bi.name));
       if (widget)
-        widget->setKey(getDialog(), config_section, "LargeMotor");
-
-      widget = parent->findChild<InputVibrationBindingWidget*>(QStringLiteral("SmallMotor"));
-      if (widget)
-        widget->setKey(getDialog(), config_section, "SmallMotor");
+        widget->setKey(getDialog(), config_section, bi.name);
     }
-    break;
-
-    case Controller::VibrationCapabilities::SingleMotor:
-    {
-      InputVibrationBindingWidget* widget = parent->findChild<InputVibrationBindingWidget*>(QStringLiteral("Motor"));
-      if (widget)
-        widget->setKey(getDialog(), config_section, "Motor");
-    }
-    break;
-
-    case Controller::VibrationCapabilities::NoVibration:
-    default:
-      break;
   }
 }
 

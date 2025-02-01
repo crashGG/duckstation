@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #pragma once
@@ -39,8 +39,8 @@ public:
   void Shutdown() override;
 
   void PollEvents() override;
-  std::vector<std::pair<std::string, std::string>> EnumerateDevices() override;
-  std::vector<InputBindingKey> EnumerateMotors() override;
+  InputManager::DeviceList EnumerateDevices() override;
+  InputManager::VibrationMotorList EnumerateVibrationMotors(std::optional<InputBindingKey> for_device) override;
   bool GetGenericBindingMapping(std::string_view device, GenericInputBindingMapping* mapping) override;
   void UpdateMotorState(InputBindingKey key, float intensity) override;
   void UpdateMotorState(InputBindingKey large_key, InputBindingKey small_key, float large_intensity,
@@ -49,7 +49,7 @@ public:
   bool ContainsDevice(std::string_view device) const override;
   std::optional<InputBindingKey> ParseKeyString(std::string_view device, std::string_view binding) override;
   TinyString ConvertKeyToString(InputBindingKey key) override;
-  TinyString ConvertKeyToIcon(InputBindingKey key) override;
+  TinyString ConvertKeyToIcon(InputBindingKey key, InputManager::BindingIconMappingFunction mapper) override;
 
   std::unique_ptr<ForceFeedbackDevice> CreateForceFeedbackDevice(std::string_view device, Error* error) override;
 

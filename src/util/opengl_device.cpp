@@ -418,16 +418,16 @@ bool OpenGLDevice::CheckFeatures(FeatureMask disabled_features)
 
 #ifdef __APPLE__
   // Partial texture buffer uploads appear to be broken in macOS's OpenGL driver.
-  m_features.supports_texture_buffers = false;
+  m_features.texture_buffers = false;
 #else
-  m_features.supports_texture_buffers =
+  m_features.texture_buffers =
     !(disabled_features & FEATURE_MASK_TEXTURE_BUFFERS) && (GLAD_GL_VERSION_3_1 || GLAD_GL_ES_VERSION_3_2);
 
   // And Samsung's ANGLE/GLES driver?
   if (std::strstr(reinterpret_cast<const char*>(glGetString(GL_RENDERER)), "ANGLE"))
-    m_features.supports_texture_buffers = false;
+    m_features.texture_buffers = false;
 
-  if (m_features.supports_texture_buffers)
+  if (m_features.texture_buffers)
   {
     GLint max_texel_buffer_size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, reinterpret_cast<GLint*>(&max_texel_buffer_size));
@@ -436,12 +436,12 @@ bool OpenGLDevice::CheckFeatures(FeatureMask disabled_features)
     {
       WARNING_LOG("GL_MAX_TEXTURE_BUFFER_SIZE ({}) is below required minimum ({}), not using texture buffers.",
                   max_texel_buffer_size, MIN_TEXEL_BUFFER_ELEMENTS);
-      m_features.supports_texture_buffers = false;
+      m_features.texture_buffers = false;
     }
   }
 #endif
 
-  if (!m_features.supports_texture_buffers && !(disabled_features & FEATURE_MASK_TEXTURE_BUFFERS))
+  if (!m_features.texture_buffers && !(disabled_features & FEATURE_MASK_TEXTURE_BUFFERS))
   {
     // Try SSBOs.
     GLint max_fragment_storage_blocks = 0;
@@ -459,7 +459,7 @@ bool OpenGLDevice::CheckFeatures(FeatureMask disabled_features)
     if (m_features.texture_buffers_emulated_with_ssbo)
     {
       INFO_LOG("Using shader storage buffers for VRAM writes.");
-      m_features.supports_texture_buffers = true;
+      m_features.texture_buffers = true;
     }
     else
     {
@@ -489,6 +489,7 @@ bool OpenGLDevice::CheckFeatures(FeatureMask disabled_features)
                             (!GLAD_GL_EXT_disjoint_timer_query || !glGetQueryObjectivEXT || !glGetQueryObjectui64vEXT));
   m_features.partial_msaa_resolve = true;
   m_features.memory_import = true;
+  m_features.exclusive_fullscreen = false;
   m_features.explicit_present = false;
   m_features.timed_present = false;
 
@@ -656,13 +657,15 @@ std::string OpenGLDevice::GetDriverInfo() const
 void OpenGLDevice::FlushCommands()
 {
   glFlush();
+  EndTimestampQuery();
   TrimTexturePool();
 }
 
 void OpenGLDevice::WaitForGPUIdle()
 {
-  // Could be glFinish(), but I'm afraid for mobile drivers...
-  glFlush();
+  glFinish();
+  EndTimestampQuery();
+  TrimTexturePool();
 }
 
 void OpenGLDevice::RenderBlankFrame()
@@ -744,6 +747,7 @@ bool OpenGLDevice::CreateBuffers()
   GL_OBJECT_NAME(m_uniform_buffer, "Device Uniform Buffer");
 
   glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, reinterpret_cast<GLint*>(&m_uniform_buffer_alignment));
+  m_uniform_buffer_alignment = std::max<GLuint>(m_uniform_buffer_alignment, 16);
 
   if (!m_disable_pbo)
   {
@@ -793,7 +797,7 @@ GPUDevice::PresentResult OpenGLDevice::BeginPresent(GPUSwapChain* swap_chain, u3
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDisable(GL_SCISSOR_TEST);
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-  glClearBufferfv(GL_COLOR, 0, GSVector4::rgba32(clear_color).F32);
+  glClearBufferfv(GL_COLOR, 0, GSVector4::unorm8(clear_color).F32);
   glColorMask(m_last_blend_state.write_r, m_last_blend_state.write_g, m_last_blend_state.write_b,
               m_last_blend_state.write_a);
   glEnable(GL_SCISSOR_TEST);
@@ -818,12 +822,15 @@ void OpenGLDevice::EndPresent(GPUSwapChain* swap_chain, bool explicit_present, u
   DebugAssert(m_current_fbo == 0);
 
   if (swap_chain == m_main_swap_chain.get() && m_gpu_timing_enabled)
+  {
     PopTimestampQuery();
+    EndTimestampQuery();
+  }
 
   m_gl_context->SwapBuffers();
 
   if (swap_chain == m_main_swap_chain.get() && m_gpu_timing_enabled)
-    KickTimestampQuery();
+    StartTimestampQuery();
 
   TrimTexturePool();
 }
@@ -839,7 +846,7 @@ void OpenGLDevice::CreateTimestampQueries()
   const auto GenQueries = gles ? glGenQueriesEXT : glGenQueries;
 
   GenQueries(static_cast<u32>(m_timestamp_queries.size()), m_timestamp_queries.data());
-  KickTimestampQuery();
+  StartTimestampQuery();
 }
 
 void OpenGLDevice::DestroyTimestampQueries()
@@ -866,8 +873,7 @@ void OpenGLDevice::DestroyTimestampQueries()
 
 void OpenGLDevice::PopTimestampQuery()
 {
-  const bool gles = m_gl_context->IsGLES();
-
+  const bool gles = IsGLES();
   if (gles)
   {
     GLint disjoint = 0;
@@ -885,11 +891,10 @@ void OpenGLDevice::PopTimestampQuery()
     }
   }
 
+  const auto GetQueryObjectiv = gles ? glGetQueryObjectivEXT : glGetQueryObjectiv;
+  const auto GetQueryObjectui64v = gles ? glGetQueryObjectui64vEXT : glGetQueryObjectui64v;
   while (m_waiting_timestamp_queries > 0)
   {
-    const auto GetQueryObjectiv = gles ? glGetQueryObjectivEXT : glGetQueryObjectiv;
-    const auto GetQueryObjectui64v = gles ? glGetQueryObjectui64vEXT : glGetQueryObjectui64v;
-
     GLint available = 0;
     GetQueryObjectiv(m_timestamp_queries[m_read_timestamp_query], GL_QUERY_RESULT_AVAILABLE, &available);
     if (!available)
@@ -901,28 +906,31 @@ void OpenGLDevice::PopTimestampQuery()
     m_read_timestamp_query = (m_read_timestamp_query + 1) % NUM_TIMESTAMP_QUERIES;
     m_waiting_timestamp_queries--;
   }
+}
 
+void OpenGLDevice::StartTimestampQuery()
+{
+  if (m_timestamp_query_started || m_waiting_timestamp_queries == NUM_TIMESTAMP_QUERIES)
+    return;
+
+  const bool gles = IsGLES();
+  const auto BeginQuery = gles ? glBeginQueryEXT : glBeginQuery;
+
+  BeginQuery(GL_TIME_ELAPSED, m_timestamp_queries[m_write_timestamp_query]);
+  m_timestamp_query_started = true;
+}
+
+void OpenGLDevice::EndTimestampQuery()
+{
   if (m_timestamp_query_started)
   {
-    const auto EndQuery = gles ? glEndQueryEXT : glEndQuery;
+    const auto EndQuery = IsGLES() ? glEndQueryEXT : glEndQuery;
     EndQuery(GL_TIME_ELAPSED);
 
     m_write_timestamp_query = (m_write_timestamp_query + 1) % NUM_TIMESTAMP_QUERIES;
     m_timestamp_query_started = false;
     m_waiting_timestamp_queries++;
   }
-}
-
-void OpenGLDevice::KickTimestampQuery()
-{
-  if (m_timestamp_query_started || m_waiting_timestamp_queries == NUM_TIMESTAMP_QUERIES)
-    return;
-
-  const bool gles = m_gl_context->IsGLES();
-  const auto BeginQuery = gles ? glBeginQueryEXT : glBeginQuery;
-
-  BeginQuery(GL_TIME_ELAPSED, m_timestamp_queries[m_write_timestamp_query]);
-  m_timestamp_query_started = true;
 }
 
 bool OpenGLDevice::SetGPUTimingEnabled(bool enabled)

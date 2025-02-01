@@ -96,6 +96,11 @@ float JogCon::GetBindState(u32 index) const
   }
 }
 
+float JogCon::GetVibrationMotorState(u32 index) const
+{
+  return (index == 0) ? m_last_strength : 0.0f;
+}
+
 void JogCon::SetBindState(u32 index, float value)
 {
   if (index == static_cast<u32>(Button::Mode))
@@ -275,7 +280,13 @@ void JogCon::SetMotorDirection(u8 direction_command, u8 strength)
     DEV_LOG("Stop motor");
     if (m_force_feedback_device)
       m_force_feedback_device->DisableForce(ForceFeedbackDevice::Effect::Constant);
-    InputManager::SetPadVibrationIntensity(m_index, 0.0f, 0.0f);
+
+    if (m_last_strength != 0.0f)
+    {
+      m_last_strength = 0.0f;
+      InputManager::SetPadVibrationIntensity(m_index, 0.0f, 0.0f);
+    }
+
     return;
   }
 
@@ -290,7 +301,11 @@ void JogCon::SetMotorDirection(u8 direction_command, u8 strength)
     m_force_feedback_device->SetConstantForce(ffb_value);
   }
 
-  InputManager::SetPadVibrationIntensity(m_index, f_strength, 0.0f);
+  if (f_strength != m_last_strength)
+  {
+    m_last_strength = f_strength;
+    InputManager::SetPadVibrationIntensity(m_index, f_strength, 0.0f);
+  }
 }
 
 void JogCon::UpdateSteeringHold()
@@ -376,6 +391,14 @@ bool JogCon::Transfer(const u8 data_in, u8* data_out)
         m_tx_buffer = {GetIDByte(), m_status_byte, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         Poll();
       }
+      else if (m_configuration_mode && data_in == 0x44)
+      {
+        Assert(m_command_step == 0);
+        m_response_length = (GetResponseNumHalfwords() + 1) * 2;
+        m_command = Command::SetAnalogMode;
+        m_tx_buffer = {GetIDByte(), m_status_byte, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        ResetMotorConfig();
+      }
       else if (m_configuration_mode && data_in == 0x45)
       {
         m_response_length = (GetResponseNumHalfwords() + 1) * 2;
@@ -426,6 +449,25 @@ bool JogCon::Transfer(const u8 data_in, u8* data_out)
     case Command::GetAnalogMode:
     {
       // just send the byte, nothing special to do here
+    }
+    break;
+
+    case Command::SetAnalogMode:
+    {
+      if (m_command_step == 2)
+      {
+        DEV_LOG("analog mode val 0x{:02x}", data_in);
+
+        if (data_in == 0x00 || data_in == 0x01)
+          SetJogConMode(data_in == 0x01, true);
+      }
+      else if (m_command_step == 3)
+      {
+        DEV_LOG("analog mode lock 0x{:02x}", data_in);
+
+        if (data_in == 0x02 || data_in == 0x03)
+          WARNING_LOG("Unimplemented analog mode lock {}", (data_in == 0x03));
+      }
     }
     break;
 
@@ -605,6 +647,9 @@ static const Controller::ControllerBindingInfo s_binding_info[] = {
 
   // clang-format on
 
+  {"Motor", TRANSLATE_NOOP("JogCon", "Vibration Motor"), ICON_PF_VIBRATION, 0u, InputBindingInfo::Type::Motor,
+   GenericInputBinding::LargeMotor},
+
   {"ForceFeedbackDevice", TRANSLATE_NOOP("JogCon", "Force Feedback Device"), nullptr,
    static_cast<u32>(JogCon::Button::MaxCount) + static_cast<u32>(JogCon::HalfAxis::MaxCount),
    InputBindingInfo::Type::Device, GenericInputBinding::Unknown},
@@ -634,5 +679,5 @@ static const SettingInfo s_settings[] = {
 };
 
 const Controller::ControllerInfo JogCon::INFO = {
-  ControllerType::JogCon, "JogCon",   TRANSLATE_NOOP("ControllerType", "JogCon"),    ICON_PF_STEERING_WHEEL,
-  s_binding_info,         s_settings, Controller::VibrationCapabilities::SingleMotor};
+  ControllerType::JogCon,    "JogCon",       TRANSLATE_NOOP("ControllerType", "JogCon"),
+  ICON_PF_JOGCON_CONTROLLER, s_binding_info, s_settings};

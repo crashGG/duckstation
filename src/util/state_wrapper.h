@@ -9,8 +9,8 @@
 
 #include <cstring>
 #include <deque>
-#include <string>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -34,6 +34,8 @@ public:
   ALWAYS_INLINE bool IsReading() const { return (m_mode == Mode::Read); }
   ALWAYS_INLINE bool IsWriting() const { return (m_mode == Mode::Write); }
   ALWAYS_INLINE u32 GetVersion() const { return m_version; }
+  ALWAYS_INLINE const u8* GetData() const { return m_data; }
+  ALWAYS_INLINE size_t GetDataSize() const { return m_size; }
   ALWAYS_INLINE size_t GetPosition() const { return m_pos; }
   ALWAYS_INLINE void SetPosition(size_t pos) { m_pos = pos; }
 
@@ -178,6 +180,7 @@ public:
   }
 
   bool DoMarker(const char* marker);
+  bool DoMarkerEx(const char* marker, u32 version_introduced);
 
   template<typename T>
   void DoEx(T* data, u32 version_introduced, T default_value)
@@ -203,6 +206,9 @@ public:
     if (!m_error) [[likely]]
       m_pos += count;
   }
+
+  // spans don't copy immediately
+  std::span<u8> GetDeferredBytes(size_t size);
 
 private:
   bool ReadData(void* buf, size_t size);

@@ -33,6 +33,7 @@ enum class AuxiliaryRenderWindowEvent : u8
   Resized,
   KeyPressed,
   KeyReleased,
+  TextEntered,
   MouseMoved,
   MousePressed,
   MouseReleased,
@@ -63,9 +64,9 @@ static constexpr float DEFAULT_SCREEN_MARGIN = 16.0f;
 /// Sets the path to the font to use. Empty string means to use the default.
 void SetFontPathAndRange(std::string path, std::vector<WCharType> range);
 
-/// Sets the emoji font range to use. Empty means no glyphs will be rasterized.
+/// Sets the normal/emoji font range to use. Empty means no glyphs will be rasterized.
 /// Should NOT be terminated with zeros, unlike the font range above.
-void SetEmojiFontRange(std::vector<WCharType> range);
+void SetDynamicFontRange(std::vector<WCharType> font_range, std::vector<WCharType> emoji_range);
 
 /// Returns a compacted font range, with adjacent glyphs merged into one pair.
 std::vector<WCharType> CompactFontRange(std::span<const WCharType> range);
@@ -117,8 +118,14 @@ bool HasFullscreenFonts();
 /// Allocates/adds fullscreen fonts if they're not loaded.
 bool AddFullscreenFontsIfMissing();
 
+/// Returns true if there is a separate debug font.
+bool HasDebugFont();
+
+/// Changes whether a debug font is generated. Otherwise, the OSD font will be used for GetStandardFont().
+bool AddDebugFontIfMissing();
+
 /// Returns the standard font for external drawing.
-ImFont* GetStandardFont();
+ImFont* GetDebugFont();
 
 /// Returns the standard font for on-screen display drawing.
 ImFont* GetOSDFont();
@@ -229,6 +236,13 @@ void AddIconOSDWarning(std::string key, const char* icon, std::string message, f
 void RemoveKeyedOSDMessage(std::string key);
 void RemoveKeyedOSDWarning(std::string key);
 void ClearOSDMessages(bool clear_warnings);
+
+/// Called by ImGuiManager when the cursor enters a text field. The host may choose to open an on-screen
+/// keyboard for devices without a physical keyboard.
+void BeginTextInput();
+
+/// Called by ImGuiManager when the cursor leaves a text field.
+void EndTextInput();
 
 #ifndef __ANDROID__
 

@@ -2055,7 +2055,7 @@ Unread messages: {}</source>
     <message>
         <location filename="../autoupdaterdialog.ui" line="51"/>
         <source>Update Available</source>
-        <translation>Досупно обновление</translation>
+        <translation>Доступно обновление</translation>
     </message>
     <message>
         <location filename="../autoupdaterdialog.ui" line="60"/>
@@ -13691,7 +13691,7 @@ Scanning recursively takes more time, but will identify files in subdirectories.
     <name>InterfaceSettingsWidget</name>
     <message>
         <location filename="../interfacesettingswidget.ui" line="29"/>
-        <source>Behaviour</source>
+        <source>Behavior</source>
         <translation>Поведение</translation>
     </message>
     <message>

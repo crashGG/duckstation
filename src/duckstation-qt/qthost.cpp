@@ -19,7 +19,10 @@
 #include "core/game_list.h"
 #include "core/gdb_server.h"
 #include "core/gpu.h"
+#include "core/gpu_backend.h"
 #include "core/gpu_hw_texture_cache.h"
+#include "core/gpu_presenter.h"
+#include "core/gpu_thread.h"
 #include "core/host.h"
 #include "core/imgui_overlays.h"
 #include "core/memory_card.h"
@@ -75,6 +78,9 @@ LOG_CHANNEL(Host);
 static constexpr u32 SETTINGS_VERSION = 3;
 static constexpr u32 SETTINGS_SAVE_DELAY = 1000;
 
+/// Use two async worker threads, should be enough for most tasks.
+static constexpr u32 NUM_ASYNC_WORKER_THREADS = 2;
+
 /// Interval at which the controllers are polled when the system is not active.
 static constexpr u32 BACKGROUND_CONTROLLER_POLLING_INTERVAL = 100;
 
@@ -120,7 +126,8 @@ static bool s_cleanup_after_update = false;
 
 EmuThread* g_emu_thread = nullptr;
 
-EmuThread::EmuThread(QThread* ui_thread) : QThread(), m_ui_thread(ui_thread)
+EmuThread::EmuThread(QThread* ui_thread)
+  : QThread(), m_ui_thread(ui_thread), m_input_device_list_model(std::make_unique<InputDeviceListModel>())
 {
 }
 
@@ -137,6 +144,7 @@ void QtHost::RegisterTypes()
   qRegisterMetaType<RenderAPI>("RenderAPI");
   qRegisterMetaType<GPURenderer>("GPURenderer");
   qRegisterMetaType<InputBindingKey>("InputBindingKey");
+  qRegisterMetaType<InputDeviceListModel::Device>("InputDeviceListModel::Device");
   qRegisterMetaType<std::string>("std::string");
   qRegisterMetaType<std::vector<std::pair<std::string, std::string>>>(
     "std::vector<std::pair<std::string, std::string>>");
@@ -223,7 +231,6 @@ bool QtHost::SaveGameSettings(SettingsInterface* sif, bool delete_if_empty)
   INISettingsInterface* ini = static_cast<INISettingsInterface*>(sif);
   Error error;
 
-
   // if there's no keys, just toss the whole thing out
   if (delete_if_empty && ini->IsEmpty())
   {
@@ -233,8 +240,7 @@ bool QtHost::SaveGameSettings(SettingsInterface* sif, bool delete_if_empty)
     // to read it at the same time.
     const auto lock = Host::GetSettingsLock();
 
-    if (FileSystem::FileExists(ini->GetPath().c_str()) &&
-        !FileSystem::DeleteFile(ini->GetPath().c_str(), &error))
+    if (FileSystem::FileExists(ini->GetPath().c_str()) && !FileSystem::DeleteFile(ini->GetPath().c_str(), &error))
     {
       Host::ReportErrorAsync(
         TRANSLATE_SV("QtHost", "Error"),
@@ -292,6 +298,7 @@ std::optional<bool> QtHost::DownloadFile(QWidget* parent, const QString& title, 
   progress.GetDialog().setWindowTitle(title);
   progress.GetDialog().setWindowIcon(GetAppIcon());
   progress.SetCancellable(true);
+  progress.MakeVisible();
 
   http->CreateRequest(
     std::move(url),
@@ -345,12 +352,15 @@ bool QtHost::DownloadFile(QWidget* parent, const QString& title, std::string url
 
   // Directory may not exist. Create it.
   const std::string directory(Path::GetDirectory(path));
+  Error error;
   if ((!directory.empty() && !FileSystem::DirectoryExists(directory.c_str()) &&
-       !FileSystem::CreateDirectory(directory.c_str(), true)) ||
-      !FileSystem::WriteBinaryFile(path, data.data(), data.size()))
+       !FileSystem::CreateDirectory(directory.c_str(), true, &error)) ||
+      !FileSystem::WriteBinaryFile(path, data, &error))
   {
     QMessageBox::critical(parent, qApp->translate("QtHost", "Error"),
-                          qApp->translate("QtHost", "Failed to write '%1'.").arg(QString::fromUtf8(path)));
+                          qApp->translate("QtHost", "Failed to write '%1':\n%2")
+                            .arg(QString::fromUtf8(path))
+                            .arg(QString::fromUtf8(error.GetDescription())));
     return false;
   }
 
@@ -576,12 +586,7 @@ void Host::LoadSettings(const SettingsInterface& si, std::unique_lock<std::mutex
 void EmuThread::checkForSettingsChanges(const Settings& old_settings)
 {
   if (g_main_window)
-  {
     QMetaObject::invokeMethod(g_main_window, &MainWindow::checkForSettingChanges, Qt::QueuedConnection);
-
-    if (System::IsValid())
-      updatePerformanceCounters();
-  }
 
   // don't mess with fullscreen while locked
   if (!QtHost::IsSystemLocked())
@@ -591,7 +596,7 @@ void EmuThread::checkForSettingsChanges(const Settings& old_settings)
     {
       m_is_rendering_to_main = render_to_main;
       if (g_gpu_device)
-        Host::UpdateDisplayWindow(m_is_fullscreen);
+        GPUThread::UpdateDisplayWindow(m_is_fullscreen);
     }
   }
 }
@@ -730,33 +735,27 @@ void EmuThread::startFullscreenUI()
     return;
   }
 
-  if (System::IsValid())
+  if (System::IsValid() || m_is_fullscreen_ui_started)
     return;
 
   // we want settings loaded so we choose the correct renderer
   // this also sorts out input sources.
   System::LoadSettings(false);
   m_is_rendering_to_main = shouldRenderToMain();
-  m_run_fullscreen_ui = true;
 
   // borrow the game start fullscreen flag
   const bool start_fullscreen =
     (s_start_fullscreen_ui_fullscreen || Host::GetBaseBoolSettingValue("Main", "StartFullscreen", false));
 
   Error error;
-  if (!Host::CreateGPUDevice(Settings::GetRenderAPIForRenderer(g_settings.gpu_renderer), start_fullscreen, &error) ||
-      !FullscreenUI::Initialize())
+  if (!GPUThread::StartFullscreenUI(start_fullscreen, &error))
   {
     Host::ReportErrorAsync("Error", error.GetDescription());
-    m_run_fullscreen_ui = false;
     return;
   }
 
-  emit fullscreenUIStateChange(true);
-
-  // poll more frequently so we don't lose events
-  stopBackgroundControllerPollTimer();
-  startBackgroundControllerPollTimer();
+  m_is_fullscreen_ui_started = true;
+  emit fullscreenUIStartedOrStopped(true);
 }
 
 void EmuThread::stopFullscreenUI()
@@ -771,18 +770,17 @@ void EmuThread::stopFullscreenUI()
     return;
   }
 
-  setFullscreen(false, true);
-
-  if (m_run_fullscreen_ui)
+  if (m_is_fullscreen_ui_started)
   {
-    m_run_fullscreen_ui = false;
-    emit fullscreenUIStateChange(false);
+    // Need to switch out of fullscreen before stopping the fullscreen UI, otherwise Qt
+    // terminates the applcation because briefly there are no windows remaining.
+    if (m_is_fullscreen)
+      setFullscreen(false, true);
+
+    GPUThread::StopFullscreenUI();
+    m_is_fullscreen_ui_started = false;
+    emit fullscreenUIStartedOrStopped(false);
   }
-
-  if (!g_gpu_device)
-    return;
-
-  Host::ReleaseGPUDevice();
 }
 
 void EmuThread::bootSystem(std::shared_ptr<SystemBootParameters> params)
@@ -815,7 +813,7 @@ void EmuThread::bootOrLoadState(std::string path)
   if (System::IsValid())
   {
     Error error;
-    if (!System::LoadState(path.c_str(), &error, true))
+    if (!System::LoadState(path.c_str(), &error, true, false))
     {
       emit errorReported(tr("Error"),
                          tr("Failed to load state: %1").arg(QString::fromStdString(error.GetDescription())));
@@ -889,7 +887,7 @@ void EmuThread::onDisplayWindowMouseWheelEvent(const QPoint& delta_angle)
 
 void EmuThread::onDisplayWindowResized(int width, int height, float scale)
 {
-  Host::ResizeDisplayWindow(width, height, scale);
+  GPUThread::ResizeDisplayWindow(width, height, scale);
 }
 
 void EmuThread::redrawDisplayWindow()
@@ -900,10 +898,10 @@ void EmuThread::redrawDisplayWindow()
     return;
   }
 
-  if (!g_gpu_device || System::IsShutdown())
+  if (System::IsShutdown())
     return;
 
-  System::InvalidateDisplay();
+  GPUThread::PresentCurrentFrame();
 }
 
 void EmuThread::toggleFullscreen()
@@ -931,7 +929,7 @@ void EmuThread::setFullscreen(bool fullscreen, bool allow_render_to_main)
 
   m_is_fullscreen = fullscreen;
   m_is_rendering_to_main = allow_render_to_main && shouldRenderToMain();
-  Host::UpdateDisplayWindow(fullscreen);
+  GPUThread::UpdateDisplayWindow(fullscreen);
 }
 
 bool Host::IsFullscreen()
@@ -960,7 +958,7 @@ void EmuThread::setSurfaceless(bool surfaceless)
     return;
 
   m_is_surfaceless = surfaceless;
-  Host::UpdateDisplayWindow(false);
+  GPUThread::UpdateDisplayWindow(false);
 }
 
 void EmuThread::requestDisplaySize(float scale)
@@ -995,6 +993,7 @@ std::optional<WindowInfo> EmuThread::acquireRenderWindow(RenderAPI render_api, b
 void EmuThread::releaseRenderWindow()
 {
   emit onReleaseRenderWindowRequested();
+  m_is_fullscreen = false;
 }
 
 void EmuThread::connectDisplaySignals(DisplayWidget* widget)
@@ -1017,6 +1016,7 @@ void Host::OnSystemStarting()
 void Host::OnSystemStarted()
 {
   g_emu_thread->stopBackgroundControllerPollTimer();
+  g_emu_thread->wakeThread();
 
   emit g_emu_thread->systemStarted();
 }
@@ -1034,6 +1034,7 @@ void Host::OnSystemResumed()
     g_emu_thread->setSurfaceless(false);
 
   emit g_emu_thread->systemResumed();
+  g_emu_thread->wakeThread();
 
   g_emu_thread->stopBackgroundControllerPollTimer();
 }
@@ -1045,9 +1046,21 @@ void Host::OnSystemDestroyed()
   emit g_emu_thread->systemDestroyed();
 }
 
-void Host::OnIdleStateChanged()
+void Host::OnSystemAbnormalShutdown(const std::string_view reason)
 {
-  g_emu_thread->wakeThread();
+  Host::ReportErrorAsync(
+    TRANSLATE_SV("QtHost", "Error"),
+    fmt::format(
+      TRANSLATE_FS("QtHost",
+                   "Unfortunately, the virtual machine has abnormally shut down and cannot be recovered. Please use "
+                   "the available support options for further assistance, and provide information about what you were "
+                   "doing when the error occurred, as well as the details below:\n\n{}"),
+      reason));
+}
+
+void Host::OnGPUThreadRunIdleChanged(bool is_active)
+{
+  g_emu_thread->setGPUThreadRunIdle(is_active);
 }
 
 void EmuThread::reloadInputSources()
@@ -1092,34 +1105,6 @@ void EmuThread::closeInputSources()
   }
 
   InputManager::CloseSources();
-}
-
-void EmuThread::enumerateInputDevices()
-{
-  if (!isCurrentThread())
-  {
-    QMetaObject::invokeMethod(this, &EmuThread::enumerateInputDevices, Qt::QueuedConnection);
-    return;
-  }
-
-  onInputDevicesEnumerated(InputManager::EnumerateDevices());
-}
-
-void EmuThread::enumerateVibrationMotors()
-{
-  if (!isCurrentThread())
-  {
-    QMetaObject::invokeMethod(this, &EmuThread::enumerateVibrationMotors, Qt::QueuedConnection);
-    return;
-  }
-
-  const std::vector<InputBindingKey> motors(InputManager::EnumerateMotors());
-  QList<InputBindingKey> qmotors;
-  qmotors.reserve(motors.size());
-  for (InputBindingKey key : motors)
-    qmotors.push_back(key);
-
-  onVibrationMotorsEnumerated(qmotors);
 }
 
 void EmuThread::confirmActionIfMemoryCardBusy(const QString& action, bool cancel_resume_on_accept,
@@ -1291,19 +1276,20 @@ void EmuThread::reloadPostProcessingShaders()
   }
 
   if (System::IsValid())
-    PostProcessing::ReloadShaders();
+    GPUPresenter::ReloadPostProcessingSettings(true, true, true);
 }
 
-void EmuThread::updatePostProcessingSettings()
+void EmuThread::updatePostProcessingSettings(bool display, bool internal, bool force_reload)
 {
   if (!isCurrentThread())
   {
-    QMetaObject::invokeMethod(this, "updatePostProcessingSettings", Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, "updatePostProcessingSettings", Qt::QueuedConnection, Q_ARG(bool, display),
+                              Q_ARG(bool, internal), Q_ARG(bool, force_reload));
     return;
   }
 
   if (System::IsValid())
-    PostProcessing::UpdateSettings();
+    GPUPresenter::ReloadPostProcessingSettings(display, internal, force_reload);
 }
 
 void EmuThread::clearInputBindStateFromSource(InputBindingKey key)
@@ -1326,7 +1312,7 @@ void EmuThread::reloadTextureReplacements()
   }
 
   if (System::IsValid())
-    GPUTextureCache::ReloadTextureReplacements(true);
+    GPUThread::RunOnThread([]() { GPUTextureCache::ReloadTextureReplacements(true); });
 }
 
 void EmuThread::captureGPUFrameDump()
@@ -1339,6 +1325,45 @@ void EmuThread::captureGPUFrameDump()
 
   if (System::IsValid())
     System::StartRecordingGPUDump();
+}
+
+void EmuThread::startControllerTest()
+{
+  static constexpr const char* PADTEST_URL = "https://downloads.duckstation.org/runtime-resources/padtest.psexe";
+
+  if (!isCurrentThread())
+  {
+    QMetaObject::invokeMethod(this, "startControllerTest", Qt::QueuedConnection);
+    return;
+  }
+
+  if (System::IsValid())
+    return;
+
+  std::string path = Path::Combine(EmuFolders::UserResources, "padtest.psexe");
+  if (FileSystem::FileExists(path.c_str()))
+  {
+    bootSystem(std::make_shared<SystemBootParameters>(std::move(path)));
+    return;
+  }
+
+  QtHost::RunOnUIThread([path = std::move(path)]() mutable {
+    {
+      auto lock = g_main_window->pauseAndLockSystem();
+      if (QMessageBox::question(
+            lock.getDialogParent(), tr("Confirm Download"),
+            tr("Your DuckStation installation does not have the padtest application "
+               "available.\n\nThis file is approximately 206KB, do you want to download it now?")) != QMessageBox::Yes)
+      {
+        return;
+      }
+
+      if (!QtHost::DownloadFile(lock.getDialogParent(), tr("File Download"), PADTEST_URL, path.c_str()))
+        return;
+    }
+
+    g_emu_thread->startControllerTest();
+  });
 }
 
 void EmuThread::runOnEmuThread(std::function<void()> callback)
@@ -1370,6 +1395,15 @@ void Host::RefreshGameListAsync(bool invalidate_cache)
 void Host::CancelGameListRefresh()
 {
   QMetaObject::invokeMethod(g_main_window, "cancelGameListRefresh", Qt::BlockingQueuedConnection);
+}
+
+void Host::OnGameListEntriesChanged(std::span<const u32> changed_indices)
+{
+  QList<int> changed_rows;
+  changed_rows.reserve(changed_indices.size());
+  for (const u32 row : changed_indices)
+    changed_rows.push_back(static_cast<int>(row));
+  emit g_emu_thread->gameListRowsChanged(changed_rows);
 }
 
 void EmuThread::loadState(const QString& filename)
@@ -1552,13 +1586,7 @@ void Host::OnAchievementsLoginRequested(Achievements::LoginRequestReason reason)
 
 void Host::OnAchievementsLoginSuccess(const char* username, u32 points, u32 sc_points, u32 unread_messages)
 {
-  const QString message = qApp->translate("QtHost", "RA: Logged in as %1 (%2, %3 softcore). %4 unread messages.")
-                            .arg(QString::fromUtf8(username))
-                            .arg(points)
-                            .arg(sc_points)
-                            .arg(unread_messages);
-
-  emit g_emu_thread->statusMessage(message);
+  emit g_emu_thread->achievementsLoginSuccess(QString::fromUtf8(username), points, sc_points, unread_messages);
 }
 
 void Host::OnAchievementsRefreshed()
@@ -1653,6 +1681,25 @@ void Host::OpenHostFileSelectorAsync(std::string_view title, bool select_directo
   });
 }
 
+void Host::BeginTextInput()
+{
+  DEV_LOG("Host::BeginTextInput()");
+
+  // NOTE: Called on GPU thread.
+  QInputMethod* method = qApp->inputMethod();
+  if (method)
+    QMetaObject::invokeMethod(method, "show", Qt::QueuedConnection);
+}
+
+void Host::EndTextInput()
+{
+  DEV_LOG("Host::EndTextInput()");
+
+  QInputMethod* method = qApp->inputMethod();
+  if (method)
+    QMetaObject::invokeMethod(method, "hide", Qt::QueuedConnection);
+}
+
 bool Host::CreateAuxiliaryRenderWindow(s32 x, s32 y, u32 width, u32 height, std::string_view title,
                                        std::string_view icon_name, AuxiliaryRenderWindowUserData userdata,
                                        AuxiliaryRenderWindowHandle* handle, WindowInfo* wi, Error* error)
@@ -1679,7 +1726,8 @@ void Host::DestroyAuxiliaryRenderWindow(AuxiliaryRenderWindowHandle handle, s32*
     *height = size.height();
 
   // eat all pending events, to make sure we're not going to write input events back to a dead pointer
-  g_emu_thread->getEventLoop()->processEvents(QEventLoop::AllEvents);
+  if (g_emu_thread->isCurrentThread())
+    g_emu_thread->getEventLoop()->processEvents(QEventLoop::AllEvents);
 }
 
 void EmuThread::queueAuxiliaryRenderWindowInputEvent(Host::AuxiliaryRenderWindowUserData userdata,
@@ -1699,10 +1747,12 @@ void EmuThread::processAuxiliaryRenderWindowInputEvent(void* userdata, quint32 e
                                                        quint32 param3)
 {
   DebugAssert(isCurrentThread());
-  ImGuiManager::ProcessAuxiliaryRenderWindowInputEvent(userdata, static_cast<Host::AuxiliaryRenderWindowEvent>(event),
-                                                       Host::AuxiliaryRenderWindowEventParam{.uint_param = param1},
-                                                       Host::AuxiliaryRenderWindowEventParam{.uint_param = param2},
-                                                       Host::AuxiliaryRenderWindowEventParam{.uint_param = param3});
+  GPUThread::RunOnThread([userdata, event, param1, param2, param3]() {
+    ImGuiManager::ProcessAuxiliaryRenderWindowInputEvent(userdata, static_cast<Host::AuxiliaryRenderWindowEvent>(event),
+                                                         Host::AuxiliaryRenderWindowEventParam{.uint_param = param1},
+                                                         Host::AuxiliaryRenderWindowEventParam{.uint_param = param2},
+                                                         Host::AuxiliaryRenderWindowEventParam{.uint_param = param3});
+  });
 }
 
 void EmuThread::doBackgroundControllerPoll()
@@ -1731,7 +1781,7 @@ void EmuThread::startBackgroundControllerPollTimer()
     return;
 
   u32 poll_interval = BACKGROUND_CONTROLLER_POLLING_INTERVAL;
-  if (FullscreenUI::IsInitialized())
+  if (m_gpu_thread_run_idle)
     poll_interval = FULLSCREEN_UI_CONTROLLER_POLLING_INTERVAL;
   if (GDBServer::HasAnyClients())
     poll_interval = GDB_SERVER_POLLING_INTERVAL;
@@ -1747,14 +1797,36 @@ void EmuThread::stopBackgroundControllerPollTimer()
   m_background_controller_polling_timer->stop();
 }
 
+void EmuThread::setGPUThreadRunIdle(bool active)
+{
+  if (!isCurrentThread())
+  {
+    QMetaObject::invokeMethod(this, "setGPUThreadRunIdle", Qt::QueuedConnection, Q_ARG(bool, active));
+    return;
+  }
+
+  m_gpu_thread_run_idle = active;
+
+  // break out of the event loop if we're not executing a system
+  if (active && !g_settings.gpu_use_thread && !System::IsRunning())
+    m_event_loop->quit();
+
+  // adjust the timer speed to pick up controller input faster
+  if (!m_background_controller_polling_timer->isActive())
+    return;
+
+  g_emu_thread->stopBackgroundControllerPollTimer();
+  g_emu_thread->startBackgroundControllerPollTimer();
+}
+
 void EmuThread::start()
 {
   AssertMsg(!g_emu_thread, "Emu thread does not exist");
 
   g_emu_thread = new EmuThread(QThread::currentThread());
+  g_emu_thread->moveToThread(g_emu_thread);
   g_emu_thread->QThread::start();
   g_emu_thread->m_started_semaphore.acquire();
-  g_emu_thread->moveToThread(g_emu_thread);
 }
 
 void EmuThread::stop()
@@ -1776,15 +1848,13 @@ void EmuThread::stopInThread()
 
 void EmuThread::run()
 {
-  Threading::SetNameOfCurrentThread("CPU Thread");
-
   m_event_loop = new QEventLoop();
   m_started_semaphore.release();
 
   // input source setup must happen on emu thread
   {
     Error startup_error;
-    if (!System::CPUThreadInitialize(&startup_error))
+    if (!System::CPUThreadInitialize(&startup_error, NUM_ASYNC_WORKER_THREADS))
     {
       moveToThread(m_ui_thread);
       Host::ReportFatalError("Fatal Startup Error", startup_error.GetDescription());
@@ -1792,9 +1862,15 @@ void EmuThread::run()
     }
   }
 
-  // bind buttons/axises
+  // enumerate all devices, even those which were added early
+  m_input_device_list_model->enumerateDevices();
+
+  // start background input polling
   createBackgroundControllerPollTimer();
   startBackgroundControllerPollTimer();
+
+  // kick off GPU thread
+  Threading::Thread gpu_thread(&EmuThread::gpuThreadEntryPoint);
 
   // main loop
   while (!m_shutdown_flag)
@@ -1803,24 +1879,17 @@ void EmuThread::run()
     {
       System::Execute();
     }
+    else if (!GPUThread::IsUsingThread() && GPUThread::IsRunningIdle())
+    {
+      g_emu_thread->getEventLoop()->processEvents(QEventLoop::AllEvents);
+
+      // have to double-check the condition after processing events, because the events could shut us down
+      if (!GPUThread::IsUsingThread() && GPUThread::IsRunningIdle())
+        GPUThread::Internal::DoRunIdle();
+    }
     else
     {
-      // we want to keep rendering the UI when paused and fullscreen UI is enabled
-      if (!FullscreenUI::HasActiveWindow() && !System::IsRunning())
-      {
-        // wait until we have a system before running
-        m_event_loop->exec();
-        continue;
-      }
-
-      m_event_loop->processEvents(QEventLoop::AllEvents);
-      System::IdlePollUpdate();
-      if (g_gpu_device && g_gpu_device->HasMainSwapChain())
-      {
-        System::PresentDisplay(false, 0);
-        if (!g_gpu_device->GetMainSwapChain()->IsVSyncModeBlocking())
-          g_gpu_device->GetMainSwapChain()->ThrottlePresentation();
-      }
+      m_event_loop->exec();
     }
   }
 
@@ -1828,13 +1897,25 @@ void EmuThread::run()
     System::ShutdownSystem(false);
 
   destroyBackgroundControllerPollTimer();
+
+  // tell GPU thread to exit
+  GPUThread::Internal::RequestShutdown();
+  gpu_thread.Join();
+
+  // and tidy up everything left
   System::CPUThreadShutdown();
 
   // move back to UI thread
   moveToThread(m_ui_thread);
 }
 
-void Host::FrameDone()
+void EmuThread::gpuThreadEntryPoint()
+{
+  Threading::SetNameOfCurrentThread("GPU Thread");
+  GPUThread::Internal::GPUThreadEntryPoint();
+}
+
+void Host::FrameDoneOnGPUThread(GPUBackend* gpu_backend, u32 frame_number)
 {
 }
 
@@ -1895,16 +1976,99 @@ bool Host::ConfirmMessage(std::string_view title, std::string_view message)
                                              QString::fromUtf8(message.data(), message.size()));
 }
 
-void Host::ConfirmMessageAsync(std::string_view title, std::string_view message, ConfirmMessageAsyncCallback callback)
+void Host::ConfirmMessageAsync(std::string_view title, std::string_view message, ConfirmMessageAsyncCallback callback,
+                               std::string_view yes_text, std::string_view no_text)
 {
-  QtHost::RunOnUIThread([title = QtUtils::StringViewToQString(title), message = QtUtils::StringViewToQString(message),
-                         callback = std::move(callback)]() mutable {
-    auto lock = g_main_window->pauseAndLockSystem();
+  INFO_LOG("ConfirmMessageAsync({}, {})", title, message);
 
-    const bool result = (QMessageBox::question(lock.getDialogParent(), title, message) != QMessageBox::No);
+  // This is a racey read, but whether FSUI is started should be visible on all threads.
+  std::atomic_thread_fence(std::memory_order_acquire);
 
-    callback(result);
-  });
+  // Default button titles.
+  if (yes_text.empty())
+    yes_text = TRANSLATE_SV("QtHost", "Yes");
+  if (no_text.empty())
+    no_text = TRANSLATE_SV("QtHost", "No");
+
+  // Ensure it always comes from the CPU thread.
+  if (!g_emu_thread->isCurrentThread())
+  {
+    Host::RunOnCPUThread([title = std::string(title), message = std::string(message), callback = std::move(callback),
+                          yes_text = std::string(yes_text), no_text = std::string(no_text)]() mutable {
+      ConfirmMessageAsync(title, message, std::move(callback));
+    });
+    return;
+  }
+
+  // Pause system while dialog is up.
+  const bool needs_pause = System::IsValid() && !System::IsPaused();
+  if (needs_pause)
+    System::PauseSystem(true);
+
+  // Use FSUI to display the confirmation if it is active.
+  if (FullscreenUI::IsInitialized())
+  {
+    GPUThread::RunOnThread([title = std::string(title), message = std::string(message), callback = std::move(callback),
+                            yes_text = std::string(yes_text), no_text = std::string(no_text), needs_pause]() mutable {
+      if (!FullscreenUI::Initialize())
+      {
+        callback(false);
+
+        if (needs_pause)
+        {
+          Host::RunOnCPUThread([]() {
+            if (System::IsValid())
+              System::PauseSystem(false);
+          });
+        }
+
+        return;
+      }
+
+      // Need to reset run idle state _again_ after displaying.
+      auto final_callback = [callback = std::move(callback)](bool result) {
+        FullscreenUI::UpdateRunIdleState();
+        callback(result);
+      };
+
+      ImGuiFullscreen::OpenConfirmMessageDialog(std::move(title), std::move(message), std::move(final_callback),
+                                                fmt::format(ICON_FA_CHECK " {}", yes_text),
+                                                fmt::format(ICON_FA_TIMES " {}", no_text));
+      FullscreenUI::UpdateRunIdleState();
+    });
+  }
+  else
+  {
+    // Otherwise, use the desktop UI.
+    QtHost::RunOnUIThread([title = QtUtils::StringViewToQString(title), message = QtUtils::StringViewToQString(message),
+                           callback = std::move(callback), yes_text = QtUtils::StringViewToQString(yes_text),
+                           no_text = QtUtils::StringViewToQString(no_text), needs_pause]() mutable {
+      auto lock = g_main_window->pauseAndLockSystem();
+
+      bool result;
+      {
+        QMessageBox msgbox(lock.getDialogParent());
+        msgbox.setIcon(QMessageBox::Question);
+        msgbox.setWindowTitle(title);
+        msgbox.setText(message);
+
+        QPushButton* const yes_button = msgbox.addButton(yes_text, QMessageBox::AcceptRole);
+        msgbox.addButton(no_text, QMessageBox::RejectRole);
+        msgbox.exec();
+        result = (msgbox.clickedButton() == yes_button);
+      }
+
+      callback(result);
+
+      if (needs_pause)
+      {
+        Host::RunOnCPUThread([]() {
+          if (System::IsValid())
+            System::PauseSystem(false);
+        });
+      }
+    });
+  }
 }
 
 void Host::OpenURL(std::string_view url)
@@ -1941,15 +2105,158 @@ void Host::ReportDebuggerMessage(std::string_view message)
   emit g_emu_thread->debuggerMessageReported(QString::fromUtf8(message));
 }
 
-void Host::AddFixedInputBindings(const SettingsInterface& si)
+InputDeviceListModel::InputDeviceListModel(QObject* parent) : QAbstractListModel(parent)
 {
 }
 
-void Host::OnInputDeviceConnected(std::string_view identifier, std::string_view device_name)
-{
-  emit g_emu_thread->onInputDeviceConnected(std::string(identifier), std::string(device_name));
+InputDeviceListModel::~InputDeviceListModel() = default;
 
-  if (System::IsValid() || g_emu_thread->isRunningFullscreenUI())
+QIcon InputDeviceListModel::getIconForKey(const InputBindingKey& key)
+{
+  if (key.source_type == InputSourceType::Keyboard)
+    return QIcon::fromTheme("keyboard-line");
+  else if (key.source_type == InputSourceType::Pointer)
+    return QIcon::fromTheme("mouse-line");
+  else
+    return QIcon::fromTheme("controller-line");
+}
+
+int InputDeviceListModel::rowCount(const QModelIndex& parent /*= QModelIndex()*/) const
+{
+  return m_devices.size();
+}
+
+QVariant InputDeviceListModel::data(const QModelIndex& index, int role /*= Qt::DisplayRole*/) const
+{
+  const int row = index.row();
+  if (index.column() != 0 || row < 0 || static_cast<qsizetype>(row) >= m_devices.size())
+    return QVariant();
+
+  if (role == Qt::DisplayRole)
+  {
+    const auto& dev = m_devices[static_cast<qsizetype>(row)];
+    const InputBindingKey key = dev.key;
+
+    // don't display device names for implicit keyboard/mouse
+    if (key.source_type == InputSourceType::Keyboard ||
+        (key.source_type == InputSourceType::Pointer && !InputManager::IsUsingRawInput()))
+    {
+      return dev.display_name;
+    }
+    else
+    {
+      return QStringLiteral("%1\n%2").arg(dev.identifier).arg(dev.display_name);
+    }
+  }
+  else if (role == Qt::DecorationRole)
+  {
+    const auto& dev = m_devices[static_cast<qsizetype>(row)];
+    return getIconForKey(dev.key);
+  }
+  else
+  {
+    return QVariant();
+  }
+}
+
+void InputDeviceListModel::enumerateDevices()
+{
+  DebugAssert(g_emu_thread->isCurrentThread());
+
+  const InputManager::DeviceList devices = InputManager::EnumerateDevices();
+  const InputManager::VibrationMotorList motors = InputManager::EnumerateVibrationMotors();
+
+  DeviceList new_devices;
+  new_devices.reserve(devices.size());
+  for (const auto& [key, identifier, device_name] : devices)
+    new_devices.emplace_back(key, QString::fromStdString(identifier), QString::fromStdString(device_name));
+
+  QStringList new_motors;
+  new_motors.reserve(motors.size());
+  for (const auto& key : motors)
+  {
+    new_motors.push_back(
+      QString::fromStdString(InputManager::ConvertInputBindingKeyToString(InputBindingInfo::Type::Motor, key)));
+  }
+
+  QMetaObject::invokeMethod(this, "resetLists", Qt::QueuedConnection, Q_ARG(const DeviceList&, new_devices),
+                            Q_ARG(const QStringList&, m_vibration_motors));
+}
+
+void InputDeviceListModel::resetLists(const DeviceList& devices, const QStringList& motors)
+{
+  beginResetModel();
+
+  m_devices = devices;
+  m_vibration_motors = motors;
+
+  endResetModel();
+}
+
+void InputDeviceListModel::onDeviceConnected(const InputBindingKey& key, const QString& identifier,
+                                             const QString& device_name, const QStringList& vibration_motors)
+{
+  for (const auto& it : m_devices)
+  {
+    if (it.identifier == identifier)
+      return;
+  }
+
+  const int index = static_cast<int>(m_devices.size());
+  beginInsertRows(QModelIndex(), index, index);
+  m_devices.emplace_back(key, identifier, device_name);
+  endInsertRows();
+
+  m_vibration_motors.append(vibration_motors);
+}
+
+void InputDeviceListModel::onDeviceDisconnected(const InputBindingKey& key, const QString& identifier)
+{
+  for (qsizetype i = 0; i < m_devices.size(); i++)
+  {
+    if (m_devices[i].identifier == identifier)
+    {
+      const int index = static_cast<int>(i);
+      beginRemoveRows(QModelIndex(), index, index);
+      m_devices.remove(i);
+      endRemoveRows();
+
+      // remove vibration motors too
+      const QString motor_prefix = QStringLiteral("%1/").arg(identifier);
+      for (qsizetype j = 0; j < m_vibration_motors.size();)
+      {
+        if (m_vibration_motors[j].startsWith(motor_prefix))
+          m_vibration_motors.remove(j);
+        else
+          j++;
+      }
+
+      return;
+    }
+  }
+}
+
+void Host::OnInputDeviceConnected(InputBindingKey key, std::string_view identifier, std::string_view device_name)
+{
+  // get the motors for this device to append to the list
+  QStringList vibration_motor_list;
+  const InputManager::VibrationMotorList im_vibration_motor_list = InputManager::EnumerateVibrationMotors(key);
+  if (!im_vibration_motor_list.empty())
+  {
+    vibration_motor_list.reserve(im_vibration_motor_list.size());
+    for (const InputBindingKey& motor_key : im_vibration_motor_list)
+    {
+      vibration_motor_list.push_back(
+        QString::fromStdString(InputManager::ConvertInputBindingKeyToString(InputBindingInfo::Type::Motor, motor_key)));
+    }
+  }
+
+  QMetaObject::invokeMethod(
+    g_emu_thread->getInputDeviceListModel(), "onDeviceConnected", Qt::QueuedConnection,
+    Q_ARG(const InputBindingKey&, key), Q_ARG(const QString&, QtUtils::StringViewToQString(identifier)),
+    Q_ARG(const QString&, QtUtils::StringViewToQString(device_name)), Q_ARG(const QStringList&, vibration_motor_list));
+
+  if (System::IsValid() || GPUThread::IsFullscreenUIRequested())
   {
     Host::AddIconOSDMessage(fmt::format("ControllerConnected{}", identifier), ICON_FA_GAMEPAD,
                             fmt::format(TRANSLATE_FS("QtHost", "Controller {} connected."), identifier),
@@ -1959,7 +2266,9 @@ void Host::OnInputDeviceConnected(std::string_view identifier, std::string_view 
 
 void Host::OnInputDeviceDisconnected(InputBindingKey key, std::string_view identifier)
 {
-  emit g_emu_thread->onInputDeviceDisconnected(std::string(identifier));
+  QMetaObject::invokeMethod(g_emu_thread->getInputDeviceListModel(), "onDeviceDisconnected", Qt::QueuedConnection,
+                            Q_ARG(const InputBindingKey&, key),
+                            Q_ARG(const QString&, QtUtils::StringViewToQString(identifier)));
 
   if (g_settings.pause_on_controller_disconnection && System::GetState() == System::State::Running &&
       InputManager::HasAnyBindingsForSource(key))
@@ -1975,12 +2284,16 @@ void Host::OnInputDeviceDisconnected(InputBindingKey key, std::string_view ident
     Host::AddIconOSDMessage(fmt::format("ControllerConnected{}", identifier), ICON_FA_GAMEPAD, std::move(message),
                             Host::OSD_WARNING_DURATION);
   }
-  else if (System::IsValid() || g_emu_thread->isRunningFullscreenUI())
+  else if (System::IsValid() || GPUThread::IsFullscreenUIRequested())
   {
     Host::AddIconOSDMessage(fmt::format("ControllerConnected{}", identifier), ICON_FA_GAMEPAD,
                             fmt::format(TRANSLATE_FS("QtHost", "Controller {} disconnected."), identifier),
                             Host::OSD_INFO_DURATION);
   }
+}
+
+void Host::AddFixedInputBindings(const SettingsInterface& si)
+{
 }
 
 std::string QtHost::GetResourcePath(std::string_view filename, bool allow_override)
@@ -2037,17 +2350,17 @@ void Host::ReleaseRenderWindow()
   g_emu_thread->releaseRenderWindow();
 }
 
-void EmuThread::updatePerformanceCounters()
+void EmuThread::updatePerformanceCounters(const GPUBackend* gpu_backend)
 {
-  const RenderAPI render_api = g_gpu_device ? g_gpu_device->GetRenderAPI() : RenderAPI::None;
-  const bool hardware_renderer = g_gpu && g_gpu->IsHardwareRenderer();
+  const RenderAPI render_api = g_gpu_device->GetRenderAPI();
+  const bool hardware_renderer = GPUBackend::IsUsingHardwareBackend();
   u32 render_width = 0;
   u32 render_height = 0;
 
-  if (g_gpu)
+  if (gpu_backend)
   {
-    const u32 render_scale = g_gpu->GetResolutionScale();
-    std::tie(render_width, render_height) = g_gpu->GetFullDisplayResolution();
+    const u32 render_scale = gpu_backend->GetResolutionScale();
+    std::tie(render_width, render_height) = g_gpu.GetFullDisplayResolution();
     render_width *= render_scale;
     render_height *= render_scale;
   }
@@ -2063,8 +2376,10 @@ void EmuThread::updatePerformanceCounters()
   }
   if (render_width != m_last_render_width || render_height != m_last_render_height)
   {
+    const QString text =
+      (render_width != 0 && render_height != 0) ? tr("%1x%2").arg(render_width).arg(render_height) : tr("No Image");
     QMetaObject::invokeMethod(g_main_window->getStatusResolutionWidget(), "setText", Qt::QueuedConnection,
-                              Q_ARG(const QString&, tr("%1x%2").arg(render_width).arg(render_height)));
+                              Q_ARG(const QString&, text));
     m_last_render_width = render_width;
     m_last_render_height = render_height;
   }
@@ -2110,9 +2425,9 @@ void EmuThread::resetPerformanceCounters()
                             Q_ARG(const QString&, blank));
 }
 
-void Host::OnPerformanceCountersUpdated()
+void Host::OnPerformanceCountersUpdated(const GPUBackend* gpu_backend)
 {
-  g_emu_thread->updatePerformanceCounters();
+  g_emu_thread->updatePerformanceCounters(gpu_backend);
 }
 
 void Host::OnGameChanged(const std::string& disc_path, const std::string& game_serial, const std::string& game_name)
@@ -2209,8 +2524,8 @@ std::optional<WindowInfo> Host::GetTopLevelWindowInfo()
 
 EmuThread::SystemLock EmuThread::pauseAndLockSystem()
 {
-  const bool was_fullscreen = System::IsValid() && isFullscreen();
-  const bool was_paused = System::IsPaused();
+  const bool was_fullscreen = QtHost::IsSystemValid() && isFullscreen();
+  const bool was_paused = QtHost::IsSystemPaused();
 
   // We use surfaceless rather than switching out of fullscreen, because
   // we're paused, so we're not going to be rendering anyway.

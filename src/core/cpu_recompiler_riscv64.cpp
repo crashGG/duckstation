@@ -279,12 +279,14 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
     rvAsm->LWU(RARG1, PTR(&g_state.pc));
     rvMoveAddressToReg(rvAsm, RARG3, g_code_lut.data());
     rvAsm->SRLI(RARG2, RARG1, 16);
-    rvAsm->SLLI(RARG1, RARG1, 1);
     rvAsm->SLLI(RARG2, RARG2, 3);
     rvAsm->ADD(RARG2, RARG2, RARG3);
     rvAsm->LD(RARG2, 0, RARG2);
+    rvAsm->SLLI64(RARG1, RARG1, 48); // idx = (pc & 0xFFFF) >> 2
+    rvAsm->SRLI64(RARG1, RARG1, 50);
+    rvAsm->SLLI(RARG1, RARG1, 3);
 
-    // blr(x9[pc * 2]) (fast_map[pc >> 2])
+    // blr(x9[pc * 2]) (fast_map[idx])
     rvAsm->ADD(RARG1, RARG1, RARG2);
     rvAsm->LD(RARG1, 0, RARG1);
     rvAsm->JR(RARG1);
@@ -313,6 +315,12 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
   // TODO: align?
 
   return static_cast<u32>(rvAsm->GetCodeBuffer().GetSizeInBytes());
+}
+
+void CPU::CodeCache::EmitAlignmentPadding(void* dst, size_t size)
+{
+  constexpr u8 padding_value = 0x00;
+  std::memset(dst, padding_value, size);
 }
 
 u32 CPU::CodeCache::EmitJump(void* code, const void* dst, bool flush_icache)
@@ -552,7 +560,7 @@ void CPU::RISCV64Recompiler::GenerateICacheCheckAndUpdate()
     if (m_block->HasFlag(CodeCache::BlockFlags::NeedsDynamicFetchTicks))
     {
       rvEmitFarLoad(rvAsm, RARG2, GetFetchMemoryAccessTimePtr());
-      rvAsm->LW(RARG1, PTR(&g_state.pending_ticks));
+      rvAsm->LWU(RARG1, PTR(&g_state.pending_ticks));
       rvEmitMov(rvAsm, RARG3, m_block->size);
       rvAsm->MULW(RARG2, RARG2, RARG3);
       rvAsm->ADD(RARG1, RARG1, RARG2);
@@ -560,7 +568,7 @@ void CPU::RISCV64Recompiler::GenerateICacheCheckAndUpdate()
     }
     else
     {
-      rvAsm->LW(RARG1, PTR(&g_state.pending_ticks));
+      rvAsm->LWU(RARG1, PTR(&g_state.pending_ticks));
       SafeADDIW(RARG1, RARG1, static_cast<u32>(m_block->uncached_fetch_ticks));
       rvAsm->SW(RARG1, PTR(&g_state.pending_ticks));
     }
@@ -571,8 +579,12 @@ void CPU::RISCV64Recompiler::GenerateICacheCheckAndUpdate()
     const auto& current_tag_reg = RARG2;
     const auto& existing_tag_reg = RARG3;
 
+    // start of block, nothing should be using this
+    const auto& maddr_reg = biscuit::t0;
+    DebugAssert(!IsHostRegAllocated(maddr_reg.Index()));
+
     VirtualMemoryAddress current_pc = m_block->pc & ICACHE_TAG_ADDRESS_MASK;
-    rvAsm->LW(ticks_reg, PTR(&g_state.pending_ticks));
+    rvAsm->LWU(ticks_reg, PTR(&g_state.pending_ticks));
     rvEmitMov(rvAsm, current_tag_reg, current_pc);
 
     for (u32 i = 0; i < m_block->icache_line_count; i++, current_pc += ICACHE_LINE_SIZE)
@@ -584,12 +596,22 @@ void CPU::RISCV64Recompiler::GenerateICacheCheckAndUpdate()
       const u32 line = GetICacheLine(current_pc);
       const u32 offset = OFFSETOF(State, icache_tags) + (line * sizeof(u32));
 
-      // TODO: Verify sign extension here...
+      // Offsets must fit in signed 12 bits.
       Label cache_hit;
-      rvAsm->LW(existing_tag_reg, offset, RSTATE);
-      rvAsm->BEQ(existing_tag_reg, current_tag_reg, &cache_hit);
+      if (offset >= 2048)
+      {
+        SafeADDI(maddr_reg, RSTATE, offset);
+        rvAsm->LW(existing_tag_reg, 0, maddr_reg);
+        rvAsm->BEQ(existing_tag_reg, current_tag_reg, &cache_hit);
+        rvAsm->SW(current_tag_reg, 0, maddr_reg);
+      }
+      else
+      {
+        rvAsm->LW(existing_tag_reg, offset, RSTATE);
+        rvAsm->BEQ(existing_tag_reg, current_tag_reg, &cache_hit);
+        rvAsm->SW(current_tag_reg, offset, RSTATE);
+      }
 
-      rvAsm->SW(current_tag_reg, offset, RSTATE);
       SafeADDIW(ticks_reg, ticks_reg, static_cast<u32>(fill_ticks));
       rvAsm->Bind(&cache_hit);
 
@@ -996,7 +1018,8 @@ void CPU::RISCV64Recompiler::Flush(u32 flags)
 
 void CPU::RISCV64Recompiler::Compile_Fallback()
 {
-  WARNING_LOG("Compiling instruction fallback at PC=0x{:08X}, instruction=0x{:08X}", iinfo->pc, inst->bits);
+  WARNING_LOG("Compiling instruction fallback at PC=0x{:08X}, instruction=0x{:08X}", m_current_instruction_pc,
+              inst->bits);
 
   Flush(FLUSH_FOR_INTERPRETER);
 
@@ -2283,16 +2306,15 @@ void CPU::RISCV64Recompiler::Compile_mtc0(CompileFlags cf)
     // We could just inline the whole thing..
     Flush(FLUSH_FOR_C_CALL);
 
+    Label caches_unchanged;
     rvAsm->SRLIW(RSCRATCH, changed_bits, 16);
     rvAsm->ANDI(RSCRATCH, RSCRATCH, 1);
-    SwitchToFarCode(true, &Assembler::BEQ, RSCRATCH, zero);
-    rvAsm->ADDI(sp, sp, -16);
-    rvAsm->SW(RARG1, 0, sp);
+    rvAsm->BEQ(RSCRATCH, zero, &caches_unchanged);
     EmitCall(reinterpret_cast<const void*>(&CPU::UpdateMemoryPointers));
-    rvAsm->LW(RARG1, 0, sp);
-    rvAsm->ADDI(sp, sp, 16);
-    rvAsm->LD(RMEMBASE, PTR(&g_state.fastmem_base));
-    SwitchToNearCode(true);
+    rvAsm->LW(new_value, PTR(ptr));
+    if (CodeCache::IsUsingFastmem())
+      rvAsm->LD(RMEMBASE, PTR(&g_state.fastmem_base));
+    rvAsm->Bind(&caches_unchanged);
 
     TestInterrupts(RARG1);
   }
@@ -2301,11 +2323,17 @@ void CPU::RISCV64Recompiler::Compile_mtc0(CompileFlags cf)
     rvAsm->LW(RARG1, PTR(&g_state.cop0_regs.sr.bits));
     TestInterrupts(RARG1);
   }
-
-  if (reg == Cop0Reg::DCIC && g_settings.cpu_recompiler_memory_exceptions)
+  else if (reg == Cop0Reg::DCIC || reg == Cop0Reg::BPCM)
   {
-    // TODO: DCIC handling for debug breakpoints
-    WARNING_LOG("TODO: DCIC handling for debug breakpoints");
+    // need to check whether we're switching to debug mode
+    Flush(FLUSH_FOR_C_CALL);
+    EmitCall(reinterpret_cast<const void*>(&CPU::UpdateDebugDispatcherFlag));
+    SwitchToFarCode(true, &Assembler::BEQ, RRET, zero);
+    BackupHostState();
+    Flush(FLUSH_FOR_EARLY_BLOCK_EXIT);
+    EmitCall(reinterpret_cast<const void*>(&CPU::ExitExecution)); // does not return
+    RestoreHostState();
+    SwitchToNearCode(false);
   }
 }
 

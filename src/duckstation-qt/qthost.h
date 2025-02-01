@@ -15,8 +15,10 @@
 #include "util/input_manager.h"
 
 #include <QtCore/QByteArray>
+#include <QtCore/QList>
 #include <QtCore/QMetaType>
 #include <QtCore/QObject>
+#include <QtCore/QPair>
 #include <QtCore/QSemaphore>
 #include <QtCore/QString>
 #include <QtCore/QThread>
@@ -44,8 +46,11 @@ class INISettingsInterface;
 enum class RenderAPI : u8;
 class GPUDevice;
 
+class GPUBackend;
+
 class MainWindow;
 class DisplayWidget;
+class InputDeviceListModel;
 
 namespace Achievements {
 enum class LoginRequestReason;
@@ -93,7 +98,8 @@ public:
   ALWAYS_INLINE bool isFullscreen() const { return m_is_fullscreen; }
   ALWAYS_INLINE bool isRenderingToMain() const { return m_is_rendering_to_main; }
   ALWAYS_INLINE bool isSurfaceless() const { return m_is_surfaceless; }
-  ALWAYS_INLINE bool isRunningFullscreenUI() const { return m_run_fullscreen_ui; }
+
+  ALWAYS_INLINE InputDeviceListModel* getInputDeviceListModel() const { return m_input_device_list_model.get(); }
 
   std::optional<WindowInfo> acquireRenderWindow(RenderAPI render_api, bool fullscreen, bool exclusive_fullscreen,
                                                 Error* error);
@@ -109,7 +115,7 @@ public:
 
   void bootOrLoadState(std::string path);
 
-  void updatePerformanceCounters();
+  void updatePerformanceCounters(const GPUBackend* gpu_backend);
   void resetPerformanceCounters();
 
   /// Locks the system by pausing it, while a popup dialog is displayed.
@@ -129,16 +135,13 @@ Q_SIGNALS:
   void statusMessage(const QString& message);
   void debuggerMessageReported(const QString& message);
   void settingsResetToDefault(bool system, bool controller);
-  void onInputDevicesEnumerated(const std::vector<std::pair<std::string, std::string>>& devices);
-  void onInputDeviceConnected(const std::string& identifier, const std::string& device_name);
-  void onInputDeviceDisconnected(const std::string& identifier);
-  void onVibrationMotorsEnumerated(const QList<InputBindingKey>& motors);
   void systemStarting();
   void systemStarted();
   void systemDestroyed();
   void systemPaused();
   void systemResumed();
   void gameListRefreshed();
+  void gameListRowsChanged(const QList<int>& rows_changed);
   std::optional<WindowInfo> onAcquireRenderWindowRequested(RenderAPI render_api, bool fullscreen, bool render_to_main,
                                                            bool surfaceless, bool use_main_window_pos, Error* error);
   void onResizeRenderWindowRequested(qint32 width, qint32 height);
@@ -147,8 +150,9 @@ Q_SIGNALS:
   void runningGameChanged(const QString& filename, const QString& game_serial, const QString& game_title);
   void inputProfileLoaded();
   void mouseModeRequested(bool relative, bool hide_cursor);
-  void fullscreenUIStateChange(bool running);
+  void fullscreenUIStartedOrStopped(bool running);
   void achievementsLoginRequested(Achievements::LoginRequestReason reason);
+  void achievementsLoginSuccess(const QString& username, quint32 points, quint32 sc_points, quint32 unread_messages);
   void achievementsRefreshed(quint32 id, const QString& game_info_string);
   void achievementsChallengeModeChanged(bool enabled);
   void cheatEnabled(quint32 index, bool enabled);
@@ -176,8 +180,6 @@ public Q_SLOTS:
   void reloadInputBindings();
   void reloadInputDevices();
   void closeInputSources();
-  void enumerateInputDevices();
-  void enumerateVibrationMotors();
   void startFullscreenUI();
   void stopFullscreenUI();
   void bootSystem(std::shared_ptr<SystemBootParameters> params);
@@ -206,10 +208,12 @@ public Q_SLOTS:
   void requestDisplaySize(float scale);
   void applyCheat(const QString& name);
   void reloadPostProcessingShaders();
-  void updatePostProcessingSettings();
+  void updatePostProcessingSettings(bool display, bool internal, bool force_reload);
   void clearInputBindStateFromSource(InputBindingKey key);
   void reloadTextureReplacements();
   void captureGPUFrameDump();
+  void startControllerTest();
+  void setGPUThreadRunIdle(bool active);
 
 private Q_SLOTS:
   void stopInThread();
@@ -227,23 +231,24 @@ protected:
   void run() override;
 
 private:
-  using InputButtonHandler = std::function<void(bool)>;
-  using InputAxisHandler = std::function<void(float)>;
-
   void createBackgroundControllerPollTimer();
   void destroyBackgroundControllerPollTimer();
   void confirmActionIfMemoryCardBusy(const QString& action, bool cancel_resume_on_accept,
                                      std::function<void(bool)> callback) const;
 
+  static void gpuThreadEntryPoint();
+
   QThread* m_ui_thread;
   QSemaphore m_started_semaphore;
   QEventLoop* m_event_loop = nullptr;
   QTimer* m_background_controller_polling_timer = nullptr;
+  std::unique_ptr<InputDeviceListModel> m_input_device_list_model;
 
   bool m_shutdown_flag = false;
-  bool m_run_fullscreen_ui = false;
   bool m_is_rendering_to_main = false;
   bool m_is_fullscreen = false;
+  bool m_is_fullscreen_ui_started = false;
+  bool m_gpu_thread_run_idle = false;
   bool m_is_surfaceless = false;
   bool m_save_state_on_shutdown = false;
 
@@ -256,6 +261,48 @@ private:
   u32 m_last_render_height = std::numeric_limits<u32>::max();
   RenderAPI m_last_render_api = RenderAPI::None;
   bool m_last_hardware_renderer = false;
+};
+
+class InputDeviceListModel final : public QAbstractListModel
+{
+  Q_OBJECT
+
+public:
+  struct Device
+  {
+    InputBindingKey key;
+    QString identifier;
+    QString display_name;
+  };
+
+  using DeviceList = QList<Device>;
+
+  InputDeviceListModel(QObject* parent = nullptr);
+  ~InputDeviceListModel() override;
+
+  // Safe to access on UI thread.
+  ALWAYS_INLINE const DeviceList& getDeviceList() const { return m_devices; }
+  ALWAYS_INLINE const QStringList& getVibrationMotorList() const { return m_vibration_motors; }
+
+  static QIcon getIconForKey(const InputBindingKey& key);
+
+  int rowCount(const QModelIndex& parent = QModelIndex()) const override;
+  QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
+
+  // NOTE: Should only be called on EmuThread.
+  void enumerateDevices();
+
+public Q_SLOTS:
+  void onDeviceConnected(const InputBindingKey& key, const QString& identifier, const QString& device_name,
+                         const QStringList& vibration_motors);
+  void onDeviceDisconnected(const InputBindingKey& key, const QString& identifier);
+
+private Q_SLOTS:
+  void resetLists(const DeviceList& devices, const QStringList& motors);
+
+private:
+  DeviceList m_devices;
+  QStringList m_vibration_motors;
 };
 
 extern EmuThread* g_emu_thread;

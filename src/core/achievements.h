@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #pragma once
@@ -6,13 +6,14 @@
 #include "common/small_string.h"
 #include "common/types.h"
 
+#include <array>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
-
-struct rc_client_t;
 
 class Error;
 class StateWrapper;
@@ -28,11 +29,47 @@ enum class LoginRequestReason
   TokenInvalid,
 };
 
+static constexpr size_t GAME_HASH_LENGTH = 16;
+using GameHash = std::array<u8, GAME_HASH_LENGTH>;
+
+struct HashDatabaseEntry
+{
+  GameHash hash;
+  u32 game_id;
+  u32 num_achievements;
+};
+
+class ProgressDatabase
+{
+public:
+  struct Entry
+  {
+    u32 game_id;
+    u16 num_achievements_unlocked;
+    u16 num_hc_achievements_unlocked;
+  };
+
+  ProgressDatabase();
+  ~ProgressDatabase();
+
+  bool Load(Error* error);
+
+  const Entry* LookupGame(u32 game_id) const;
+
+private:
+  std::vector<Entry> m_entries;
+};
+
 /// Acquires the achievements lock. Must be held when accessing any achievement state from another thread.
 std::unique_lock<std::recursive_mutex> GetLock();
 
-/// Returns the rc_client instance. Should have the lock held.
-rc_client_t* GetClient();
+/// Returns the achievements game hash for a given disc.
+std::optional<GameHash> GetGameHash(CDImage* image, u32* bytes_hashed = nullptr);
+std::optional<GameHash> GetGameHash(const std::string_view executable_name, std::span<const u8> executable_data,
+                                    u32* bytes_hashed = nullptr);
+
+/// Returns the number of achievements for a given hash.
+const HashDatabaseEntry* LookupGameHash(const GameHash& hash);
 
 /// Initializes the RetroAchievments client.
 bool Initialize();
@@ -41,7 +78,7 @@ bool Initialize();
 void UpdateSettings(const Settings& old_config);
 
 /// Resets the internal state of all achievement tracking. Call on system reset.
-void ResetClient();
+void Reset();
 
 /// Called when the system is being reset. If it returns false, the reset should be aborted.
 bool ConfirmSystemReset();
@@ -72,7 +109,7 @@ bool Login(const char* username, const char* password, Error* error);
 void Logout();
 
 /// Called when the system changes game, or is booting.
-void GameChanged(const std::string& path, CDImage* image);
+void GameChanged(const std::string& path, CDImage* image, bool booting);
 
 /// Re-enables hardcore mode if it is enabled in the settings.
 bool ResetHardcoreMode(bool is_booting);

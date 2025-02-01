@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com> and contributors.
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com> and contributors.
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "negcon_rumble.h"
@@ -69,18 +69,8 @@ void NeGconRumble::Reset()
 
   if (m_force_analog_on_reset)
   {
-    if (!CanStartInAnalogMode(ControllerType::AnalogController))
-    {
-      Host::AddIconOSDMessage(
-        fmt::format("Controller{}AnalogMode", m_index), ICON_FA_GAMEPAD,
-        TRANSLATE_STR("OSDMessage",
-                      "Analog mode forcing is disabled by game settings. Controller will start in digital mode."),
-        10.0f);
-    }
-    else
-    {
+    if (CanStartInAnalogMode(ControllerType::AnalogController))
       SetAnalogMode(true, false);
-    }
   }
 }
 
@@ -149,6 +139,11 @@ float NeGconRumble::GetBindState(u32 index) const
   {
     return 0.0f;
   }
+}
+
+float NeGconRumble::GetVibrationMotorState(u32 index) const
+{
+  return ((index < m_motor_state.size()) ? m_motor_state[index] : 0) * (1.0f / 255.0f);
 }
 
 void NeGconRumble::SetBindState(u32 index, float value)
@@ -720,14 +715,16 @@ std::unique_ptr<NeGconRumble> NeGconRumble::Create(u32 index)
 
 static const Controller::ControllerBindingInfo s_binding_info[] = {
 #define BUTTON(name, display_name, icon_name, button, genb)                                                            \
-  {                                                                                                                    \
-    name, display_name, icon_name, static_cast<u32>(button), InputBindingInfo::Type::Button, genb                      \
-  }
+  {name, display_name, icon_name, static_cast<u32>(button), InputBindingInfo::Type::Button, genb}
 #define AXIS(name, display_name, icon_name, halfaxis, genb)                                                            \
-  {                                                                                                                    \
-    name, display_name, icon_name, static_cast<u32>(NeGconRumble::Button::Count) + static_cast<u32>(halfaxis),         \
-      InputBindingInfo::Type::HalfAxis, genb                                                                           \
-  }
+  {name,                                                                                                               \
+   display_name,                                                                                                       \
+   icon_name,                                                                                                          \
+   static_cast<u32>(NeGconRumble::Button::Count) + static_cast<u32>(halfaxis),                                         \
+   InputBindingInfo::Type::HalfAxis,                                                                                   \
+   genb}
+#define MOTOR(name, display_name, icon_name, index, genb)                                                              \
+  {name, display_name, icon_name, index, InputBindingInfo::Type::Motor, genb}
 
   // clang-format off
   BUTTON("Up", TRANSLATE_NOOP("NeGconRumble", "D-Pad Up"), ICON_PF_DPAD_UP, NeGconRumble::Button::Up, GenericInputBinding::DPadUp),
@@ -744,8 +741,12 @@ static const Controller::ControllerBindingInfo s_binding_info[] = {
   AXIS("SteeringLeft", TRANSLATE_NOOP("NeGconRumble", "Steering (Twist) Left"), ICON_PF_LEFT_ANALOG_LEFT, NeGconRumble::HalfAxis::SteeringLeft, GenericInputBinding::LeftStickLeft),
   AXIS("SteeringRight", TRANSLATE_NOOP("NeGconRumble", "Steering (Twist) Right"), ICON_PF_LEFT_ANALOG_LEFT, NeGconRumble::HalfAxis::SteeringRight, GenericInputBinding::LeftStickRight),
   BUTTON("Analog", TRANSLATE_NOOP("NeGconRumble", "Analog Toggle"), ICON_PF_ANALOG_LEFT_RIGHT, NeGconRumble::Button::Analog, GenericInputBinding::System),
+  
+  MOTOR("LargeMotor", TRANSLATE_NOOP("AnalogController", "Large Motor"), ICON_PF_VIBRATION_L, 0, GenericInputBinding::LargeMotor),
+  MOTOR("SmallMotor", TRANSLATE_NOOP("AnalogController", "Small Motor"), ICON_PF_VIBRATION, 1, GenericInputBinding::SmallMotor),
 // clang-format on
 
+#undef MOTOR
 #undef AXIS
 #undef BUTTON
 };
@@ -774,8 +775,7 @@ const Controller::ControllerInfo NeGconRumble::INFO = {ControllerType::NeGconRum
                                                        TRANSLATE_NOOP("ControllerType", "NeGcon (Rumble)"),
                                                        ICON_PF_GAMEPAD,
                                                        s_binding_info,
-                                                       s_settings,
-                                                       Controller::VibrationCapabilities::LargeSmallMotors};
+                                                       s_settings};
 
 void NeGconRumble::LoadSettings(const SettingsInterface& si, const char* section, bool initial)
 {

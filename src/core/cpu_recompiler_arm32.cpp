@@ -31,10 +31,6 @@ LOG_CHANNEL(Recompiler);
 #define PTR(x) vixl::aarch32::MemOperand(RSTATE, (((u8*)(x)) - ((u8*)&g_state)))
 #define RMEMBASE vixl::aarch32::r3
 
-static constexpr u32 FUNCTION_CALLEE_SAVED_SPACE_RESERVE = 80;  // 8 registers
-static constexpr u32 FUNCTION_CALLER_SAVED_SPACE_RESERVE = 144; // 18 registers -> 224 bytes
-static constexpr u32 FUNCTION_STACK_SIZE = FUNCTION_CALLEE_SAVED_SPACE_RESERVE + FUNCTION_CALLER_SAVED_SPACE_RESERVE;
-
 #define RRET vixl::aarch32::r0
 #define RRETHI vixl::aarch32::r1
 #define RARG1 vixl::aarch32::r0
@@ -266,9 +262,6 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
 
   g_enter_recompiler = armAsm->GetCursorAddress<decltype(g_enter_recompiler)>();
   {
-    // reserve some space for saving caller-saved registers
-    armAsm->sub(sp, sp, FUNCTION_STACK_SIZE);
-
     // Need the CPU state for basically everything :-)
     armMoveAddressToReg(armAsm, RSTATE, &g_state);
   }
@@ -297,11 +290,12 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
     armAsm->ldr(RARG1, PTR(&g_state.pc));
     armMoveAddressToReg(armAsm, RARG3, g_code_lut.data());
     armAsm->lsr(RARG2, RARG1, 16);
+    armAsm->ubfx(RARG1, RARG1, 2, 14);
     armAsm->ldr(RARG2, MemOperand(RARG3, RARG2, LSL, 2));
 
     // blr(x9[pc * 2]) (fast_map[pc >> 2])
-    armAsm->ldr(RARG1, MemOperand(RARG2, RARG1));
-    armAsm->blx(RARG1);
+    armAsm->ldr(RARG1, MemOperand(RARG2, RARG1, LSL, 2));
+    armAsm->bx(RARG1);
   }
 
   g_compile_or_revalidate_block = armAsm->GetCursorAddress<const void*>();
@@ -326,14 +320,17 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
 
   armAsm->FinalizeCode();
 
-#if 0
-  // TODO: align?
   s_trampoline_targets.clear();
   s_trampoline_start_ptr = static_cast<u8*>(code) + armAsm->GetCursorOffset();
   s_trampoline_used = 0;
-#endif
 
-  return static_cast<u32>(armAsm->GetCursorOffset()) /* + TRAMPOLINE_AREA_SIZE*/;
+  return static_cast<u32>(armAsm->GetCursorOffset()) + TRAMPOLINE_AREA_SIZE;
+}
+
+void CPU::CodeCache::EmitAlignmentPadding(void* dst, size_t size)
+{
+  constexpr u8 padding_value = 0x00;
+  std::memset(dst, padding_value, size);
 }
 
 CPU::ARM32Recompiler::ARM32Recompiler() : m_emitter(A32), m_far_emitter(A32)
@@ -1031,7 +1028,8 @@ void CPU::ARM32Recompiler::Flush(u32 flags)
 
 void CPU::ARM32Recompiler::Compile_Fallback()
 {
-  WARNING_LOG("Compiling instruction fallback at PC=0x{:08X}, instruction=0x{:08X}", iinfo->pc, inst->bits);
+  WARNING_LOG("Compiling instruction fallback at PC=0x{:08X}, instruction=0x{:08X}", m_current_instruction_pc,
+              inst->bits);
 
   Flush(FLUSH_FOR_INTERPRETER);
 
@@ -2272,16 +2270,19 @@ void CPU::ARM32Recompiler::Compile_mtc0(CompileFlags cf)
     // We could just inline the whole thing..
     Flush(FLUSH_FOR_C_CALL);
 
-    SwitchToFarCodeIfBitSet(changed_bits, 16);
-    armAsm->push(RegisterList(RARG1));
+    Label caches_unchanged;
+    armAsm->tst(changed_bits, 1u << 16);
+    armAsm->b(eq, &caches_unchanged);
     EmitCall(reinterpret_cast<const void*>(&CPU::UpdateMemoryPointers));
-    armAsm->pop(RegisterList(RARG1));
+    armAsm->ldr(RARG1, PTR(ptr)); // reload value for interrupt test below
+    armAsm->bind(&caches_unchanged);
+
+    // might need to reload fastmem base too
     if (CodeCache::IsUsingFastmem() && m_block->HasFlag(CodeCache::BlockFlags::ContainsLoadStoreInstructions) &&
         IsHostRegAllocated(RMEMBASE.GetCode()))
     {
       FreeHostReg(RMEMBASE.GetCode());
     }
-    SwitchToNearCode(true);
 
     TestInterrupts(RARG1);
   }
@@ -2290,11 +2291,17 @@ void CPU::ARM32Recompiler::Compile_mtc0(CompileFlags cf)
     armAsm->ldr(RARG1, PTR(&g_state.cop0_regs.sr.bits));
     TestInterrupts(RARG1);
   }
-
-  if (reg == Cop0Reg::DCIC && g_settings.cpu_recompiler_memory_exceptions)
+  else if (reg == Cop0Reg::DCIC || reg == Cop0Reg::BPCM)
   {
-    // TODO: DCIC handling for debug breakpoints
-    WARNING_LOG("TODO: DCIC handling for debug breakpoints");
+    // need to check whether we're switching to debug mode
+    Flush(FLUSH_FOR_C_CALL);
+    EmitCall(reinterpret_cast<const void*>(&CPU::UpdateDebugDispatcherFlag));
+    SwitchToFarCodeIfRegZeroOrNonZero(RRET, true);
+    BackupHostState();
+    Flush(FLUSH_FOR_EARLY_BLOCK_EXIT);
+    EmitCall(reinterpret_cast<const void*>(&CPU::ExitExecution)); // does not return
+    RestoreHostState();
+    SwitchToNearCode(false);
   }
 }
 

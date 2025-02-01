@@ -37,8 +37,6 @@ enum RegInfoFlags : u8
 
 struct InstructionInfo
 {
-  u32 pc; // TODO: Remove this, old recs still depend on it.
-
   bool is_branch_instruction : 1;
   bool is_direct_branch_instruction : 1;
   bool is_unconditional_branch_instruction : 1;
@@ -249,6 +247,7 @@ bool HasPreviouslyFaultedOnPC(u32 guest_pc);
 
 u32 EmitASMFunctions(void* code, u32 code_size);
 u32 EmitJump(void* code, const void* dst, bool flush_icache);
+void EmitAlignmentPadding(void* dst, size_t size);
 
 void DisassembleAndLogHostCode(const void* start, u32 size);
 u32 GetHostInstructionCount(const void* start, u32 size);

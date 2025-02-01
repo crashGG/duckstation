@@ -121,6 +121,9 @@ ALWAYS_INLINE static std::string_view RemoveHash(std::string_view s)
 ImRect CenterImage(const ImVec2& fit_size, const ImVec2& image_size);
 ImRect CenterImage(const ImRect& fit_rect, const ImVec2& image_size);
 
+/// Fits an image to the specified bounds, cropping if needed. Returns UV coordinates.
+ImRect FitImage(const ImVec2& fit_size, const ImVec2& image_size);
+
 /// Initializes, setting up any state.
 bool Initialize(const char* placeholder_image_path);
 
@@ -130,7 +133,7 @@ void SetFonts(ImFont* medium_font, ImFont* large_font);
 bool UpdateLayoutScale();
 
 /// Shuts down, clearing all state.
-void Shutdown();
+void Shutdown(bool clear_state);
 
 /// Texture cache.
 const std::shared_ptr<GPUTexture>& GetPlaceholderTexture();
@@ -138,11 +141,15 @@ std::shared_ptr<GPUTexture> LoadTexture(std::string_view path, u32 svg_width = 0
 GPUTexture* GetCachedTexture(std::string_view name);
 GPUTexture* GetCachedTexture(std::string_view name, u32 svg_width, u32 svg_height);
 GPUTexture* GetCachedTextureAsync(std::string_view name);
-bool InvalidateCachedTexture(const std::string& path);
+GPUTexture* GetCachedTextureAsync(std::string_view name, u32 svg_width, u32 svg_height);
+bool InvalidateCachedTexture(std::string_view path);
+bool TextureNeedsSVGDimensions(std::string_view path);
 void UploadAsyncTextures();
 
 void BeginLayout();
 void EndLayout();
+
+void RenderOverlays();
 
 void PushResetLayout();
 void PopResetLayout();
@@ -164,6 +171,7 @@ void ForceKeyNavEnabled();
 
 bool WantsToCloseMenu();
 void ResetCloseMenuIfNeeded();
+void CancelPendingMenuClose();
 
 void PushPrimaryColor();
 void PopPrimaryColor();
@@ -187,9 +195,11 @@ bool BeginFullscreenWindow(const ImVec2& position, const ImVec2& size, const cha
 void EndFullscreenWindow();
 
 bool IsGamepadInputSource();
+std::string_view GetControllerIconMapping(std::string_view icon);
 void CreateFooterTextString(SmallStringBase& dest, std::span<const std::pair<const char*, std::string_view>> items);
-void SetFullscreenFooterText(std::string_view text);
-void SetFullscreenFooterText(std::span<const std::pair<const char*, std::string_view>> items);
+void SetFullscreenFooterText(std::string_view text, float background_alpha);
+void SetFullscreenFooterText(std::span<const std::pair<const char*, std::string_view>> items, float background_alpha);
+void SetFullscreenFooterTextIconMapping(std::span<const std::pair<const char*, const char*>> mapping);
 void DrawFullscreenFooter();
 
 void PrerenderMenuButtonBorder();
@@ -280,11 +290,12 @@ bool NavButton(const char* title, bool is_active, bool enabled = true, float wid
 bool NavTab(const char* title, bool is_active, bool enabled, float width, float height, const ImVec4& background,
             ImFont* font = UIStyle.LargeFont);
 
-bool BeginHorizontalMenu(const char* name, const ImVec2& position, const ImVec2& size, u32 num_items);
+bool BeginHorizontalMenu(const char* name, const ImVec2& position, const ImVec2& size, const ImVec4& bg_color,
+                         u32 num_items);
 void EndHorizontalMenu();
 bool HorizontalMenuItem(GPUTexture* icon, const char* title, const char* description);
 
-using FileSelectorCallback = std::function<void(const std::string& path)>;
+using FileSelectorCallback = std::function<void(std::string path)>;
 using FileSelectorFilters = std::vector<std::string>;
 bool IsFileSelectorOpen();
 void OpenFileSelector(std::string_view title, bool select_directory, FileSelectorCallback callback,
@@ -326,6 +337,18 @@ void OpenBackgroundProgressDialog(const char* str_id, std::string message, s32 m
 void UpdateBackgroundProgressDialog(const char* str_id, std::string message, s32 min, s32 max, s32 value);
 void CloseBackgroundProgressDialog(const char* str_id);
 bool IsBackgroundProgressDialogOpen(const char* str_id);
+
+/// Displays a loading screen with the logo, rendered with ImGui. Use when executing possibly-time-consuming tasks
+/// such as compiling shaders when starting up.
+void RenderLoadingScreen(std::string_view image, std::string_view message, s32 progress_min = -1, s32 progress_max = -1,
+                         s32 progress_value = -1);
+void OpenOrUpdateLoadingScreen(std::string_view image, std::string_view message, s32 progress_min = -1,
+                               s32 progress_max = -1, s32 progress_value = -1);
+bool IsLoadingScreenOpen();
+void CloseLoadingScreen();
+
+/// Renders a previously-configured loading screen.
+void RenderLoadingScreen();
 
 void AddNotification(std::string key, float duration, std::string title, std::string text, std::string image_path);
 void ClearNotifications();

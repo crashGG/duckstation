@@ -5,11 +5,13 @@
 
 #include "gpu_types.h"
 
+class Error;
 class Image;
 class GPUTexture;
 class StateWrapper;
 
-struct Settings;
+struct GPUSettings;
+class GPU_HW;
 
 //////////////////////////////////////////////////////////////////////////
 // Texture Cache
@@ -56,7 +58,7 @@ struct TListNode
   TListNode<T>* next;
 };
 
-struct SourceKey
+struct alignas(4) SourceKey
 {
   u8 page;
   GPUTextureMode mode;
@@ -102,9 +104,12 @@ struct Source
   TListNode<Source> hash_cache_ref;
 };
 
-bool Initialize();
-void UpdateSettings(bool use_texture_cache, const Settings& old_settings);
+bool Initialize(GPU_HW* backend, Error* error);
+bool UpdateSettings(bool use_texture_cache, const GPUSettings& old_settings, Error* error);
+
+bool GetStateSize(StateWrapper& sw, u32* size);
 bool DoState(StateWrapper& sw, bool skip);
+
 void Shutdown();
 
 void Invalidate();
@@ -124,7 +129,7 @@ bool AreSourcePagesDrawn(SourceKey key, const GSVector4i rect);
 
 void Compact();
 
-void SetGameID(std::string game_id);
+void GameSerialChanged();
 void ReloadTextureReplacements(bool show_info);
 
 // VRAM Write Replacements

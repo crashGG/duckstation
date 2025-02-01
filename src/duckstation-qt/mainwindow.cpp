@@ -32,11 +32,13 @@
 
 #include "util/cd_image.h"
 #include "util/gpu_device.h"
+#include "util/platform_misc.h"
 
 #include "common/assert.h"
 #include "common/error.h"
 #include "common/file_system.h"
 #include "common/log.h"
+#include "common/string_util.h"
 
 #include <QtCore/QDebug>
 #include <QtCore/QFile>
@@ -62,13 +64,40 @@
 
 LOG_CHANNEL(Host);
 
+static constexpr std::pair<const char*, QAction * Ui::MainWindow::*> s_toolbar_actions[] = {
+  {"StartFile", &Ui::MainWindow::actionStartFile},
+  {"StartBIOS", &Ui::MainWindow::actionStartBios},
+  {"StartDisc", &Ui::MainWindow::actionStartDisc},
+  {"FullscreenUI", &Ui::MainWindow::actionStartFullscreenUI2},
+  {nullptr, nullptr},
+  {"PowerOff", &Ui::MainWindow::actionPowerOff},
+  {"PowerOffWithoutSaving", &Ui::MainWindow::actionPowerOffWithoutSaving},
+  {"Reset", &Ui::MainWindow::actionReset},
+  {"Pause", &Ui::MainWindow::actionPause},
+  {"ChangeDisc", &Ui::MainWindow::actionChangeDisc},
+  {"Cheats", &Ui::MainWindow::actionCheatsToolbar},
+  {"Screenshot", &Ui::MainWindow::actionScreenshot},
+  {nullptr, nullptr},
+  {"LoadState", &Ui::MainWindow::actionLoadState},
+  {"SaveState", &Ui::MainWindow::actionSaveState},
+  {nullptr, nullptr},
+  {"Fullscreen", &Ui::MainWindow::actionFullscreen},
+  {"Settings", &Ui::MainWindow::actionSettings2},
+  {"ControllerSettings", &Ui::MainWindow::actionControllerSettings},
+  {"ControllerPresets", &Ui::MainWindow::actionControllerProfiles},
+};
+
+static constexpr const char* DEFAULT_TOOLBAR_ACTIONS =
+  "StartFile,StartBIOS,FullscreenUI,PowerOff,Reset,Pause,ChangeDisc,Cheats,Screenshot,LoadState,SaveState,"
+  "Fullscreen,Settings,ControllerSettings";
+
 static constexpr char DISC_IMAGE_FILTER[] = QT_TRANSLATE_NOOP(
   "MainWindow",
   "All File Types (*.bin *.img *.iso *.cue *.chd *.cpe *.ecm *.mds *.pbp *.elf *.exe *.psexe *.ps-exe *.psx *.psf "
   "*.minipsf *.m3u *.psxgpu);;Single-Track Raw Images (*.bin *.img *.iso);;Cue Sheets (*.cue);;MAME CHD Images "
   "(*.chd);;Error Code Modeler Images (*.ecm);;Media Descriptor Sidecar Images (*.mds);;PlayStation EBOOTs (*.pbp "
   "*.PBP);;PlayStation Executables (*.cpe *.elf *.exe *.psexe *.ps-exe, *.psx);;Portable Sound Format Files (*.psf "
-  "*.minipsf);;Playlists (*.m3u);;PSX GPU Dumps (*.psxgpu)");
+  "*.minipsf);;Playlists (*.m3u);;PSX GPU Dumps (*.psxgpu *.psxgpu.zst *.psxgpu.xz)");
 
 MainWindow* g_main_window = nullptr;
 
@@ -83,8 +112,10 @@ static bool s_use_central_widget = false;
 #endif
 
 // UI thread VM validity.
+static bool s_disable_window_rounded_corners = false;
 static bool s_system_valid = false;
 static bool s_system_paused = false;
+static bool s_fullscreen_ui_started = false;
 static std::atomic_uint32_t s_system_locked{false};
 static QString s_current_game_title;
 static QString s_current_game_serial;
@@ -147,6 +178,7 @@ void MainWindow::initialize()
 {
   m_ui.setupUi(this);
   setupAdditionalUi();
+  updateToolbarActions();
   connectSignals();
 
   restoreStateFromConfig();
@@ -161,6 +193,11 @@ void MainWindow::initialize()
 #ifdef _WIN32
   registerForDeviceNotifications();
 #endif
+}
+
+QMenu* MainWindow::createPopupMenu()
+{
+  return nullptr;
 }
 
 void MainWindow::reportError(const QString& title, const QString& message)
@@ -352,6 +389,9 @@ void MainWindow::createDisplayWidget(bool fullscreen, bool render_to_main, bool 
     else
       restoreDisplayWindowGeometryFromConfig();
     container->showNormal();
+
+    if (s_disable_window_rounded_corners)
+      PlatformMisc::SetWindowRoundedCornerState(reinterpret_cast<void*>(container->winId()), false);
   }
   else if (s_use_central_widget)
   {
@@ -370,6 +410,7 @@ void MainWindow::createDisplayWidget(bool fullscreen, bool render_to_main, bool 
   }
 
   updateDisplayRelatedActions(true, render_to_main, fullscreen);
+  updateShortcutActions(false);
 
   // We need the surface visible.
   QGuiApplication::sync();
@@ -404,6 +445,7 @@ void MainWindow::releaseRenderWindow()
   m_display_created = false;
 
   updateDisplayRelatedActions(false, false, false);
+  updateShortcutActions(false);
 
   m_ui.actionViewSystemDisplay->setEnabled(false);
   m_ui.actionFullscreen->setEnabled(false);
@@ -579,10 +621,6 @@ void MainWindow::onSystemDestroyed()
     updateDisplayWidgetCursor();
   else
     switchToGameListView();
-
-  // reload played time
-  if (m_game_list_widget->isShowingGameList())
-    m_game_list_widget->refresh(false);
 }
 
 void MainWindow::onRunningGameChanged(const QString& filename, const QString& game_serial, const QString& game_title)
@@ -694,7 +732,7 @@ void MainWindow::quit()
   // Make sure VM is gone. It really should be if we're here.
   if (s_system_valid)
   {
-    g_emu_thread->shutdownSystem(false, true);
+    g_emu_thread->shutdownSystem(false, false);
     QtUtils::ProcessEventsWithSleep(QEventLoop::ExcludeUserInputEvents, []() { return s_system_valid; });
   }
 
@@ -764,7 +802,7 @@ void MainWindow::recreate()
   {
     g_emu_thread->setSurfaceless(false);
     g_main_window->updateEmulationActions(false, System::IsValid(), Achievements::IsHardcoreModeActive());
-    g_main_window->onFullscreenUIStateChange(g_emu_thread->isRunningFullscreenUI());
+    g_main_window->onFullscreenUIStartedOrStopped(s_fullscreen_ui_started);
   }
 
   if (controller_settings_window_pos.has_value())
@@ -789,6 +827,7 @@ void MainWindow::destroySubWindows()
   QtUtils::CloseAndDeleteWindow(m_debugger_window);
   QtUtils::CloseAndDeleteWindow(m_memory_card_editor_window);
   QtUtils::CloseAndDeleteWindow(m_controller_settings_window);
+  QtUtils::CloseAndDeleteWindow(m_input_profile_editor_window);
   QtUtils::CloseAndDeleteWindow(m_settings_window);
 
   SettingsWindow::closeGamePropertiesDialogs();
@@ -1077,6 +1116,8 @@ std::shared_ptr<SystemBootParameters> MainWindow::getSystemBootParameters(std::s
 
 std::optional<bool> MainWindow::promptForResumeState(const std::string& save_state_path)
 {
+  System::FlushSaveStates();
+
   FILESYSTEM_STAT_DATA sd;
   if (save_state_path.empty() || !FileSystem::StatFile(save_state_path.c_str(), &sd))
     return false;
@@ -1258,8 +1299,9 @@ void MainWindow::onStartFullscreenUITriggered()
     g_emu_thread->startFullscreenUI();
 }
 
-void MainWindow::onFullscreenUIStateChange(bool running)
+void MainWindow::onFullscreenUIStartedOrStopped(bool running)
 {
+  s_fullscreen_ui_started = running;
   m_ui.actionStartFullscreenUI->setText(running ? tr("Stop Big Picture Mode") : tr("Start Big Picture Mode"));
   m_ui.actionStartFullscreenUI2->setText(running ? tr("Exit Big Picture") : tr("Big Picture"));
 }
@@ -1356,6 +1398,25 @@ void MainWindow::onGameListRefreshComplete()
 {
   m_ui.statusBar->clearMessage();
   clearProgressBar();
+}
+
+void MainWindow::onGameListLayoutChanged()
+{
+  // re-sync with menu
+  {
+    QSignalBlocker sb(m_ui.actionGridViewShowTitles);
+    m_ui.actionGridViewShowTitles->setChecked(m_game_list_widget->isShowingGridCoverTitles());
+  }
+
+  {
+    QSignalBlocker sb(m_ui.actionMergeDiscSets);
+    m_ui.actionMergeDiscSets->setChecked(m_game_list_widget->isMergingDiscSets());
+  }
+
+  {
+    QSignalBlocker sb(m_ui.actionShowGameIcons);
+    m_ui.actionShowGameIcons->setChecked(m_game_list_widget->isShowingGameIcons());
+  }
 }
 
 void MainWindow::onGameListSelectionChanged()
@@ -1605,13 +1666,9 @@ void MainWindow::setupAdditionalUi()
   const bool toolbars_locked = Host::GetBaseBoolSettingValue("UI", "LockToolbar", false);
   m_ui.actionViewLockToolbar->setChecked(toolbars_locked);
   m_ui.toolBar->setMovable(!toolbars_locked);
-  m_ui.toolBar->setContextMenuPolicy(Qt::PreventContextMenu);
 
   m_game_list_widget = new GameListWidget(getContentParent());
   m_game_list_widget->initialize();
-  m_ui.actionGridViewShowTitles->setChecked(m_game_list_widget->isShowingGridCoverTitles());
-  m_ui.actionMergeDiscSets->setChecked(m_game_list_widget->isMergingDiscSets());
-  m_ui.actionShowGameIcons->setChecked(m_game_list_widget->isShowingGameIcons());
   if (s_use_central_widget)
   {
     m_ui.mainContainer = nullptr; // setCentralWidget() will delete this
@@ -1651,14 +1708,13 @@ void MainWindow::setupAdditionalUi()
   m_settings_toolbar_menu->addAction(m_ui.actionSettings);
   m_settings_toolbar_menu->addAction(m_ui.actionViewGameProperties);
 
-  m_ui.actionGridViewShowTitles->setChecked(m_game_list_widget->isShowingGridCoverTitles());
-
   for (u32 scale = 1; scale <= 10; scale++)
   {
     QAction* action = m_ui.menuWindowSize->addAction(tr("%1x Scale").arg(scale));
     connect(action, &QAction::triggered, [scale]() { g_emu_thread->requestDisplaySize(scale); });
   }
 
+  onGameListLayoutChanged();
   updateDebugMenuVisibility();
 
   m_shortcuts.open_file =
@@ -1671,6 +1727,10 @@ void MainWindow::setupAdditionalUi()
     new QShortcut(Qt::ControlModifier | Qt::Key_Plus, this, this, &MainWindow::onViewGameGridZoomInActionTriggered);
   m_shortcuts.game_grid_zoom_out =
     new QShortcut(Qt::ControlModifier | Qt::Key_Minus, this, this, &MainWindow::onViewGameGridZoomOutActionTriggered);
+
+  s_disable_window_rounded_corners = Host::GetBaseBoolSettingValue("Main", "DisableWindowRoundedCorners", false);
+  if (s_disable_window_rounded_corners)
+    PlatformMisc::SetWindowRoundedCornerState(reinterpret_cast<void*>(winId()), false);
 
 #ifdef ENABLE_RAINTEGRATION
   if (Achievements::IsUsingRAIntegration())
@@ -1702,6 +1762,86 @@ void MainWindow::setupAdditionalUi()
     });
   }
 #endif
+}
+
+void MainWindow::updateToolbarActions()
+{
+  const std::string active_buttons_str =
+    Host::GetBaseStringSettingValue("UI", "ToolbarButtons", DEFAULT_TOOLBAR_ACTIONS);
+  const std::vector<std::string_view> active_buttons = StringUtil::SplitString(active_buttons_str, ',');
+
+  m_ui.toolBar->clear();
+
+  bool any_items_before_separator = false;
+  for (const auto& [name, action_ptr] : s_toolbar_actions)
+  {
+    if (!name)
+    {
+      // separator, but don't insert empty space between them
+      if (any_items_before_separator)
+      {
+        any_items_before_separator = false;
+        m_ui.toolBar->addSeparator();
+      }
+
+      continue;
+    }
+
+    // enabled?
+    if (!StringUtil::IsInStringList(active_buttons, name))
+      continue;
+
+    // only one of resume/poweroff should be present depending on system state
+    QAction* action = (m_ui.*action_ptr);
+    if (action == m_ui.actionPowerOff && !s_system_valid)
+      action = m_ui.actionResumeLastState;
+
+    m_ui.toolBar->addAction(action);
+    any_items_before_separator = true;
+  }
+}
+
+void MainWindow::onToolbarContextMenuRequested(const QPoint& pos)
+{
+  {
+    const std::string active_buttons_str =
+      Host::GetBaseStringSettingValue("UI", "ToolbarButtons", DEFAULT_TOOLBAR_ACTIONS);
+    std::vector<std::string_view> active_buttons = StringUtil::SplitString(active_buttons_str, ',');
+    bool active_buttons_changed = false;
+
+    QMenu menu;
+
+    for (const auto& [name, action_ptr] : s_toolbar_actions)
+    {
+      if (!name)
+      {
+        menu.addSeparator();
+        continue;
+      }
+
+      QAction* action = (m_ui.*action_ptr);
+      QAction* menu_action = menu.addAction(action->text());
+      menu_action->setCheckable(true);
+      menu_action->setChecked(StringUtil::IsInStringList(active_buttons, name));
+      connect(menu_action, &QAction::toggled, this, [&active_buttons, &active_buttons_changed, name](bool checked) {
+        if (checked)
+          StringUtil::AddToStringList(active_buttons, name);
+        else
+          StringUtil::RemoveFromStringList(active_buttons, name);
+        active_buttons_changed = true;
+      });
+    }
+
+    menu.exec(m_ui.toolBar->mapToGlobal(pos));
+
+    if (!active_buttons_changed)
+      return;
+
+    Host::SetBaseStringSettingValue("UI", "ToolbarButtons", StringUtil::JoinString(active_buttons, ',').c_str());
+    Host::CommitBaseSettingChanges();
+  }
+
+  updateToolbarActions();
 }
 
 void MainWindow::updateEmulationActions(bool starting, bool running, bool cheevos_challenge_mode)
@@ -1737,15 +1877,13 @@ void MainWindow::updateEmulationActions(bool starting, bool running, bool cheevo
 
   m_ui.actionViewGameProperties->setDisabled(starting_or_not_running);
 
-  m_shortcuts.open_file->setEnabled(!starting_or_running);
-  m_shortcuts.game_list_refresh->setEnabled(!starting_or_running);
-  m_shortcuts.game_list_search->setEnabled(!starting_or_running);
-  m_shortcuts.game_grid_zoom_in->setEnabled(!starting_or_running);
-  m_shortcuts.game_grid_zoom_out->setEnabled(!starting_or_running);
+  m_ui.actionControllerTest->setDisabled(starting_or_running);
+
+  updateShortcutActions(starting);
 
   if (starting_or_running)
   {
-    if (!m_ui.toolBar->actions().contains(m_ui.actionPowerOff))
+    if (m_ui.toolBar->widgetForAction(m_ui.actionResumeLastState))
     {
       m_ui.toolBar->insertAction(m_ui.actionResumeLastState, m_ui.actionPowerOff);
       m_ui.toolBar->removeAction(m_ui.actionResumeLastState);
@@ -1753,7 +1891,7 @@ void MainWindow::updateEmulationActions(bool starting, bool running, bool cheevo
   }
   else
   {
-    if (!m_ui.toolBar->actions().contains(m_ui.actionResumeLastState))
+    if (m_ui.toolBar->widgetForAction(m_ui.actionPowerOff))
     {
       m_ui.toolBar->insertAction(m_ui.actionPowerOff, m_ui.actionResumeLastState);
       m_ui.toolBar->removeAction(m_ui.actionPowerOff);
@@ -1763,6 +1901,18 @@ void MainWindow::updateEmulationActions(bool starting, bool running, bool cheevo
   }
 
   m_ui.statusBar->clearMessage();
+}
+
+void MainWindow::updateShortcutActions(bool starting)
+{
+  const bool starting_or_running = starting || s_system_valid;
+  const bool is_showing_game_list = isShowingGameList();
+
+  m_shortcuts.open_file->setEnabled(!starting_or_running);
+  m_shortcuts.game_list_refresh->setEnabled(is_showing_game_list);
+  m_shortcuts.game_list_search->setEnabled(is_showing_game_list);
+  m_shortcuts.game_grid_zoom_in->setEnabled(is_showing_game_list);
+  m_shortcuts.game_grid_zoom_out->setEnabled(is_showing_game_list);
 }
 
 void MainWindow::updateStatusBarWidgetVisibility()
@@ -1913,6 +2063,8 @@ void MainWindow::switchToGameListView()
       QtUtils::ProcessEventsWithSleep(QEventLoop::ExcludeUserInputEvents,
                                       [this]() { return static_cast<bool>(m_display_widget); });
     }
+
+    updateShortcutActions(false);
   }
 
   m_game_list_widget->setFocus();
@@ -1930,6 +2082,8 @@ void MainWindow::switchToEmulationView()
   if (s_system_paused && !m_was_paused_on_surface_loss)
     g_emu_thread->setSystemPaused(false);
 
+  updateShortcutActions(false);
+
   if (m_display_widget)
     m_display_widget->setFocus();
 }
@@ -1939,6 +2093,7 @@ void MainWindow::connectSignals()
   updateEmulationActions(false, false, Achievements::IsHardcoreModeActive());
 
   connect(qApp, &QGuiApplication::applicationStateChanged, this, &MainWindow::onApplicationStateChanged);
+  connect(m_ui.toolBar, &QToolBar::customContextMenuRequested, this, &MainWindow::onToolbarContextMenuRequested);
 
   connect(m_ui.actionStartFile, &QAction::triggered, this, &MainWindow::onStartFileActionTriggered);
   connect(m_ui.actionStartDisc, &QAction::triggered, this, &MainWindow::onStartDiscActionTriggered);
@@ -1992,6 +2147,7 @@ void MainWindow::connectSignals()
   connect(m_ui.actionAchievementSettings, &QAction::triggered, [this]() { doSettings("Achievements"); });
   connect(m_ui.actionFolderSettings, &QAction::triggered, [this]() { doSettings("Folders"); });
   connect(m_ui.actionAdvancedSettings, &QAction::triggered, [this]() { doSettings("Advanced"); });
+  connect(m_ui.actionControllerProfiles, &QAction::triggered, this, &MainWindow::onSettingsControllerProfilesTriggered);
   connect(m_ui.actionViewToolbar, &QAction::toggled, this, &MainWindow::onViewToolbarActionToggled);
   connect(m_ui.actionViewLockToolbar, &QAction::toggled, this, &MainWindow::onViewLockToolbarActionToggled);
   connect(m_ui.actionViewStatusBar, &QAction::toggled, this, &MainWindow::onViewStatusBarActionToggled);
@@ -2010,6 +2166,7 @@ void MainWindow::connectSignals()
   connect(m_ui.actionMemoryScanner, &QAction::triggered, this, &MainWindow::onToolsMemoryScannerTriggered);
   connect(m_ui.actionISOBrowser, &QAction::triggered, this, &MainWindow::onToolsISOBrowserTriggered);
   connect(m_ui.actionCoverDownloader, &QAction::triggered, this, &MainWindow::onToolsCoverDownloaderTriggered);
+  connect(m_ui.actionControllerTest, &QAction::triggered, g_emu_thread, &EmuThread::startControllerTest);
   connect(m_ui.actionMediaCapture, &QAction::toggled, this, &MainWindow::onToolsMediaCaptureToggled);
   connect(m_ui.actionCaptureGPUFrame, &QAction::triggered, g_emu_thread, &EmuThread::captureGPUFrameDump);
   connect(m_ui.actionCPUDebugger, &QAction::triggered, this, &MainWindow::openCPUDebugger);
@@ -2046,8 +2203,9 @@ void MainWindow::connectSignals()
   connect(g_emu_thread, &EmuThread::mediaCaptureStarted, this, &MainWindow::onMediaCaptureStarted);
   connect(g_emu_thread, &EmuThread::mediaCaptureStopped, this, &MainWindow::onMediaCaptureStopped);
   connect(g_emu_thread, &EmuThread::mouseModeRequested, this, &MainWindow::onMouseModeRequested);
-  connect(g_emu_thread, &EmuThread::fullscreenUIStateChange, this, &MainWindow::onFullscreenUIStateChange);
+  connect(g_emu_thread, &EmuThread::fullscreenUIStartedOrStopped, this, &MainWindow::onFullscreenUIStartedOrStopped);
   connect(g_emu_thread, &EmuThread::achievementsLoginRequested, this, &MainWindow::onAchievementsLoginRequested);
+  connect(g_emu_thread, &EmuThread::achievementsLoginSuccess, this, &MainWindow::onAchievementsLoginSuccess);
   connect(g_emu_thread, &EmuThread::achievementsChallengeModeChanged, this,
           &MainWindow::onAchievementsChallengeModeChanged);
   connect(g_emu_thread, &EmuThread::onCoverDownloaderOpenRequested, this, &MainWindow::onToolsCoverDownloaderTriggered);
@@ -2059,6 +2217,7 @@ void MainWindow::connectSignals()
   // These need to be queued connections to stop crashing due to menus opening/closing and switching focus.
   connect(m_game_list_widget, &GameListWidget::refreshProgress, this, &MainWindow::onGameListRefreshProgress);
   connect(m_game_list_widget, &GameListWidget::refreshComplete, this, &MainWindow::onGameListRefreshComplete);
+  connect(m_game_list_widget, &GameListWidget::layoutChanged, this, &MainWindow::onGameListLayoutChanged);
   connect(m_game_list_widget, &GameListWidget::selectionChanged, this, &MainWindow::onGameListSelectionChanged,
           Qt::QueuedConnection);
   connect(m_game_list_widget, &GameListWidget::entryActivated, this, &MainWindow::onGameListEntryActivated,
@@ -2118,6 +2277,7 @@ void MainWindow::connectSignals()
     g_emu_thread->dumpSPURAM(filename);
   });
   SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionDebugShowVRAM, "Debug", "ShowVRAM", false);
+  SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionFreeCamera, "DebugWindows", "Freecam", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionDebugShowGPUState, "DebugWindows", "GPU", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionDebugShowCDROMState, "DebugWindows", "CDROM", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionDebugShowSPUState, "DebugWindows", "SPU", false);
@@ -2305,11 +2465,29 @@ void MainWindow::doControllerSettings(
     dlg->setCategory(category);
 }
 
+void MainWindow::onSettingsTriggeredFromToolbar()
+{
+  if (s_system_valid)
+    m_settings_toolbar_menu->exec(QCursor::pos());
+  else
+    doSettings();
+}
+
+void MainWindow::onSettingsControllerProfilesTriggered()
+{
+  if (!m_input_profile_editor_window)
+    m_input_profile_editor_window = new ControllerSettingsWindow(nullptr, true);
+
+  QtUtils::ShowOrRaiseWindow(m_input_profile_editor_window);
+}
+
 void MainWindow::openInputProfileEditor(const std::string_view name)
 {
-  ControllerSettingsWindow* dlg = getControllerSettingsWindow();
-  QtUtils::ShowOrRaiseWindow(dlg);
-  dlg->switchProfile(name);
+  if (!m_input_profile_editor_window)
+    m_input_profile_editor_window = new ControllerSettingsWindow(nullptr, true);
+
+  QtUtils::ShowOrRaiseWindow(m_input_profile_editor_window);
+  m_input_profile_editor_window->switchProfile(name);
 }
 
 void MainWindow::showEvent(QShowEvent* event)
@@ -2503,7 +2681,7 @@ bool MainWindow::requestShutdown(bool allow_confirm /* = true */, bool allow_sav
   // reshow the main window during display updates, because otherwise fullscreen transitions and renderer switches
   // would briefly show and then hide the main window. So instead, we do it on shutdown, here. Except if we're in
   // batch mode, when we're going to exit anyway.
-  if (!isRenderingToMain() && isHidden() && !QtHost::InBatchMode() && !g_emu_thread->isRunningFullscreenUI())
+  if (!isRenderingToMain() && isHidden() && !QtHost::InBatchMode() && !s_fullscreen_ui_started)
     updateWindowState(true);
 
   // Now we can actually shut down the VM.
@@ -2527,6 +2705,20 @@ void MainWindow::requestExit(bool allow_confirm /* = true */)
 
 void MainWindow::checkForSettingChanges()
 {
+  if (const bool disable_window_rounded_corners =
+        Host::GetBaseBoolSettingValue("Main", "DisableWindowRoundedCorners", false);
+      disable_window_rounded_corners != s_disable_window_rounded_corners)
+  {
+    s_disable_window_rounded_corners = disable_window_rounded_corners;
+    PlatformMisc::SetWindowRoundedCornerState(reinterpret_cast<void*>(winId()), !s_disable_window_rounded_corners);
+
+    if (QWidget* container = getDisplayContainer(); container && !container->parent() && !container->isFullScreen())
+    {
+      PlatformMisc::SetWindowRoundedCornerState(reinterpret_cast<void*>(container->winId()),
+                                                !s_disable_window_rounded_corners);
+    }
+  }
+
   LogWindow::updateSettings();
   updateWindowState();
 }
@@ -2605,6 +2797,24 @@ void MainWindow::onAchievementsLoginRequested(Achievements::LoginRequestReason r
   dlg.exec();
 }
 
+void MainWindow::onAchievementsLoginSuccess(const QString& username, quint32 points, quint32 sc_points,
+                                            quint32 unread_messages)
+{
+  m_ui.statusBar->showMessage(tr("RA: Logged in as %1 (%2, %3 softcore). %4 unread messages.")
+                                .arg(username)
+                                .arg(points)
+                                .arg(sc_points)
+                                .arg(unread_messages));
+
+  // Automatically show the achievements column after first login. If the user has manually hidden it,
+  // it will not be automatically shown again.
+  if (!Host::GetBaseBoolSettingValue("GameListTableView", "TriedShowingAchievementsColumn", false))
+  {
+    Host::SetBaseBoolSettingValue("GameListTableView", "TriedShowingAchievementsColumn", true);
+    m_game_list_widget->setTableViewColumnHidden(GameListModel::Column_Achievements, false);
+  }
+}
+
 void MainWindow::onAchievementsChallengeModeChanged(bool enabled)
 {
   if (enabled)
@@ -2624,6 +2834,9 @@ bool MainWindow::onCreateAuxiliaryRenderWindow(RenderAPI render_api, qint32 x, q
   AuxiliaryDisplayWidget* widget = AuxiliaryDisplayWidget::create(x, y, width, height, title, icon_name, userdata);
   if (!widget)
     return false;
+
+  if (s_disable_window_rounded_corners)
+    PlatformMisc::SetWindowRoundedCornerState(reinterpret_cast<void*>(widget->winId()), false);
 
   const std::optional<WindowInfo> owi = QtUtils::GetWindowInfoForWidget(widget, render_api, error);
   if (!owi.has_value())
@@ -2744,14 +2957,6 @@ void MainWindow::onToolsOpenTextureDirectoryTriggered()
     dir = QStringLiteral("%1" FS_OSPATH_SEPARATOR_STR "%2").arg(dir).arg(s_current_game_serial);
 
   QtUtils::OpenURL(this, QUrl::fromLocalFile(dir));
-}
-
-void MainWindow::onSettingsTriggeredFromToolbar()
-{
-  if (s_system_valid)
-    m_settings_toolbar_menu->exec(QCursor::pos());
-  else
-    doSettings();
 }
 
 void MainWindow::checkForUpdates(bool display_message)

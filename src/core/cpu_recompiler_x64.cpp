@@ -12,6 +12,7 @@
 #include "common/align.h"
 #include "common/assert.h"
 #include "common/log.h"
+#include "common/small_string.h"
 #include "common/string_util.h"
 
 #include <limits>
@@ -35,6 +36,7 @@ LOG_CHANNEL(Recompiler);
 // PGXP TODO: LWL etc, MFC0
 // PGXP TODO: Spyro 1 level gates have issues.
 
+static constexpr u32 FUNCTION_ALIGNMENT = 16;
 static constexpr u32 BACKPATCH_JMP_SIZE = 5;
 
 static bool IsCallerSavedRegister(u32 id);
@@ -133,20 +135,18 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
   }
 
   // check events then for frame done
+  cg->align(FUNCTION_ALIGNMENT);
   g_check_events_and_dispatch = cg->getCurr();
   {
-    Label skip_event_check;
     cg->mov(RWARG1, cg->dword[PTR(&g_state.pending_ticks)]);
     cg->cmp(RWARG1, cg->dword[PTR(&g_state.downcount)]);
-    cg->jl(skip_event_check);
+    cg->jl(dispatch);
 
     g_run_events_and_dispatch = cg->getCurr();
     cg->call(reinterpret_cast<const void*>(&TimingEvents::RunEvents));
-
-    cg->L(skip_event_check);
   }
 
-  // TODO: align?
+  cg->align(FUNCTION_ALIGNMENT);
   g_dispatcher = cg->getCurr();
   {
     cg->L(dispatch);
@@ -155,13 +155,15 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
     cg->mov(RWARG1, cg->dword[PTR(&g_state.pc)]);
     cg->lea(RXARG2, cg->dword[PTR(g_code_lut.data())]);
     cg->mov(RWARG3, RWARG1);
-    cg->shr(RWARG3, 16);
+    cg->shr(RWARG3, LUT_TABLE_SHIFT);
     cg->mov(RXARG2, cg->qword[RXARG2 + RXARG3 * 8]);
+    cg->and_(RWARG1, (LUT_TABLE_SIZE - 1) << 2); // 0xFFFC
 
     // call(rcx[pc * 2]) (fast_map[pc >> 2])
     cg->jmp(cg->qword[RXARG2 + RXARG1 * 2]);
   }
 
+  cg->align(FUNCTION_ALIGNMENT);
   g_compile_or_revalidate_block = cg->getCurr();
   {
     cg->mov(RWARG1, cg->dword[PTR(&g_state.pc)]);
@@ -169,6 +171,7 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
     cg->jmp(dispatch);
   }
 
+  cg->align(FUNCTION_ALIGNMENT);
   g_discard_and_recompile_block = cg->getCurr();
   {
     cg->mov(RWARG1, cg->dword[PTR(&g_state.pc)]);
@@ -176,6 +179,7 @@ u32 CPU::CodeCache::EmitASMFunctions(void* code, u32 code_size)
     cg->jmp(dispatch);
   }
 
+  cg->align(FUNCTION_ALIGNMENT);
   g_interpret_block = cg->getCurr();
   {
     cg->call(CodeCache::GetInterpretUncachedBlockFunction());
@@ -197,6 +201,32 @@ u32 CPU::CodeCache::EmitJump(void* code, const void* dst, bool flush_icache)
   const s32 disp32 = static_cast<s32>(disp);
   std::memcpy(ptr, &disp32, sizeof(disp32));
   return 5;
+}
+
+void CPU::CodeCache::EmitAlignmentPadding(void* dst, size_t size)
+{
+  // Copied from Xbyak nop(), to avoid constructing a CodeGenerator.
+  static const uint8_t nopTbl[9][9] = {
+    {0x90},
+    {0x66, 0x90},
+    {0x0F, 0x1F, 0x00},
+    {0x0F, 0x1F, 0x40, 0x00},
+    {0x0F, 0x1F, 0x44, 0x00, 0x00},
+    {0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00},
+    {0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00},
+    {0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+    {0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00},
+  };
+  const size_t n = sizeof(nopTbl) / sizeof(nopTbl[0]);
+  u8* dst_ptr = static_cast<u8*>(dst);
+  while (size > 0)
+  {
+    size_t len = (std::min)(n, size);
+    const uint8_t* seq = nopTbl[len - 1];
+    std::memcpy(dst_ptr, seq, len);
+    dst_ptr += len;
+    size -= len;
+  }
 }
 
 #ifdef ENABLE_HOST_DISASSEMBLY
@@ -927,7 +957,8 @@ void CPU::X64Recompiler::Flush(u32 flags)
 
 void CPU::X64Recompiler::Compile_Fallback()
 {
-  WARNING_LOG("Compiling instruction fallback at PC=0x{:08X}, instruction=0x{:08X}", iinfo->pc, inst->bits);
+  WARNING_LOG("Compiling instruction fallback at PC=0x{:08X}, instruction=0x{:08X}", m_current_instruction_pc,
+              inst->bits);
 
   Flush(FLUSH_FOR_INTERPRETER);
 
@@ -2241,15 +2272,15 @@ void CPU::X64Recompiler::Compile_mtc0(CompileFlags cf)
     // We could just inline the whole thing..
     Flush(FLUSH_FOR_C_CALL);
 
+    Label caches_unchanged;
     cg->test(changed_bits, 1u << 16);
-    SwitchToFarCode(true, &CodeGenerator::jnz);
-    cg->mov(cg->dword[cg->rsp], RWARG2);
-    cg->sub(cg->rsp, STACK_SHADOW_SIZE + 8);
+    cg->jz(caches_unchanged);
     cg->call(&CPU::UpdateMemoryPointers);
-    cg->add(cg->rsp, STACK_SHADOW_SIZE + 8);
-    cg->mov(RWARG2, cg->dword[cg->rsp]);
-    cg->mov(RMEMBASE, cg->qword[PTR(&g_state.fastmem_base)]);
-    SwitchToNearCode(true);
+    cg->mov(RWARG2, cg->dword[PTR(ptr)]); // reload value for interrupt test below
+    if (CodeCache::IsUsingFastmem())
+      cg->mov(RMEMBASE, cg->qword[PTR(&g_state.fastmem_base)]);
+
+    cg->L(caches_unchanged);
 
     TestInterrupts(RWARG2);
   }
@@ -2258,11 +2289,18 @@ void CPU::X64Recompiler::Compile_mtc0(CompileFlags cf)
     cg->mov(RWARG1, cg->dword[PTR(&g_state.cop0_regs.sr.bits)]);
     TestInterrupts(RWARG1);
   }
-
-  if (reg == Cop0Reg::DCIC && g_settings.cpu_recompiler_memory_exceptions)
+  else if (reg == Cop0Reg::DCIC || reg == Cop0Reg::BPCM)
   {
-    // TODO: DCIC handling for debug breakpoints
-    WARNING_LOG("TODO: DCIC handling for debug breakpoints");
+    // need to check whether we're switching to debug mode
+    Flush(FLUSH_FOR_C_CALL);
+    cg->call(&CPU::UpdateDebugDispatcherFlag);
+    cg->test(cg->al, cg->al);
+    SwitchToFarCode(true, &Xbyak::CodeGenerator::jnz);
+    BackupHostState();
+    Flush(FLUSH_FOR_EARLY_BLOCK_EXIT);
+    cg->call(&CPU::ExitExecution); // does not return
+    RestoreHostState();
+    SwitchToNearCode(false);
   }
 }
 
@@ -2475,7 +2513,7 @@ u32 CPU::Recompiler::CompileLoadStoreThunk(void* thunk_code, u32 thunk_space, vo
       num_gprs++;
   }
 
-  const u32 stack_size = (((num_gprs + 1) & ~1u) * GPR_SIZE) + STACK_SHADOW_SIZE;
+  const u32 stack_size = (((num_gprs + 1) & ~1u) * GPR_SIZE);
 
   if (stack_size > 0)
   {

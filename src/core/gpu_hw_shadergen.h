@@ -13,6 +13,8 @@ public:
   GPU_HW_ShaderGen(RenderAPI render_api, bool supports_dual_source_blend, bool supports_framebuffer_fetch);
   ~GPU_HW_ShaderGen();
 
+  std::string GenerateScreenVertexShader() const;
+
   std::string GenerateBatchVertexShader(bool upscaled, bool msaa, bool per_sample_shading, bool textured, bool palette,
                                         bool page_texture, bool uv_limits, bool force_round_texcoords, bool pgxp_depth,
                                         bool disable_color_perspective) const;
@@ -22,7 +24,7 @@ public:
                                           bool force_round_texcoords, bool true_color, bool dithering,
                                           bool scaled_dithering, bool disable_color_perspective, bool interlacing,
                                           bool check_mask, bool write_mask_as_depth, bool use_rov, bool use_rov_depth,
-                                          bool rov_depth_test) const;
+                                          bool rov_depth_test, bool rov_depth_write) const;
   std::string GenerateWireframeGeometryShader() const;
   std::string GenerateWireframeFragmentShader() const;
   std::string GenerateVRAMReadFragmentShader(u32 resolution_scale, u32 multisamples) const;
@@ -42,7 +44,8 @@ public:
   std::string GenerateAdaptiveDownsampleCompositeFragmentShader() const;
   std::string GenerateBoxSampleDownsampleFragmentShader(u32 factor) const;
 
-  std::string GenerateReplacementMergeFragmentShader(bool semitransparent, bool bilinear_filter) const;
+  std::string GenerateReplacementMergeFragmentShader(bool replacement, bool semitransparent,
+                                                     bool bilinear_filter) const;
 
 private:
   void WriteColorConversionFunctions(std::stringstream& ss) const;

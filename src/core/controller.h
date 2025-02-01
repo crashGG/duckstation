@@ -23,14 +23,6 @@ class HostInterface;
 class Controller
 {
 public:
-  enum class VibrationCapabilities : u8
-  {
-    NoVibration,
-    LargeSmallMotors,
-    SingleMotor,
-    Count
-  };
-
   struct ControllerBindingInfo
   {
     const char* name;
@@ -49,7 +41,6 @@ public:
     const char* icon_name;
     std::span<const ControllerBindingInfo> bindings;
     std::span<const SettingInfo> settings;
-    VibrationCapabilities vibration_caps;
 
     /// Returns localized controller type name.
     const char* GetDisplayName() const;
@@ -87,6 +78,9 @@ public:
   /// Returns a bitmask of the current button states, 1 = on.
   virtual u32 GetButtonStateBits() const;
 
+  /// Returns the current state of the specified vibration motor.
+  virtual float GetVibrationMotorState(u32 index) const;
+
   /// Returns true if the controller supports analog mode, and it is active.
   virtual bool InAnalogMode() const;
 
@@ -102,17 +96,11 @@ public:
   /// Creates a new controller of the specified type.
   static std::unique_ptr<Controller> Create(ControllerType type, u32 index);
 
-  /// Returns the default type for the specified port.
-  static const char* GetDefaultPadType(u32 pad);
-
-  /// Returns a list of controller type names. Pair of [name, display name].
-  static std::vector<std::pair<std::string, std::string>> GetControllerTypeNames();
-
-  /// Gets the integer code for an axis in the specified controller type.
-  static std::optional<u32> GetBindIndex(ControllerType type, std::string_view bind_name);
+  /// Returns a list of all controller types.
+  static const std::array<const ControllerInfo*, static_cast<size_t>(ControllerType::Count)>& GetControllerInfoList();
 
   /// Returns general information for the specified controller type.
-  static const ControllerInfo* GetControllerInfo(ControllerType type);
+  static const ControllerInfo& GetControllerInfo(ControllerType type);
   static const ControllerInfo* GetControllerInfo(std::string_view name);
 
   /// Applies an analog deadzone/sensitivity.

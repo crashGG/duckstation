@@ -32,7 +32,8 @@ public:
     SECTOR_HEADER_SIZE = 4,
     MODE1_HEADER_SIZE = 4,
     MODE2_HEADER_SIZE = 12,
-    FRAMES_PER_SECOND = 75, // "sectors", or "timecode frames" (not "channel frames")
+    MODE2_DATA_SECTOR_SIZE = 2336, // header + edc
+    FRAMES_PER_SECOND = 75,        // "sectors", or "timecode frames" (not "channel frames")
     SECONDS_PER_MINUTE = 60,
     FRAMES_PER_MINUTE = FRAMES_PER_SECOND * SECONDS_PER_MINUTE,
     SUBCHANNEL_BYTES_PER_FRAME = 12,
@@ -45,13 +46,6 @@ public:
   enum : u8
   {
     LEAD_OUT_TRACK_NUMBER = 0xAA
-  };
-
-  enum class ReadMode : u8
-  {
-    DataOnly,  // 2048 bytes per sector.
-    RawSector, // 2352 bytes per sector.
-    RawNoSync, // 2340 bytes per sector.
   };
 
   enum class TrackMode : u8
@@ -246,17 +240,17 @@ public:
   static bool IsDeviceName(const char* filename);
 
   // Opening disc image.
-  static std::unique_ptr<CDImage> Open(const char* filename, bool allow_patches, Error* error);
+  static std::unique_ptr<CDImage> Open(const char* path, bool allow_patches, Error* error);
   static std::unique_ptr<CDImage> OpenBinImage(const char* path, Error* error);
   static std::unique_ptr<CDImage> OpenCueSheetImage(const char* path, Error* error);
-  static std::unique_ptr<CDImage> OpenCHDImage(const char* filename, Error* error);
-  static std::unique_ptr<CDImage> OpenMdsImage(const char* filename, Error* error);
-  static std::unique_ptr<CDImage> OpenPBPImage(const char* filename, Error* error);
-  static std::unique_ptr<CDImage> OpenM3uImage(const char* filename, bool apply_patches, Error* error);
-  static std::unique_ptr<CDImage> OpenDeviceImage(const char* filename, Error* error);
+  static std::unique_ptr<CDImage> OpenCHDImage(const char* path, Error* error);
+  static std::unique_ptr<CDImage> OpenMdsImage(const char* path, Error* error);
+  static std::unique_ptr<CDImage> OpenPBPImage(const char* path, Error* error);
+  static std::unique_ptr<CDImage> OpenM3uImage(const char* path, bool apply_patches, Error* error);
+  static std::unique_ptr<CDImage> OpenDeviceImage(const char* path, Error* error);
   static std::unique_ptr<CDImage>
   CreateMemoryImage(CDImage* image, ProgressCallback* progress = ProgressCallback::NullProgressCallback);
-  static std::unique_ptr<CDImage> OverlayPPFPatch(const char* filename, std::unique_ptr<CDImage> parent_image,
+  static std::unique_ptr<CDImage> OverlayPPFPatch(const char* path, std::unique_ptr<CDImage> parent_image,
                                                   ProgressCallback* progress = ProgressCallback::NullProgressCallback);
 
   // Accessors.
@@ -295,9 +289,6 @@ public:
 
   // Seek to track and LBA.
   bool Seek(u32 track_number, LBA lba);
-
-  // Read from the current LBA. Returns the number of sectors read.
-  u32 Read(ReadMode read_mode, u32 sector_count, void* buffer);
 
   // Read a single raw sector, and subchannel from the current LBA.
   bool ReadRawSector(void* buffer, SubChannelQ* subq);

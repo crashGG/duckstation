@@ -1,7 +1,8 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "setupwizarddialog.h"
+#include "controllerbindingwidgets.h"
 #include "controllersettingwidgetbinder.h"
 #include "interfacesettingswidget.h"
 #include "mainwindow.h"
@@ -404,35 +405,20 @@ void SetupWizardDialog::setupControllerPage(bool initial)
     const std::string section = fmt::format("Pad{}", port + 1);
     const PadWidgets& w = pad_widgets[port];
 
-    for (u32 i = 0; i < static_cast<u32>(ControllerType::Count); i++)
-    {
-      const ControllerType ctype = static_cast<ControllerType>(i);
-      const Controller::ControllerInfo* cinfo = Controller::GetControllerInfo(ctype);
-      if (!cinfo)
-        continue;
-
-      w.type_combo->addItem(qApp->translate("ControllerType", cinfo->display_name), QString::fromUtf8(cinfo->name));
-    }
+    for (const Controller::ControllerInfo* cinfo : Controller::GetControllerInfoList())
+      w.type_combo->addItem(QString::fromUtf8(cinfo->GetDisplayName()), QString::fromUtf8(cinfo->name));
 
     ControllerSettingWidgetBinder::BindWidgetToInputProfileString(
-      nullptr, w.type_combo, section, "Type", Controller::GetControllerInfo(Controller::GetDefaultPadType(port))->name);
+      nullptr, w.type_combo, section, "Type",
+      Controller::GetControllerInfo(Settings::GetDefaultControllerType(port)).name);
 
-    w.mapping_result->setText((port == 0) ? tr("Default (Keyboard)") : tr("Default (None)"));
+    w.mapping_result->setText(findCurrentDeviceForPort(port));
 
     if (initial)
     {
       connect(w.mapping_button, &QAbstractButton::clicked, this,
               [this, port, label = w.mapping_result]() { openAutomaticMappingMenu(port, label); });
     }
-  }
-
-  if (initial)
-  {
-    // Trigger enumeration to populate the device list.
-    connect(g_emu_thread, &EmuThread::onInputDevicesEnumerated, this, &SetupWizardDialog::onInputDevicesEnumerated);
-    connect(g_emu_thread, &EmuThread::onInputDeviceConnected, this, &SetupWizardDialog::onInputDeviceConnected);
-    connect(g_emu_thread, &EmuThread::onInputDeviceDisconnected, this, &SetupWizardDialog::onInputDeviceDisconnected);
-    g_emu_thread->enumerateInputDevices();
   }
 
   if (!initial)
@@ -446,25 +432,37 @@ void SetupWizardDialog::updateStylesheets()
 {
 }
 
+QString SetupWizardDialog::findCurrentDeviceForPort(u32 port) const
+{
+  auto lock = Host::GetSettingsLock();
+  return QString::fromStdString(
+    InputManager::GetPhysicalDeviceForController(*Host::Internal::GetBaseSettingsLayer(), port));
+}
+
 void SetupWizardDialog::openAutomaticMappingMenu(u32 port, QLabel* update_label)
 {
   QMenu menu(this);
   bool added = false;
 
-  for (const auto& [identifier, device_name] : m_device_list)
+  for (const InputDeviceListModel::Device& dev : g_emu_thread->getInputDeviceListModel()->getDeviceList())
   {
     // we set it as data, because the device list could get invalidated while the menu is up
-    const QString qidentifier = QString::fromStdString(identifier);
-    QAction* action =
-      menu.addAction(QStringLiteral("%1 (%2)").arg(qidentifier).arg(QString::fromStdString(device_name)));
-    action->setData(qidentifier);
+    QAction* action = menu.addAction(QStringLiteral("%1 (%2)").arg(dev.identifier).arg(dev.display_name));
+    action->setIcon(InputDeviceListModel::getIconForKey(dev.key));
+    action->setData(dev.identifier);
     connect(action, &QAction::triggered, this, [this, port, update_label, action]() {
       doDeviceAutomaticBinding(port, update_label, action->data().toString());
     });
     added = true;
   }
 
-  if (!added)
+  if (added)
+  {
+    QAction* action = menu.addAction(tr("Multiple Devices..."));
+    connect(action, &QAction::triggered, this,
+            [this, port, update_label]() { doMultipleDeviceAutomaticBinding(port, update_label); });
+  }
+  else
   {
     QAction* action = menu.addAction(tr("No devices available"));
     action->setEnabled(false);
@@ -490,7 +488,7 @@ void SetupWizardDialog::doDeviceAutomaticBinding(u32 port, QLabel* update_label,
   bool result;
   {
     auto lock = Host::GetSettingsLock();
-    result = InputManager::MapController(*Host::Internal::GetBaseSettingsLayer(), port, mapping);
+    result = InputManager::MapController(*Host::Internal::GetBaseSettingsLayer(), port, mapping, true);
   }
   if (!result)
     return;
@@ -500,24 +498,10 @@ void SetupWizardDialog::doDeviceAutomaticBinding(u32 port, QLabel* update_label,
   update_label->setText(device);
 }
 
-void SetupWizardDialog::onInputDevicesEnumerated(const std::vector<std::pair<std::string, std::string>>& devices)
+void SetupWizardDialog::doMultipleDeviceAutomaticBinding(u32 port, QLabel* update_label)
 {
-  m_device_list = devices;
-}
+  if (!ControllerBindingWidget::doMultipleDeviceAutomaticBinding(this, nullptr, port))
+    return;
 
-void SetupWizardDialog::onInputDeviceConnected(const std::string& identifier, const std::string& device_name)
-{
-  m_device_list.emplace_back(identifier, device_name);
-}
-
-void SetupWizardDialog::onInputDeviceDisconnected(const std::string& identifier)
-{
-  for (auto iter = m_device_list.begin(); iter != m_device_list.end(); ++iter)
-  {
-    if (iter->first == identifier)
-    {
-      m_device_list.erase(iter);
-      break;
-    }
-  }
+  update_label->setText(findCurrentDeviceForPort(port));
 }

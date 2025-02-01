@@ -50,6 +50,27 @@ void GPU_HW_ShaderGen::WriteBatchUniformBuffer(std::stringstream& ss) const
                        false);
 }
 
+std::string GPU_HW_ShaderGen::GenerateScreenVertexShader() const
+{
+  std::stringstream ss;
+  WriteHeader(ss);
+  DeclareVertexEntryPoint(ss, {"float2 a_pos", "float2 a_tex0"}, 0, 1, {}, false, "", false, false, false);
+  ss << R"(
+{
+  // Depth set to 1 for PGXP depth buffer.
+  v_pos = float4(a_pos, 1.0f, 1.0f);
+  v_tex0 = a_tex0;
+
+  // NDC space Y flip in Vulkan.
+  #if API_OPENGL || API_OPENGL_ES || API_VULKAN
+    v_pos.y = -v_pos.y;
+  #endif
+}
+)";
+
+  return ss.str();
+}
+
 std::string GPU_HW_ShaderGen::GenerateBatchVertexShader(bool upscaled, bool msaa, bool per_sample_shading,
                                                         bool textured, bool palette, bool page_texture, bool uv_limits,
                                                         bool force_round_texcoords, bool pgxp_depth,
@@ -711,14 +732,13 @@ std::string GPU_HW_ShaderGen::GenerateBatchFragmentShader(
   GPU_HW::BatchRenderMode render_mode, GPUTransparencyMode transparency, GPU_HW::BatchTextureMode texture_mode,
   GPUTextureFilter texture_filtering, bool upscaled, bool msaa, bool per_sample_shading, bool uv_limits,
   bool force_round_texcoords, bool true_color, bool dithering, bool scaled_dithering, bool disable_color_perspective,
-  bool interlacing, bool check_mask, bool write_mask_as_depth, bool use_rov, bool use_rov_depth,
-  bool rov_depth_test) const
+  bool interlacing, bool check_mask, bool write_mask_as_depth, bool use_rov, bool use_rov_depth, bool rov_depth_test,
+  bool rov_depth_write) const
 {
   DebugAssert(!true_color || !dithering); // Should not be doing dithering+true color.
 
-  // TODO: don't write depth for shader blend
   DebugAssert(transparency == GPUTransparencyMode::Disabled || render_mode == GPU_HW::BatchRenderMode::ShaderBlend);
-  DebugAssert(!rov_depth_test || (use_rov && use_rov_depth));
+  DebugAssert((!rov_depth_test && !rov_depth_write) || (use_rov && use_rov_depth));
 
   const bool textured = (texture_mode != GPU_HW::BatchTextureMode::Disabled);
   const bool palette =
@@ -752,6 +772,7 @@ std::string GPU_HW_ShaderGen::GenerateBatchFragmentShader(
   DefineMacro(ss, "USE_ROV", use_rov);
   DefineMacro(ss, "USE_ROV_DEPTH", use_rov_depth);
   DefineMacro(ss, "ROV_DEPTH_TEST", rov_depth_test);
+  DefineMacro(ss, "ROV_DEPTH_WRITE", rov_depth_write);
   DefineMacro(ss, "USE_DUAL_SOURCE", use_dual_source);
   DefineMacro(ss, "WRITE_MASK_AS_DEPTH", write_mask_as_depth);
   DefineMacro(ss, "FORCE_ROUND_TEXCOORDS", force_round_texcoords);
@@ -862,7 +883,13 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords)
     #endif
 
     // load colour/palette
-    float4 texel = SAMPLE_TEXTURE_LEVEL(samp0, float2(vicoord) * RCP_VRAM_SIZE, 0.0);
+    // use texelFetch()/load for native resolution to work around point sampling precision
+    // in some drivers, such as older AMD and Mali Midgard
+    #if !UPSCALED
+      float4 texel = LOAD_TEXTURE(samp0, int2(vicoord), 0);
+    #else
+      float4 texel = SAMPLE_TEXTURE_LEVEL(samp0, float2(vicoord) * RCP_VRAM_SIZE, 0.0);
+    #endif
     uint vram_value = RGBA8ToRGBA5551(texel);
 
     // apply palette
@@ -877,13 +904,17 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords)
       uint2 palette_icoord = uint2(((texpage.z + palette_index) & 0x3FFu), texpage.w);
     #endif
 
-    return SAMPLE_TEXTURE_LEVEL(samp0, float2(palette_icoord) * RCP_VRAM_SIZE, 0.0);
+    #if !UPSCALED
+      return LOAD_TEXTURE(samp0, int2(palette_icoord), 0);
+    #else
+      return SAMPLE_TEXTURE_LEVEL(samp0, float2(palette_icoord) * RCP_VRAM_SIZE, 0.0);
+    #endif
   #else
     // Direct texturing - usually render-to-texture effects.
     #if !UPSCALED
       uint2 icoord = ApplyTextureWindow(FloatToIntegerCoords(coords));
       uint2 vicoord = (texpage.xy + icoord) & uint2(1023, 511);
-      return SAMPLE_TEXTURE_LEVEL(samp0, float2(vicoord) * RCP_VRAM_SIZE, 0.0);
+      return LOAD_TEXTURE(samp0, int2(vicoord), 0);
     #else
       // Coordinates are already upscaled, we need to downscale them to apply the texture
       // window, then re-upscale/offset. We can't round here, because it could result in
@@ -1103,7 +1134,7 @@ float4 SampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords)
       if (!discarded)
       {
         ROV_STORE(rov_color, fragpos, o_col0);
-        #if USE_ROV_DEPTH
+        #if USE_ROV_DEPTH && ROV_DEPTH_WRITE
           ROV_STORE(rov_depth, fragpos, float4(v_pos.z, 0.0, 0.0, 0.0));
         #endif
       }
@@ -1266,7 +1297,9 @@ float3 SampleVRAM24(uint2 icoords)
   DeclareFragmentEntryPoint(ss, 0, 1, {}, true, depth_buffer ? 2 : 1);
   ss << R"(
 {
-  uint2 icoords = uint2(v_pos.x + u_skip_x, v_pos.y * u_line_skip);
+  // Have to floor because SV_Position is at the pixel center.
+  float2 v_pos_floored = floor(v_pos.xy);
+  uint2 icoords = uint2(v_pos_floored.x + u_skip_x, v_pos_floored.y * u_line_skip);
   int2 wrapped_coords = int2((icoords + u_vram_offset) % VRAM_SIZE);
 
   #if COLOR_24BIT
@@ -1781,7 +1814,7 @@ std::string GPU_HW_ShaderGen::GenerateBoxSampleDownsampleFragmentShader(u32 fact
   DeclareUniformBuffer(ss, {"uint2 u_base_coords"}, true);
   DeclareTexture(ss, "samp0", 0, false);
 
-  ss << "#define FACTOR " << factor << "\n";
+  ss << "CONSTANT uint FACTOR = " << factor << "u;\n";
 
   DeclareFragmentEntryPoint(ss, 0, 1, {}, true);
   ss << R"(
@@ -1801,22 +1834,26 @@ std::string GPU_HW_ShaderGen::GenerateBoxSampleDownsampleFragmentShader(u32 fact
   return ss.str();
 }
 
-std::string GPU_HW_ShaderGen::GenerateReplacementMergeFragmentShader(bool semitransparent, bool bilinear_filter) const
+std::string GPU_HW_ShaderGen::GenerateReplacementMergeFragmentShader(bool replacement, bool semitransparent,
+                                                                     bool bilinear_filter) const
 {
   std::stringstream ss;
   WriteHeader(ss);
+  DefineMacro(ss, "REPLACEMENT", replacement);
   DefineMacro(ss, "SEMITRANSPARENT", semitransparent);
   DefineMacro(ss, "BILINEAR_FILTER", bilinear_filter);
-  DeclareUniformBuffer(ss, {"float4 u_texture_size"}, true);
+  DeclareUniformBuffer(ss, {"float4 u_src_rect", "float4 u_texture_size"}, true);
   DeclareTexture(ss, "samp0", 0);
   DeclareFragmentEntryPoint(ss, 0, 1);
 
   ss << R"(
 {
+  float2 start_coords = u_src_rect.xy + v_tex0 * u_src_rect.zw;
+
 #if BILINEAR_FILTER
   // Compute the coordinates of the four texels we will be interpolating between.
   // Clamp this to the triangle texture coordinates.
-  float2 coords = v_tex0 * u_texture_size.xy;
+  float2 coords = start_coords * u_texture_size.xy;
   float2 texel_top_left = frac(coords) - float2(0.5, 0.5);
   float2 texel_offset = sign(texel_top_left);
   float4 fcoords = max(coords.xyxy + float4(0.0, 0.0, texel_offset.x, texel_offset.y),
@@ -1831,6 +1868,7 @@ std::string GPU_HW_ShaderGen::GenerateReplacementMergeFragmentShader(bool semitr
   // Bilinearly interpolate.
   float2 weights = abs(texel_top_left);
   float4 color = lerp(lerp(s00, s10, weights.x), lerp(s01, s11, weights.x), weights.y);
+  float orig_alpha = float(color.a > 0.0);
 
   #if !SEMITRANSPARENT
     // Compute alpha from how many texels aren't pixel color 0000h.
@@ -1847,21 +1885,35 @@ std::string GPU_HW_ShaderGen::GenerateReplacementMergeFragmentShader(bool semitr
     color.a = (color.a >= 0.5) ? 1.0 : 0.0;
   #endif
 #else
-  float4 color = SAMPLE_TEXTURE_LEVEL(samp0, v_tex0, 0.0);
+  float4 color = SAMPLE_TEXTURE_LEVEL(samp0, start_coords, 0.0);
+  float orig_alpha = color.a;
 #endif
   o_col0.rgb = color.rgb;
 
   // Alpha processing.
-  #if SEMITRANSPARENT
-    // Map anything not 255 to 1 for semitransparent, otherwise zero for opaque.
-    o_col0.a = (color.a <= 0.95f) ? 1.0f : 0.0f;
-    o_col0.a = VECTOR_EQ(color, float4(0.0, 0.0, 0.0, 0.0)) ? 0.0f : o_col0.a;
-  #else
-    // Leave (0,0,0,0) as 0000 for opaque replacements for cutout alpha.
-    o_col0.a = color.a;
+  #if REPLACEMENT
+    #if SEMITRANSPARENT
+      // Map anything not 255 to 1 for semitransparent, otherwise zero for opaque.
+      o_col0.a = (color.a <= 0.95f) ? 1.0f : 0.0f;
+      o_col0.a = VECTOR_EQ(color, float4(0.0, 0.0, 0.0, 0.0)) ? 0.0f : o_col0.a;
+    #else
+      // Map anything with an alpha below 0.5 to transparent.
+      // Leave (0,0,0,0) as 0000 for opaque replacements for cutout alpha.
+      float alpha = float(color.a >= 0.5);
+      o_col0.rgb = lerp(float3(0.0, 0.0, 0.0), o_col0.rgb, alpha);
 
-    // Map anything with an alpha below 0.5 to transparent.
-    o_col0 = lerp(o_col0, float4(0.0, 0.0, 0.0, 0.0), float(o_col0.a < 0.5));
+      // We can't simply clear the alpha channel unconditionally here, because that
+      // would result in any black pixels with zero alpha being transparency-culled.
+      // Instead, we set it to a minimum value (2/255 in case of rounding error, I
+      // don't trust drivers here) so that transparent polygons in the source still
+      // set bit 15 to zero in the framebuffer, but are not transparency-culled.
+      // Silent Hill needs it to be zero, I'm not aware of anything that needs
+      // specific values yet. If it did, we'd need a different dumping technique.
+      o_col0.a = lerp(0.0, 2.0 / 255.0, alpha);
+    #endif
+  #else
+    // Preserve original bit 15 for non-replacements.
+    o_col0.a = orig_alpha;
   #endif
 }
 )";

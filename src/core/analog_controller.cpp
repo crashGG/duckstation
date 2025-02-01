@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com> and contributors.
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com> and contributors.
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "analog_controller.h"
@@ -63,18 +63,8 @@ void AnalogController::Reset()
 
   if (m_force_analog_on_reset)
   {
-    if (!CanStartInAnalogMode(ControllerType::AnalogController))
-    {
-      Host::AddIconOSDMessage(
-        fmt::format("Controller{}AnalogMode", m_index), ICON_PF_GAMEPAD_ALT,
-        TRANSLATE_STR("OSDMessage",
-                      "Analog mode forcing is disabled by game settings. Controller will start in digital mode."),
-        10.0f);
-    }
-    else
-    {
+    if (CanStartInAnalogMode(ControllerType::AnalogController))
       SetAnalogMode(true, false);
-    }
   }
 }
 
@@ -179,6 +169,11 @@ float AnalogController::GetBindState(u32 index) const
   {
     return 0.0f;
   }
+}
+
+float AnalogController::GetVibrationMotorState(u32 index) const
+{
+  return ((index < m_motor_state.size()) ? m_motor_state[index] : 0) * (1.0f / 255.0f);
 }
 
 void AnalogController::SetBindState(u32 index, float value)
@@ -767,6 +762,8 @@ static const Controller::ControllerBindingInfo s_binding_info[] = {
    static_cast<u32>(AnalogController::Button::Count) + static_cast<u32>(halfaxis),                                     \
    InputBindingInfo::Type::HalfAxis,                                                                                   \
    genb}
+#define MOTOR(name, display_name, icon_name, index, genb)                                                              \
+  {name, display_name, icon_name, index, InputBindingInfo::Type::Motor, genb}
 
   // clang-format off
   BUTTON("Up", TRANSLATE_NOOP("AnalogController", "D-Pad Up"), ICON_PF_DPAD_UP, AnalogController::Button::Up, GenericInputBinding::DPadUp),
@@ -795,8 +792,12 @@ static const Controller::ControllerBindingInfo s_binding_info[] = {
   AXIS("RRight", TRANSLATE_NOOP("AnalogController", "Right Stick Right"), ICON_PF_RIGHT_ANALOG_RIGHT, AnalogController::HalfAxis::RRight, GenericInputBinding::RightStickRight),
   AXIS("RDown", TRANSLATE_NOOP("AnalogController", "Right Stick Down"), ICON_PF_RIGHT_ANALOG_DOWN, AnalogController::HalfAxis::RDown, GenericInputBinding::RightStickDown),
   AXIS("RUp", TRANSLATE_NOOP("AnalogController", "Right Stick Up"), ICON_PF_RIGHT_ANALOG_UP, AnalogController::HalfAxis::RUp, GenericInputBinding::RightStickUp),
+
+  MOTOR("LargeMotor", TRANSLATE_NOOP("AnalogController", "Large Motor"), ICON_PF_VIBRATION_L, 0, GenericInputBinding::LargeMotor),
+  MOTOR("SmallMotor", TRANSLATE_NOOP("AnalogController", "Small Motor"), ICON_PF_VIBRATION, 1, GenericInputBinding::SmallMotor),
 // clang-format on
 
+#undef MOTOR
 #undef AXIS
 #undef BUTTON
 };
@@ -854,8 +855,7 @@ const Controller::ControllerInfo AnalogController::INFO = {ControllerType::Analo
                                                            TRANSLATE_NOOP("ControllerType", "Analog Controller"),
                                                            ICON_PF_GAMEPAD_ALT,
                                                            s_binding_info,
-                                                           s_settings,
-                                                           Controller::VibrationCapabilities::LargeSmallMotors};
+                                                           s_settings};
 
 void AnalogController::LoadSettings(const SettingsInterface& si, const char* section, bool initial)
 {

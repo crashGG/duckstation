@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "settings.h"
 #include "achievements.h"
 #include "controller.h"
 #include "host.h"
+#include "imgui_overlays.h"
 #include "system.h"
 
 #include "util/gpu_device.h"
@@ -13,6 +14,8 @@
 #include "util/media_capture.h"
 
 #include "common/assert.h"
+#include "common/bitutils.h"
+#include "common/error.h"
 #include "common/file_system.h"
 #include "common/log.h"
 #include "common/memmap.h"
@@ -28,7 +31,8 @@
 
 LOG_CHANNEL(Settings);
 
-Settings g_settings;
+ALIGN_TO_CACHE_LINE Settings g_settings;
+ALIGN_TO_CACHE_LINE GPUSettings g_gpu_settings;
 
 const char* SettingInfo::StringDefaultValue() const
 {
@@ -85,6 +89,8 @@ float SettingInfo::FloatStepValue() const
   static constexpr float fallback_value = 0.1f;
   return step_value ? StringUtil::FromChars<float>(step_value).value_or(fallback_value) : fallback_value;
 }
+
+GPUSettings::GPUSettings() = default;
 
 #ifdef DYNAMIC_HOST_PAGE_SIZE
 // See note in settings.h - 16K ends up faster with LUT because of nearby code/data.
@@ -206,6 +212,7 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   gpu_disable_compressed_textures = si.GetBoolValue("GPU", "DisableCompressedTextures", false);
   gpu_per_sample_shading = si.GetBoolValue("GPU", "PerSampleShading", false);
   gpu_use_thread = si.GetBoolValue("GPU", "UseThread", true);
+  gpu_max_queued_frames = static_cast<u8>(si.GetUIntValue("GPU", "MaxQueuedFrames", DEFAULT_GPU_MAX_QUEUED_FRAMES));
   gpu_use_software_renderer_for_readbacks = si.GetBoolValue("GPU", "UseSoftwareRendererForReadbacks", false);
   gpu_true_color = si.GetBoolValue("GPU", "TrueColor", true);
   gpu_scaled_dithering = si.GetBoolValue("GPU", "ScaledDithering", true);
@@ -249,7 +256,11 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   gpu_pgxp_tolerance = si.GetFloatValue("GPU", "PGXPTolerance", -1.0f);
   gpu_pgxp_depth_buffer = si.GetBoolValue("GPU", "PGXPDepthBuffer", false);
   gpu_pgxp_disable_2d = si.GetBoolValue("GPU", "PGXPDisableOn2DPolygons", false);
+  gpu_pgxp_transparent_depth = si.GetBoolValue("GPU", "PGXPTransparentDepthTest", false);
   SetPGXPDepthClearThreshold(si.GetFloatValue("GPU", "PGXPDepthClearThreshold", DEFAULT_GPU_PGXP_DEPTH_THRESHOLD));
+  gpu_show_vram = si.GetBoolValue("Debug", "ShowVRAM");
+  gpu_dump_cpu_to_vram_copies = si.GetBoolValue("Debug", "DumpCPUToVRAMCopies");
+  gpu_dump_vram_to_cpu_copies = si.GetBoolValue("Debug", "DumpVRAMToCPUCopies");
   gpu_dump_fast_replay_mode = si.GetBoolValue("GPU", "DumpFastReplayMode", false);
 
   display_deinterlacing_mode =
@@ -344,8 +355,11 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   cdrom_load_image_to_ram = si.GetBoolValue("CDROM", "LoadImageToRAM", false);
   cdrom_load_image_patches = si.GetBoolValue("CDROM", "LoadImagePatches", false);
   cdrom_mute_cd_audio = si.GetBoolValue("CDROM", "MuteCDAudio", false);
-  cdrom_read_speedup = si.GetIntValue("CDROM", "ReadSpeedup", 1);
-  cdrom_seek_speedup = si.GetIntValue("CDROM", "SeekSpeedup", 1);
+  cdrom_read_speedup =
+    Truncate8(std::min<u32>(si.GetUIntValue("CDROM", "ReadSpeedup", 1u), std::numeric_limits<u8>::max()));
+  cdrom_seek_speedup =
+    Truncate8(std::min<u32>(si.GetUIntValue("CDROM", "SeekSpeedup", 1u), std::numeric_limits<u8>::max()));
+  cdrom_max_speedup_cycles = si.GetUIntValue("CDROM", "MaxSpeedupCycles", DEFAULT_CDROM_MAX_SPEEDUP_CYCLES);
 
   audio_backend =
     AudioStream::ParseBackendName(
@@ -354,8 +368,10 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   audio_driver = si.GetStringValue("Audio", "Driver");
   audio_output_device = si.GetStringValue("Audio", "OutputDevice");
   audio_stream_parameters.Load(si, "Audio");
-  audio_output_volume = si.GetUIntValue("Audio", "OutputVolume", 100);
-  audio_fast_forward_volume = si.GetUIntValue("Audio", "FastForwardVolume", 100);
+  audio_output_volume =
+    Truncate8(std::min<u32>(si.GetUIntValue("Audio", "OutputVolume", 100), std::numeric_limits<u8>::max()));
+  audio_fast_forward_volume =
+    Truncate8(std::min<u32>(si.GetUIntValue("Audio", "FastForwardVolume", 100), std::numeric_limits<u8>::max()));
 
   audio_output_muted = si.GetBoolValue("Audio", "OutputMuted", false);
 
@@ -364,7 +380,7 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
 
   dma_max_slice_ticks = si.GetIntValue("Hacks", "DMAMaxSliceTicks", DEFAULT_DMA_MAX_SLICE_TICKS);
   dma_halt_ticks = si.GetIntValue("Hacks", "DMAHaltTicks", DEFAULT_DMA_HALT_TICKS);
-  gpu_fifo_size = static_cast<u32>(si.GetIntValue("Hacks", "GPUFIFOSize", DEFAULT_GPU_FIFO_SIZE));
+  gpu_fifo_size = si.GetUIntValue("Hacks", "GPUFIFOSize", DEFAULT_GPU_FIFO_SIZE);
   gpu_max_run_ahead = si.GetIntValue("Hacks", "GPUMaxRunAhead", DEFAULT_GPU_MAX_RUN_AHEAD);
 
   bios_tty_logging = si.GetBoolValue("BIOS", "TTYLogging", false);
@@ -390,7 +406,7 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
 
     const ControllerType default_type = (pad == 0) ? DEFAULT_CONTROLLER_1_TYPE : DEFAULT_CONTROLLER_2_TYPE;
     const Controller::ControllerInfo* cinfo = Controller::GetControllerInfo(controller_si.GetTinyStringValue(
-      Controller::GetSettingsSection(pad).c_str(), "Type", Controller::GetControllerInfo(default_type)->name));
+      Controller::GetSettingsSection(pad).c_str(), "Type", Controller::GetControllerInfo(default_type).name));
     controller_types[pad] = cinfo ? cinfo->type : default_type;
   }
 
@@ -421,19 +437,16 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   achievements_leaderboard_duration =
     si.GetIntValue("Cheevos", "LeaderboardsDuration", DEFAULT_LEADERBOARD_NOTIFICATION_TIME);
 
-  debugging.show_vram = si.GetBoolValue("Debug", "ShowVRAM");
-  debugging.dump_cpu_to_vram_copies = si.GetBoolValue("Debug", "DumpCPUToVRAMCopies");
-  debugging.dump_vram_to_cpu_copies = si.GetBoolValue("Debug", "DumpVRAMToCPUCopies");
-
 #ifndef __ANDROID__
-  debugging.enable_gdb_server = si.GetBoolValue("Debug", "EnableGDBServer");
-  debugging.gdb_server_port = static_cast<u16>(si.GetUIntValue("Debug", "GDBServerPort", DEFAULT_GDB_SERVER_PORT));
+  enable_gdb_server = si.GetBoolValue("Debug", "EnableGDBServer");
+  gdb_server_port = static_cast<u16>(si.GetUIntValue("Debug", "GDBServerPort", DEFAULT_GDB_SERVER_PORT));
 #endif
 
   texture_replacements.enable_texture_replacements =
     si.GetBoolValue("TextureReplacements", "EnableTextureReplacements", false);
   texture_replacements.enable_vram_write_replacements =
     si.GetBoolValue("TextureReplacements", "EnableVRAMWriteReplacements", false);
+  texture_replacements.always_track_uploads = si.GetBoolValue("TextureReplacements", "AlwaysTrackUploads", false);
   texture_replacements.preload_textures = si.GetBoolValue("TextureReplacements", "PreloadTextures", false);
   texture_replacements.dump_textures = si.GetBoolValue("TextureReplacements", "DumpTextures", false);
   texture_replacements.dump_replaced_textures = si.GetBoolValue("TextureReplacements", "DumpReplacedTextures", true);
@@ -463,20 +476,21 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
     si.GetUIntValue("TextureReplacements", "MaxReplacementCacheVRAMUsage",
                     TextureReplacementSettings::Configuration::DEFAULT_MAX_REPLACEMENT_CACHE_VRAM_USAGE_MB);
 
-  texture_replacements.config.max_vram_write_splits = si.GetUIntValue("TextureReplacements", "MaxVRAMWriteSplits", 0u);
-  texture_replacements.config.max_vram_write_coalesce_width =
-    si.GetUIntValue("TextureReplacements", "MaxVRAMWriteCoalesceWidth", 0u);
-  texture_replacements.config.max_vram_write_coalesce_height =
-    si.GetUIntValue("TextureReplacements", "MaxVRAMWriteCoalesceHeight", 0u);
+  texture_replacements.config.max_vram_write_splits = Truncate16(
+    std::min<u32>(si.GetUIntValue("TextureReplacements", "MaxVRAMWriteSplits", 0u), std::numeric_limits<u16>::max()));
+  texture_replacements.config.max_vram_write_coalesce_width = Truncate16(std::min<u32>(
+    si.GetUIntValue("TextureReplacements", "MaxVRAMWriteCoalesceWidth", 0u), std::numeric_limits<u16>::max()));
+  texture_replacements.config.max_vram_write_coalesce_height = Truncate16(std::min<u32>(
+    si.GetUIntValue("TextureReplacements", "MaxVRAMWriteCoalesceHeight", 0u), std::numeric_limits<u16>::max()));
 
-  texture_replacements.config.texture_dump_width_threshold =
-    si.GetUIntValue("TextureReplacements", "DumpTextureWidthThreshold", 16);
-  texture_replacements.config.texture_dump_height_threshold =
-    si.GetUIntValue("TextureReplacements", "DumpTextureHeightThreshold", 16);
-  texture_replacements.config.vram_write_dump_width_threshold =
-    si.GetUIntValue("TextureReplacements", "DumpVRAMWriteWidthThreshold", 128);
-  texture_replacements.config.vram_write_dump_height_threshold =
-    si.GetUIntValue("TextureReplacements", "DumpVRAMWriteHeightThreshold", 128);
+  texture_replacements.config.texture_dump_width_threshold = Truncate16(std::min<u32>(
+    si.GetUIntValue("TextureReplacements", "DumpTextureWidthThreshold", 16), std::numeric_limits<u16>::max()));
+  texture_replacements.config.texture_dump_height_threshold = Truncate16(std::min<u32>(
+    si.GetUIntValue("TextureReplacements", "DumpTextureHeightThreshold", 16), std::numeric_limits<u16>::max()));
+  texture_replacements.config.vram_write_dump_width_threshold = Truncate16(std::min<u32>(
+    si.GetUIntValue("TextureReplacements", "DumpVRAMWriteWidthThreshold", 128), std::numeric_limits<u16>::max()));
+  texture_replacements.config.vram_write_dump_height_threshold = Truncate16(std::min<u32>(
+    si.GetUIntValue("TextureReplacements", "DumpVRAMWriteHeightThreshold", 128), std::numeric_limits<u16>::max()));
 
   pio_device_type = ParsePIODeviceTypeName(
                       si.GetTinyStringValue("PIO", "DeviceType", GetPIODeviceTypeModeName(DEFAULT_PIO_DEVICE_TYPE)))
@@ -554,6 +568,7 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
   }
 
   si.SetBoolValue("GPU", "PerSampleShading", gpu_per_sample_shading);
+  si.SetUIntValue("GPU", "MaxQueuedFrames", gpu_max_queued_frames);
   si.SetBoolValue("GPU", "UseThread", gpu_use_thread);
   si.SetBoolValue("GPU", "UseSoftwareRendererForReadbacks", gpu_use_software_renderer_for_readbacks);
   si.SetBoolValue("GPU", "TrueColor", gpu_true_color);
@@ -580,7 +595,11 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
   si.SetFloatValue("GPU", "PGXPTolerance", gpu_pgxp_tolerance);
   si.SetBoolValue("GPU", "PGXPDepthBuffer", gpu_pgxp_depth_buffer);
   si.SetBoolValue("GPU", "PGXPDisableOn2DPolygons", gpu_pgxp_disable_2d);
+  si.SetBoolValue("GPU", "PGXPTransparentDepthTest", gpu_pgxp_transparent_depth);
   si.SetFloatValue("GPU", "PGXPDepthClearThreshold", GetPGXPDepthClearThreshold());
+  si.SetBoolValue("Debug", "ShowVRAM", gpu_show_vram);
+  si.SetBoolValue("Debug", "DumpCPUToVRAMCopies", gpu_dump_cpu_to_vram_copies);
+  si.SetBoolValue("Debug", "DumpVRAMToCPUCopies", gpu_dump_vram_to_cpu_copies);
   si.SetBoolValue("GPU", "DumpFastReplayMode", gpu_dump_fast_replay_mode);
 
   si.SetStringValue("GPU", "DeinterlacingMode", GetDisplayDeinterlacingModeName(display_deinterlacing_mode));
@@ -635,8 +654,9 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
   si.SetBoolValue("CDROM", "LoadImageToRAM", cdrom_load_image_to_ram);
   si.SetBoolValue("CDROM", "LoadImagePatches", cdrom_load_image_patches);
   si.SetBoolValue("CDROM", "MuteCDAudio", cdrom_mute_cd_audio);
-  si.SetIntValue("CDROM", "ReadSpeedup", cdrom_read_speedup);
-  si.SetIntValue("CDROM", "SeekSpeedup", cdrom_seek_speedup);
+  si.SetUIntValue("CDROM", "ReadSpeedup", cdrom_read_speedup);
+  si.SetUIntValue("CDROM", "SeekSpeedup", cdrom_seek_speedup);
+  si.SetUIntValue("CDROM", "MaxSpeedupCycles", cdrom_max_speedup_cycles);
 
   si.SetStringValue("Audio", "Backend", AudioStream::GetBackendName(audio_backend));
   si.SetStringValue("Audio", "Driver", audio_driver.c_str());
@@ -663,9 +683,8 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
 
   for (u32 i = 0; i < NUM_CONTROLLER_AND_CARD_PORTS; i++)
   {
-    const Controller::ControllerInfo* cinfo = Controller::GetControllerInfo(controller_types[i]);
-    DebugAssert(cinfo);
-    si.SetStringValue(Controller::GetSettingsSection(i).c_str(), "Type", cinfo->name);
+    si.SetStringValue(Controller::GetSettingsSection(i).c_str(), "Type",
+                      Controller::GetControllerInfo(controller_types[i]).name);
   }
 
   si.SetStringValue("MemoryCards", "Card1Type", GetMemoryCardTypeName(memory_card_types[0]));
@@ -697,21 +716,15 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
   si.SetIntValue("Cheevos", "NotificationsDuration", achievements_notification_duration);
   si.SetIntValue("Cheevos", "LeaderboardsDuration", achievements_leaderboard_duration);
 
-  if (!ignore_base)
-  {
-    si.SetBoolValue("Debug", "ShowVRAM", debugging.show_vram);
-    si.SetBoolValue("Debug", "DumpCPUToVRAMCopies", debugging.dump_cpu_to_vram_copies);
-    si.SetBoolValue("Debug", "DumpVRAMToCPUCopies", debugging.dump_vram_to_cpu_copies);
-
 #ifndef __ANDROID__
-    si.SetBoolValue("Debug", "EnableGDBServer", debugging.enable_gdb_server);
-    si.SetUIntValue("Debug", "GDBServerPort", debugging.gdb_server_port);
+  si.SetBoolValue("Debug", "EnableGDBServer", enable_gdb_server);
+  si.SetUIntValue("Debug", "GDBServerPort", gdb_server_port);
 #endif
-  }
 
   si.SetBoolValue("TextureReplacements", "EnableTextureReplacements", texture_replacements.enable_texture_replacements);
   si.SetBoolValue("TextureReplacements", "EnableVRAMWriteReplacements",
                   texture_replacements.enable_vram_write_replacements);
+  si.SetBoolValue("TextureReplacements", "AlwaysTrackUploads", texture_replacements.always_track_uploads);
   si.SetBoolValue("TextureReplacements", "PreloadTextures", texture_replacements.preload_textures);
   si.SetBoolValue("TextureReplacements", "DumpVRAMWrites", texture_replacements.dump_vram_writes);
   si.SetBoolValue("TextureReplacements", "DumpTextures", texture_replacements.dump_textures);
@@ -818,9 +831,9 @@ bool Settings::TextureReplacementSettings::operator==(const TextureReplacementSe
 {
   return (enable_texture_replacements == rhs.enable_texture_replacements &&
           enable_vram_write_replacements == rhs.enable_vram_write_replacements &&
-          preload_textures == rhs.preload_textures && dump_textures == rhs.dump_textures &&
-          dump_replaced_textures == rhs.dump_replaced_textures && dump_vram_writes == rhs.dump_vram_writes &&
-          config == rhs.config);
+          always_track_uploads == rhs.always_track_uploads && preload_textures == rhs.preload_textures &&
+          dump_textures == rhs.dump_textures && dump_replaced_textures == rhs.dump_replaced_textures &&
+          dump_vram_writes == rhs.dump_vram_writes && config == rhs.config);
 }
 
 bool Settings::TextureReplacementSettings::operator!=(const TextureReplacementSettings& rhs) const
@@ -950,7 +963,7 @@ std::string Settings::TextureReplacementSettings::Configuration::ExportToYAML(bo
                      comment_str, replacement_scale_linear_filter);    // ReplacementScaleLinearFilter
 }
 
-void Settings::FixIncompatibleSettings(bool display_osd_messages)
+void Settings::FixIncompatibleSettings(const SettingsInterface& si, bool display_osd_messages)
 {
   if (g_settings.disable_all_enhancements)
   {
@@ -1015,12 +1028,20 @@ void Settings::FixIncompatibleSettings(bool display_osd_messages)
     g_settings.gpu_pgxp_preserve_proj_fp = false;
     g_settings.gpu_pgxp_depth_buffer = false;
     g_settings.gpu_pgxp_disable_2d = false;
+    g_settings.gpu_pgxp_transparent_depth = false;
   }
 
   // texture replacements are not available without the TC or with the software renderer
   g_settings.texture_replacements.enable_texture_replacements &=
     (g_settings.gpu_renderer != GPURenderer::Software && g_settings.gpu_texture_cache);
   g_settings.texture_replacements.enable_vram_write_replacements &= (g_settings.gpu_renderer != GPURenderer::Software);
+
+  // GPU thread should be disabled if any debug windows are active, since they will be racing to read CPU thread state.
+  if (g_settings.gpu_use_thread && g_settings.gpu_max_queued_frames > 0 && ImGuiManager::AreAnyDebugWindowsEnabled(si))
+  {
+    WARNING_LOG("Setting maximum queued frames to 0 because one or more debug windows are enabled.");
+    g_settings.gpu_max_queued_frames = 0;
+  }
 
 #ifndef ENABLE_MMAP_FASTMEM
   if (g_settings.cpu_fastmem_mode == CPUFastmemMode::MMap)
@@ -1072,13 +1093,28 @@ void Settings::FixIncompatibleSettings(bool display_osd_messages)
     }
 
 #ifndef __ANDROID__
-    g_settings.debugging.enable_gdb_server = false;
+    g_settings.enable_gdb_server = false;
 #endif
 
-    g_settings.debugging.show_vram = false;
-    g_settings.debugging.dump_cpu_to_vram_copies = false;
-    g_settings.debugging.dump_vram_to_cpu_copies = false;
+    g_settings.gpu_show_vram = false;
+    g_settings.gpu_dump_cpu_to_vram_copies = false;
+    g_settings.gpu_dump_vram_to_cpu_copies = false;
   }
+}
+
+bool Settings::AreGPUDeviceSettingsChanged(const Settings& old_settings) const
+{
+  return (gpu_adapter != old_settings.gpu_adapter || gpu_use_debug_device != old_settings.gpu_use_debug_device ||
+          gpu_disable_shader_cache != old_settings.gpu_disable_shader_cache ||
+          gpu_disable_dual_source_blend != old_settings.gpu_disable_dual_source_blend ||
+          gpu_disable_framebuffer_fetch != old_settings.gpu_disable_framebuffer_fetch ||
+          gpu_disable_texture_buffers != old_settings.gpu_disable_texture_buffers ||
+          gpu_disable_texture_copy_to_self != old_settings.gpu_disable_texture_copy_to_self ||
+          gpu_disable_memory_import != old_settings.gpu_disable_memory_import ||
+          gpu_disable_raster_order_views != old_settings.gpu_disable_raster_order_views ||
+          gpu_disable_compute_shaders != old_settings.gpu_disable_compute_shaders ||
+          gpu_disable_compressed_textures != old_settings.gpu_disable_compressed_textures ||
+          display_exclusive_fullscreen_control != old_settings.display_exclusive_fullscreen_control);
 }
 
 void Settings::SetDefaultLogConfig(SettingsInterface& si)
@@ -1147,12 +1183,12 @@ void Settings::SetDefaultControllerConfig(SettingsInterface& si)
   {
     const std::string section(Controller::GetSettingsSection(i));
     si.ClearSection(section.c_str());
-    si.SetStringValue(section.c_str(), "Type", Controller::GetDefaultPadType(i));
+    si.SetStringValue(section.c_str(), "Type", Controller::GetControllerInfo(GetDefaultControllerType(i)).name);
   }
 
 #ifndef __ANDROID__
   // Use the automapper to set this up.
-  InputManager::MapController(si, 0, InputManager::GetGenericBindingMapping("Keyboard"));
+  InputManager::MapController(si, 0, InputManager::GetGenericBindingMapping("Keyboard"), true);
 #endif
 }
 
@@ -1757,7 +1793,7 @@ const char* Settings::GetDisplayAspectRatioDisplayName(DisplayAspectRatio ar)
                                   "DisplayAspectRatio");
 }
 
-float Settings::GetDisplayAspectRatioValue() const
+float GPUSettings::GetDisplayAspectRatioValue() const
 {
   return s_display_aspect_ratio_values[static_cast<size_t>(display_aspect_ratio)];
 }
@@ -2226,25 +2262,31 @@ const char* Settings::GetPIODeviceTypeModeDisplayName(PIODeviceType type)
                                   "PIODeviceType");
 }
 
-std::string EmuFolders::AppRoot;
-std::string EmuFolders::DataRoot;
-std::string EmuFolders::Bios;
-std::string EmuFolders::Cache;
-std::string EmuFolders::Cheats;
-std::string EmuFolders::Covers;
-std::string EmuFolders::GameIcons;
-std::string EmuFolders::GameSettings;
-std::string EmuFolders::InputProfiles;
-std::string EmuFolders::MemoryCards;
-std::string EmuFolders::Patches;
-std::string EmuFolders::Resources;
-std::string EmuFolders::SaveStates;
-std::string EmuFolders::Screenshots;
-std::string EmuFolders::Shaders;
-std::string EmuFolders::Subchannels;
-std::string EmuFolders::Textures;
-std::string EmuFolders::UserResources;
-std::string EmuFolders::Videos;
+namespace EmuFolders {
+
+std::string AppRoot;
+std::string DataRoot;
+std::string Bios;
+std::string Cache;
+std::string Cheats;
+std::string Covers;
+std::string GameIcons;
+std::string GameSettings;
+std::string InputProfiles;
+std::string MemoryCards;
+std::string Patches;
+std::string Resources;
+std::string SaveStates;
+std::string Screenshots;
+std::string Shaders;
+std::string Subchannels;
+std::string Textures;
+std::string UserResources;
+std::string Videos;
+
+static void EnsureFolderExists(const std::string& path);
+
+} // namespace EmuFolders
 
 void EmuFolders::SetDefaults()
 {
@@ -2357,33 +2399,35 @@ void EmuFolders::Update()
     System::UpdateMemoryCardTypes();
 }
 
-bool EmuFolders::EnsureFoldersExist()
+void EmuFolders::EnsureFolderExists(const std::string& path)
 {
-  bool result = FileSystem::EnsureDirectoryExists(Bios.c_str(), false);
-  result = FileSystem::EnsureDirectoryExists(Cache.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Path::Combine(Cache, "achievement_images").c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Cheats.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Covers.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(GameIcons.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(GameSettings.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(InputProfiles.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(MemoryCards.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Patches.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(SaveStates.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Screenshots.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Shaders.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Path::Combine(Shaders, "reshade").c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(
-             Path::Combine(Shaders, "reshade" FS_OSPATH_SEPARATOR_STR "Shaders").c_str(), false) &&
-           result;
-  result = FileSystem::EnsureDirectoryExists(
-             Path::Combine(Shaders, "reshade" FS_OSPATH_SEPARATOR_STR "Textures").c_str(), false) &&
-           result;
-  result = FileSystem::EnsureDirectoryExists(Subchannels.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Textures.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(UserResources.c_str(), false) && result;
-  result = FileSystem::EnsureDirectoryExists(Videos.c_str(), false) && result;
-  return result;
+  Error error;
+  if (!FileSystem::EnsureDirectoryExists(path.c_str(), false, &error))
+    ERROR_LOG("Failed to create directory {}: {}", path, error.GetDescription());
+}
+
+void EmuFolders::EnsureFoldersExist()
+{
+  EnsureFolderExists(Bios);
+  EnsureFolderExists(Cache);
+  EnsureFolderExists(Path::Combine(Cache, "achievement_images"));
+  EnsureFolderExists(Cheats);
+  EnsureFolderExists(Covers);
+  EnsureFolderExists(GameIcons);
+  EnsureFolderExists(GameSettings);
+  EnsureFolderExists(InputProfiles);
+  EnsureFolderExists(MemoryCards);
+  EnsureFolderExists(Patches);
+  EnsureFolderExists(SaveStates);
+  EnsureFolderExists(Screenshots);
+  EnsureFolderExists(Shaders);
+  EnsureFolderExists(Path::Combine(Shaders, "reshade"));
+  EnsureFolderExists(Path::Combine(Shaders, "reshade" FS_OSPATH_SEPARATOR_STR "Shaders"));
+  EnsureFolderExists(Path::Combine(Shaders, "reshade" FS_OSPATH_SEPARATOR_STR "Textures"));
+  EnsureFolderExists(Subchannels);
+  EnsureFolderExists(Textures);
+  EnsureFolderExists(UserResources);
+  EnsureFolderExists(Videos);
 }
 
 std::string EmuFolders::GetOverridableResourcePath(std::string_view name)

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "gamelistmodel.h"
@@ -12,18 +12,15 @@
 #include "common/path.h"
 #include "common/string_util.h"
 
-#include <QtConcurrent/QtConcurrent>
 #include <QtCore/QDate>
 #include <QtCore/QDateTime>
-#include <QtCore/QFuture>
-#include <QtCore/QFutureWatcher>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QIcon>
 #include <QtGui/QPainter>
 
 static constexpr std::array<const char*, GameListModel::Column_Count> s_column_names = {
   {"Icon", "Serial", "Title", "File Title", "Developer", "Publisher", "Genre", "Year", "Players", "Time Played",
-   "Last Played", "Size", "File Size", "Region", "Compatibility", "Cover"}};
+   "Last Played", "Size", "File Size", "Region", "Achievements", "Compatibility", "Cover"}};
 
 static constexpr int COVER_ART_WIDTH = 512;
 static constexpr int COVER_ART_HEIGHT = 512;
@@ -75,31 +72,99 @@ static void resizeAndPadPixmap(QPixmap* pm, int expected_width, int expected_hei
   *pm = padded_image;
 }
 
-static QPixmap createPlaceholderImage(const QPixmap& placeholder_pixmap, int width, int height, float scale,
-                                      const std::string& title)
+GameListCoverLoader::GameListCoverLoader(const GameList::Entry* ge, const QImage& placeholder_image, int width,
+                                         int height, float scale)
+  : QObject(nullptr), m_path(ge->path), m_serial(ge->serial), m_title(ge->title),
+    m_placeholder_image(placeholder_image), m_width(width), m_height(height), m_scale(scale),
+    m_dpr(qApp->devicePixelRatio())
 {
-  const float dpr = qApp->devicePixelRatio();
-  QPixmap pm(placeholder_pixmap.copy());
-  pm.setDevicePixelRatio(dpr);
-  if (pm.isNull())
-    return QPixmap();
+}
 
-  resizeAndPadPixmap(&pm, width, height, dpr);
+GameListCoverLoader::~GameListCoverLoader() = default;
+
+void GameListCoverLoader::loadOrGenerateCover()
+{
+  QPixmap image;
+  const std::string cover_path(GameList::GetCoverImagePath(m_path, m_serial, m_title));
+  if (!cover_path.empty())
+  {
+    m_image.load(QString::fromStdString(cover_path));
+    if (!m_image.isNull())
+    {
+      m_image.setDevicePixelRatio(m_dpr);
+      resizeAndPadImage();
+    }
+  }
+
+  if (m_image.isNull())
+    createPlaceholderImage();
+
+  // Have to pass through the UI thread, because the thread pool isn't a QThread...
+  // Can't create pixmaps on the worker thread, have to create it on the UI thread.
+  QtHost::RunOnUIThread([this]() {
+    if (!m_image.isNull())
+      emit coverLoaded(m_path, QPixmap::fromImage(m_image));
+    else
+      emit coverLoaded(m_path, QPixmap());
+    delete this;
+  });
+}
+
+void GameListCoverLoader::createPlaceholderImage()
+{
+  m_image = m_placeholder_image.copy();
+  m_image.setDevicePixelRatio(m_dpr);
+  if (m_image.isNull())
+    return;
+
+  resizeAndPadImage();
+
   QPainter painter;
-  if (painter.begin(&pm))
+  if (painter.begin(&m_image))
   {
     QFont font;
-    font.setPointSize(std::max(static_cast<int>(32.0f * scale), 1));
+    font.setPointSize(std::max(static_cast<int>(32.0f * m_scale), 1));
     painter.setFont(font);
     painter.setPen(Qt::white);
 
-    const QRect text_rc(0, 0, static_cast<int>(static_cast<float>(width)),
-                        static_cast<int>(static_cast<float>(height)));
-    painter.drawText(text_rc, Qt::AlignCenter | Qt::TextWordWrap, QString::fromStdString(title));
+    const QRect text_rc(0, 0, static_cast<int>(static_cast<float>(m_width)),
+                        static_cast<int>(static_cast<float>(m_height)));
+    painter.drawText(text_rc, Qt::AlignCenter | Qt::TextWordWrap, QString::fromStdString(m_title));
     painter.end();
   }
+}
 
-  return pm;
+void GameListCoverLoader::resizeAndPadImage()
+{
+  const int dpr_expected_width = DPRScale(m_width, m_dpr);
+  const int dpr_expected_height = DPRScale(m_height, m_dpr);
+  if (m_image.width() == dpr_expected_width && m_image.height() == dpr_expected_height)
+    return;
+
+  m_image = m_image.scaled(dpr_expected_width, dpr_expected_height, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  if (m_image.width() == dpr_expected_width && m_image.height() == dpr_expected_height)
+    return;
+
+  // QPainter works in unscaled coordinates.
+  int xoffs = 0;
+  int yoffs = 0;
+  if (m_image.width() < dpr_expected_width)
+    xoffs = DPRUnscale((dpr_expected_width - m_image.width()) / 2, m_dpr);
+  if (m_image.height() < dpr_expected_height)
+    yoffs = DPRUnscale((dpr_expected_height - m_image.height()) / 2, m_dpr);
+
+  QPixmap padded_image(dpr_expected_width, dpr_expected_height);
+  padded_image.setDevicePixelRatio(m_dpr);
+  padded_image.fill(Qt::transparent);
+  QPainter painter;
+  if (painter.begin(&padded_image))
+  {
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.drawImage(xoffs, yoffs, m_image);
+    painter.setCompositionMode(QPainter::CompositionMode_Destination);
+    painter.fillRect(padded_image.rect(), QColor(0, 0, 0, 0));
+    painter.end();
+  }
 }
 
 std::optional<GameListModel::Column> GameListModel::getColumnIdForName(std::string_view name)
@@ -129,9 +194,15 @@ GameListModel::GameListModel(float cover_scale, bool show_cover_titles, bool sho
 
   if (m_show_game_icons)
     GameList::ReloadMemcardTimestampCache();
+
+  connect(g_emu_thread, &EmuThread::gameListRowsChanged, this, &GameListModel::rowsChanged);
 }
 
-GameListModel::~GameListModel() = default;
+GameListModel::~GameListModel()
+{
+  // wait for all cover loads to finish, they're using m_placeholder_image
+  System::WaitForAllAsyncTasks();
+}
 
 void GameListModel::setShowGameIcons(bool enabled)
 {
@@ -151,8 +222,16 @@ void GameListModel::setCoverScale(float scale)
 
   m_cover_pixmap_cache.Clear();
   m_cover_scale = scale;
-  m_loading_pixmap = QPixmap(getCoverArtWidth(), getCoverArtHeight());
-  m_loading_pixmap.fill(QColor(0, 0, 0, 0));
+  if (m_loading_pixmap.load(QStringLiteral("%1/images/placeholder.png").arg(QtHost::GetResourcesBasePath())))
+  {
+    m_loading_pixmap.setDevicePixelRatio(qApp->devicePixelRatio());
+    resizeAndPadPixmap(&m_loading_pixmap, getCoverArtWidth(), getCoverArtHeight(), qApp->devicePixelRatio());
+  }
+  else
+  {
+    m_loading_pixmap = QPixmap(getCoverArtWidth(), getCoverArtHeight());
+    m_loading_pixmap.fill(QColor(0, 0, 0, 0));
+  }
 
   emit coverScaleChanged();
 }
@@ -181,33 +260,39 @@ void GameListModel::reloadThemeSpecificImages()
 
 void GameListModel::loadOrGenerateCover(const GameList::Entry* ge)
 {
-  QFuture<QPixmap> future =
-    QtConcurrent::run([this, path = ge->path, title = ge->title, serial = ge->serial]() -> QPixmap {
-      QPixmap image;
-      const std::string cover_path(GameList::GetCoverImagePath(path, serial, title));
-      if (!cover_path.empty())
-      {
-        const float dpr = qApp->devicePixelRatio();
-        image = QPixmap(QString::fromStdString(cover_path));
-        if (!image.isNull())
-        {
-          image.setDevicePixelRatio(dpr);
-          resizeAndPadPixmap(&image, getCoverArtWidth(), getCoverArtHeight(), dpr);
-        }
-      }
+  // NOTE: Must get connected before queuing, because otherwise you risk a race.
+  GameListCoverLoader* loader =
+    new GameListCoverLoader(ge, m_placeholder_image, getCoverArtWidth(), getCoverArtHeight(), m_cover_scale);
+  connect(loader, &GameListCoverLoader::coverLoaded, this, &GameListModel::coverLoaded);
+  System::QueueAsyncTask([loader]() { loader->loadOrGenerateCover(); });
+}
 
-      if (image.isNull())
-        image =
-          createPlaceholderImage(m_placeholder_pixmap, getCoverArtWidth(), getCoverArtHeight(), m_cover_scale, title);
+void GameListModel::coverLoaded(const std::string& path, const QPixmap& pixmap)
+{
+  m_cover_pixmap_cache.Insert(path, pixmap);
+  invalidateCoverForPath(path);
+}
 
-      return image;
-    });
+void GameListModel::rowsChanged(const QList<int>& rows)
+{
+  const QList<int> roles_changed = {Qt::DisplayRole};
 
-  // Context must be 'this' so we run on the UI thread.
-  future.then(this, [this, path = ge->path](QPixmap pm) {
-    m_cover_pixmap_cache.Insert(std::move(path), std::move(pm));
-    invalidateCoverForPath(path);
-  });
+  // try to collapse multiples
+  size_t start = 0;
+  size_t idx = 0;
+  const size_t size = rows.size();
+  for (; idx < size;)
+  {
+    if ((idx + 1) < size && rows[idx + 1] == (rows[idx] + 1))
+    {
+      idx++;
+    }
+    else
+    {
+      emit dataChanged(createIndex(rows[start], 0), createIndex(rows[idx], Column_Count - 1), roles_changed);
+      start = ++idx;
+    }
+  }
 }
 
 void GameListModel::invalidateCoverForPath(const std::string& path)
@@ -286,8 +371,8 @@ const QPixmap& GameListModel::getIconPixmapForEntry(const GameList::Entry* ge) c
 
 const QPixmap& GameListModel::getFlagPixmapForEntry(const GameList::Entry* ge) const
 {
-  static constexpr u32 FLAG_PIXMAP_WIDTH = 42;
-  static constexpr u32 FLAG_PIXMAP_HEIGHT = 30;
+  static constexpr u32 FLAG_PIXMAP_WIDTH = 30;
+  static constexpr u32 FLAG_PIXMAP_HEIGHT = 20;
 
   const std::string_view name = ge->GetLanguageIcon();
   auto it = m_flag_pixmap_cache.find(name);
@@ -459,11 +544,14 @@ QVariant GameListModel::data(const QModelIndex& index, int role, const GameList:
 
         case Column_FileSize:
           return (ge->file_size >= 0) ?
-                   QString("%1 MB").arg(static_cast<double>(ge->file_size) / 1048576.0, 0, 'f', 2) :
+                   QStringLiteral("%1 MB").arg(static_cast<double>(ge->file_size) / 1048576.0, 0, 'f', 2) :
                    tr("Unknown");
 
         case Column_UncompressedSize:
-          return QString("%1 MB").arg(static_cast<double>(ge->uncompressed_size) / 1048576.0, 0, 'f', 2);
+          return QStringLiteral("%1 MB").arg(static_cast<double>(ge->uncompressed_size) / 1048576.0, 0, 'f', 2);
+
+        case Column_Achievements:
+          return {};
 
         case Column_TimePlayed:
         {
@@ -491,62 +579,11 @@ QVariant GameListModel::data(const QModelIndex& index, int role, const GameList:
 
     case Qt::InitialSortOrderRole:
     {
-      switch (index.column())
-      {
-        case Column_Icon:
-          return static_cast<int>(ge->GetSortType());
-
-        case Column_Serial:
-          return QString::fromStdString(ge->serial);
-
-        case Column_Title:
-        case Column_Cover:
-          return QString::fromStdString(ge->title);
-
-        case Column_FileTitle:
-          return QtUtils::StringViewToQString(Path::GetFileTitle(ge->path));
-
-        case Column_Developer:
-          return ge->dbentry ? QtUtils::StringViewToQString(ge->dbentry->developer) : QString();
-
-        case Column_Publisher:
-          return ge->dbentry ? QtUtils::StringViewToQString(ge->dbentry->publisher) : QString();
-
-        case Column_Genre:
-          return ge->dbentry ? QtUtils::StringViewToQString(ge->dbentry->genre) : QString();
-
-        case Column_Year:
-          return ge->dbentry ?
-                   QDateTime::fromSecsSinceEpoch(static_cast<qint64>(ge->dbentry->release_date), QTimeZone::utc())
-                     .date()
-                     .year() :
-                   0;
-
-        case Column_Players:
-          return static_cast<int>(ge->dbentry ? ge->dbentry->max_players : 0);
-
-        case Column_Region:
-          return static_cast<int>(ge->region);
-
-        case Column_Compatibility:
-          return static_cast<int>(ge->dbentry ? ge->dbentry->compatibility :
-                                                GameDatabase::CompatibilityRating::Unknown);
-
-        case Column_TimePlayed:
-          return static_cast<qlonglong>(ge->total_played_time);
-
-        case Column_LastPlayed:
-          return static_cast<qlonglong>(ge->last_played_time);
-
-        case Column_FileSize:
-          return static_cast<qulonglong>(ge->file_size);
-
-        case Column_UncompressedSize:
-          return static_cast<qulonglong>(ge->uncompressed_size);
-
-        default:
-          return {};
-      }
+      const int column = index.column();
+      if (column == Column_TimePlayed || column == Column_LastPlayed)
+        return Qt::DescendingOrder;
+      else
+        return Qt::AscendingOrder;
     }
 
     case Qt::DecorationRole:
@@ -795,6 +832,31 @@ bool GameListModel::lessThan(const GameList::Entry* left, const GameList::Entry*
       return (left_players < right_players);
     }
 
+    case Column_Achievements:
+    {
+      // sort by unlock percentage
+      const float unlock_left =
+        (left->num_achievements > 0) ?
+          (static_cast<float>(std::max(left->unlocked_achievements, left->unlocked_achievements_hc)) /
+           static_cast<float>(left->num_achievements)) :
+          0;
+      const float unlock_right =
+        (right->num_achievements > 0) ?
+          (static_cast<float>(std::max(right->unlocked_achievements, right->unlocked_achievements_hc)) /
+           static_cast<float>(right->num_achievements)) :
+          0;
+      if (std::abs(unlock_left - unlock_right) < 0.0001f)
+      {
+        // order by achievement count
+        if (left->num_achievements == right->num_achievements)
+          return titlesLessThan(left, right);
+
+        return (left->num_achievements < right->num_achievements);
+      }
+
+      return (unlock_left < unlock_right);
+    }
+
     default:
       return false;
   }
@@ -816,7 +878,16 @@ void GameListModel::loadCommonImages()
       QtUtils::GetIconForCompatibility(static_cast<GameDatabase::CompatibilityRating>(i)).pixmap(96, 24);
   }
 
-  m_placeholder_pixmap.load(QStringLiteral("%1/images/cover-placeholder.png").arg(QtHost::GetResourcesBasePath()));
+  m_placeholder_image.load(QStringLiteral("%1/images/cover-placeholder.png").arg(QtHost::GetResourcesBasePath()));
+
+  constexpr int ACHIEVEMENT_ICON_SIZE = 16;
+  m_no_achievements_pixmap = QIcon(QString::fromStdString(QtHost::GetResourcePath("images/trophy-icon-gray.svg", true)))
+                               .pixmap(ACHIEVEMENT_ICON_SIZE);
+  m_has_achievements_pixmap = QIcon(QString::fromStdString(QtHost::GetResourcePath("images/trophy-icon.svg", true)))
+                                .pixmap(ACHIEVEMENT_ICON_SIZE);
+  m_mastered_achievements_pixmap =
+    QIcon(QString::fromStdString(QtHost::GetResourcePath("images/trophy-icon-star.svg", true)))
+      .pixmap(ACHIEVEMENT_ICON_SIZE);
 }
 
 void GameListModel::setColumnDisplayNames()
@@ -830,6 +901,7 @@ void GameListModel::setColumnDisplayNames()
   m_column_display_names[Column_Genre] = tr("Genre");
   m_column_display_names[Column_Year] = tr("Year");
   m_column_display_names[Column_Players] = tr("Players");
+  m_column_display_names[Column_Achievements] = tr("Achievements");
   m_column_display_names[Column_TimePlayed] = tr("Time Played");
   m_column_display_names[Column_LastPlayed] = tr("Last Played");
   m_column_display_names[Column_FileSize] = tr("Size");

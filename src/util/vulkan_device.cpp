@@ -1604,6 +1604,12 @@ void VulkanDevice::DeferPersistentDescriptorSetDestruction(VkDescriptorSet objec
   m_cleanup_objects.emplace_back(GetCurrentFenceCounter(), [this, object]() { FreePersistentDescriptorSet(object); });
 }
 
+void VulkanDevice::DeferSamplerDestruction(VkSampler object)
+{
+  m_cleanup_objects.emplace_back(GetCurrentFenceCounter(),
+                                 [this, object]() { vkDestroySampler(m_device, object, nullptr); });
+}
+
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                       VkDebugUtilsMessageTypeFlagsEXT messageType,
                                                       const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
@@ -1976,7 +1982,7 @@ bool VulkanDevice::CreateDeviceAndMainSwapChain(std::string_view adapter, Featur
   // Read device physical memory properties, we need it for allocating buffers
   vkGetPhysicalDeviceProperties(m_physical_device, &m_device_properties);
   m_device_properties.limits.minUniformBufferOffsetAlignment =
-    std::max(m_device_properties.limits.minUniformBufferOffsetAlignment, static_cast<VkDeviceSize>(1));
+    std::max(m_device_properties.limits.minUniformBufferOffsetAlignment, static_cast<VkDeviceSize>(16));
   m_device_properties.limits.minTexelBufferOffsetAlignment =
     std::max(m_device_properties.limits.minTexelBufferOffsetAlignment, static_cast<VkDeviceSize>(1));
   m_device_properties.limits.optimalBufferCopyOffsetAlignment =
@@ -1995,7 +2001,10 @@ bool VulkanDevice::CreateDeviceAndMainSwapChain(std::string_view adapter, Featur
     swap_chain =
       std::make_unique<VulkanSwapChain>(wi, vsync_mode, allow_present_throttle, exclusive_fullscreen_control);
     if (!swap_chain->CreateSurface(m_instance, m_physical_device, error))
+    {
+      swap_chain->Destroy(*this, false);
       return false;
+    }
   }
 
   // Attempt to create the device.
@@ -2051,17 +2060,11 @@ void VulkanDevice::DestroyDevice()
     m_main_swap_chain.reset();
   }
 
-  if (m_null_texture)
-  {
-    m_null_texture->Destroy(false);
-    m_null_texture.reset();
-  }
   for (auto& it : m_cleanup_objects)
     it.second();
   m_cleanup_objects.clear();
   DestroyPersistentDescriptorSets();
   DestroyBuffers();
-  DestroySamplers();
 
   DestroyPersistentDescriptorPool();
   DestroyPipelineLayouts();
@@ -2429,7 +2432,7 @@ void VulkanDevice::SetFeatures(FeatureMask disabled_features, const VkPhysicalDe
   m_features.noperspective_interpolation = true;
   m_features.texture_copy_to_self = !(disabled_features & FEATURE_MASK_TEXTURE_COPY_TO_SELF);
   m_features.per_sample_shading = vk_features.sampleRateShading;
-  m_features.supports_texture_buffers = !(disabled_features & FEATURE_MASK_TEXTURE_BUFFERS);
+  m_features.texture_buffers = !(disabled_features & FEATURE_MASK_TEXTURE_BUFFERS);
   m_features.feedback_loops = !(disabled_features & FEATURE_MASK_FEEDBACK_LOOPS);
 
 #ifdef __APPLE__
@@ -2452,6 +2455,7 @@ void VulkanDevice::SetFeatures(FeatureMask disabled_features, const VkPhysicalDe
 
   m_features.partial_msaa_resolve = true;
   m_features.memory_import = m_optional_extensions.vk_ext_external_memory_host;
+  m_features.exclusive_fullscreen = false;
   m_features.explicit_present = true;
   m_features.timed_present = false;
   m_features.shader_cache = true;
@@ -2769,9 +2773,10 @@ void VulkanDevice::UnmapUniformBuffer(u32 size)
 
 bool VulkanDevice::CreateNullTexture(Error* error)
 {
-  m_null_texture = VulkanTexture::Create(1, 1, 1, 1, 1, GPUTexture::Type::Texture, GPUTexture::Format::RGBA8,
-                                         GPUTexture::Flags::AllowBindAsImage, VK_FORMAT_R8G8B8A8_UNORM, error);
-  if (!m_null_texture)
+  std::unique_ptr<VulkanTexture> null_texture =
+    VulkanTexture::Create(1, 1, 1, 1, 1, GPUTexture::Type::Texture, GPUTexture::Format::RGBA8,
+                          GPUTexture::Flags::AllowBindAsImage, VK_FORMAT_R8G8B8A8_UNORM, error);
+  if (!null_texture)
   {
     Error::AddPrefix(error, "Failed to create null texture: ");
     return false;
@@ -2780,22 +2785,23 @@ bool VulkanDevice::CreateNullTexture(Error* error)
   const VkCommandBuffer cmdbuf = GetCurrentCommandBuffer();
   const VkImageSubresourceRange srr{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
   const VkClearColorValue ccv{};
-  m_null_texture->TransitionToLayout(cmdbuf, VulkanTexture::Layout::ClearDst);
-  vkCmdClearColorImage(cmdbuf, m_null_texture->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &ccv, 1, &srr);
-  m_null_texture->TransitionToLayout(cmdbuf, VulkanTexture::Layout::General);
-  Vulkan::SetObjectName(m_device, m_null_texture->GetImage(), "Null texture");
-  Vulkan::SetObjectName(m_device, m_null_texture->GetView(), "Null texture view");
+  null_texture->TransitionToLayout(cmdbuf, VulkanTexture::Layout::ClearDst);
+  vkCmdClearColorImage(cmdbuf, null_texture->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &ccv, 1, &srr);
+  null_texture->TransitionToLayout(cmdbuf, VulkanTexture::Layout::General);
+  Vulkan::SetObjectName(m_device, null_texture->GetImage(), "Null texture");
+  Vulkan::SetObjectName(m_device, null_texture->GetView(), "Null texture view");
+  m_empty_texture = std::move(null_texture);
 
   // Bind null texture and point sampler state to all.
-  const VkSampler point_sampler = GetSampler(GPUSampler::GetNearestConfig(), error);
-  if (point_sampler == VK_NULL_HANDLE)
+  GPUSampler* point_sampler = GetSampler(GPUSampler::GetNearestConfig(), error);
+  if (!point_sampler)
   {
     Error::AddPrefix(error, "Failed to get nearest sampler for init bind: ");
     return false;
   }
 
   for (u32 i = 0; i < MAX_TEXTURE_SAMPLERS; i++)
-    m_current_samplers[i] = point_sampler;
+    m_current_samplers[i] = static_cast<VulkanSampler*>(point_sampler)->GetSampler();
 
   return true;
 }
@@ -3393,7 +3399,7 @@ void VulkanDevice::BeginSwapChainRenderPass(VulkanSwapChain* swap_chain, u32 cle
   }
 
   VkClearValue clear_value;
-  GSVector4::store<false>(&clear_value.color.float32, GSVector4::rgba32(clear_color));
+  GSVector4::store<false>(&clear_value.color.float32, GSVector4::unorm8(clear_color));
   if (m_optional_extensions.vk_khr_dynamic_rendering)
   {
     VkRenderingAttachmentInfo ai = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
@@ -3565,7 +3571,7 @@ void VulkanDevice::SetInitialPipelineState()
 void VulkanDevice::SetTextureSampler(u32 slot, GPUTexture* texture, GPUSampler* sampler)
 {
   VulkanTexture* T = static_cast<VulkanTexture*>(texture);
-  const VkSampler vsampler = static_cast<VulkanSampler*>(sampler ? sampler : m_nearest_sampler.get())->GetSampler();
+  const VkSampler vsampler = static_cast<VulkanSampler*>(sampler ? sampler : m_nearest_sampler)->GetSampler();
   if (m_current_textures[slot] != T || m_current_samplers[slot] != vsampler)
   {
     m_current_textures[slot] = T;
@@ -3774,7 +3780,8 @@ bool VulkanDevice::UpdateDescriptorSetsForLayout(u32 dirty)
                 layout == GPUPipeline::Layout::SingleTextureAndPushConstants ||
                 layout == GPUPipeline::Layout::ComputeSingleTextureAndPushConstants)
   {
-    VulkanTexture* const tex = m_current_textures[0] ? m_current_textures[0] : m_null_texture.get();
+    VulkanTexture* const tex =
+      m_current_textures[0] ? m_current_textures[0] : static_cast<VulkanTexture*>(m_empty_texture.get());
     DebugAssert(tex && m_current_samplers[0] != VK_NULL_HANDLE);
     ds[num_ds++] = tex->GetDescriptorSetWithSampler(m_current_samplers[0]);
   }
@@ -3792,7 +3799,8 @@ bool VulkanDevice::UpdateDescriptorSetsForLayout(u32 dirty)
     {
       for (u32 i = 0; i < MAX_TEXTURE_SAMPLERS; i++)
       {
-        VulkanTexture* const tex = m_current_textures[i] ? m_current_textures[i] : m_null_texture.get();
+        VulkanTexture* const tex =
+          m_current_textures[i] ? m_current_textures[i] : static_cast<VulkanTexture*>(m_empty_texture.get());
         DebugAssert(tex && m_current_samplers[i] != VK_NULL_HANDLE);
         dsub.AddCombinedImageSamplerDescriptorWrite(VK_NULL_HANDLE, i, tex->GetView(), m_current_samplers[i],
                                                     tex->GetVkLayout());
@@ -3813,7 +3821,8 @@ bool VulkanDevice::UpdateDescriptorSetsForLayout(u32 dirty)
 
       for (u32 i = 0; i < MAX_TEXTURE_SAMPLERS; i++)
       {
-        VulkanTexture* const tex = m_current_textures[i] ? m_current_textures[i] : m_null_texture.get();
+        VulkanTexture* const tex =
+          m_current_textures[i] ? m_current_textures[i] : static_cast<VulkanTexture*>(m_empty_texture.get());
         DebugAssert(tex && m_current_samplers[i] != VK_NULL_HANDLE);
         dsub.AddCombinedImageSamplerDescriptorWrite(tds, i, tex->GetView(), m_current_samplers[i], tex->GetVkLayout());
       }
@@ -3843,8 +3852,10 @@ bool VulkanDevice::UpdateDescriptorSetsForLayout(u32 dirty)
       }
 
       // Annoyingly, have to update all slots...
+      const VkImageView null_view = static_cast<VulkanTexture*>(m_empty_texture.get())->GetView();
+      const VkImageLayout null_layout = static_cast<VulkanTexture*>(m_empty_texture.get())->GetVkLayout();
       for (u32 i = m_num_current_render_targets; i < MAX_IMAGE_RENDER_TARGETS; i++)
-        dsub.AddStorageImageDescriptorWrite(ids, i, m_null_texture->GetView(), m_null_texture->GetVkLayout());
+        dsub.AddStorageImageDescriptorWrite(ids, i, null_view, null_layout);
 
       dsub.Update(m_device, false);
     }

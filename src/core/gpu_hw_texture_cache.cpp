@@ -5,11 +5,14 @@
 #include "gpu_hw.h"
 #include "gpu_hw_shadergen.h"
 #include "gpu_sw_rasterizer.h"
+#include "gpu_thread.h"
 #include "host.h"
+#include "imgui_overlays.h"
 #include "settings.h"
 #include "system.h"
 
 #include "util/gpu_device.h"
+#include "util/imgui_fullscreen.h"
 #include "util/imgui_manager.h"
 #include "util/state_wrapper.h"
 
@@ -49,6 +52,9 @@ static constexpr u32 NUM_PAGE_DRAW_RECTS = 4;
 static constexpr const GSVector4i& INVALID_RECT = GPU_HW::INVALID_RECT;
 static constexpr const GPUTexture::Format REPLACEMENT_TEXTURE_FORMAT = GPUTexture::Format::RGBA8;
 static constexpr const char LOCAL_CONFIG_FILENAME[] = "config.yaml";
+
+static constexpr u32 STATE_PALETTE_RECORD_SIZE =
+  sizeof(GSVector4i) + sizeof(SourceKey) + sizeof(PaletteRecordFlags) + sizeof(HashType) + sizeof(u16) * MAX_CLUT_SIZE;
 
 // Has to be public because it's referenced in Source.
 struct HashCacheEntry
@@ -222,6 +228,13 @@ struct DumpedTextureKey
   {
     return (std::memcmp(&k, this, sizeof(DumpedTextureKey)) != 0);
   }
+
+  static DumpedTextureKey FromName(const TextureReplacementName& name)
+  {
+    return DumpedTextureKey{name.src_hash, name.pal_hash,     name.offset_x,
+                            name.offset_y, name.width,        name.height,
+                            name.type,     name.texture_mode, {}};
+  }
 };
 struct DumpedTextureKeyHash
 {
@@ -243,7 +256,7 @@ static bool IsDumpingVRAMWriteTextures();
 static void UpdateVRAMTrackingState();
 
 static void SetHashCacheTextureFormat();
-static bool CompilePipelines();
+static bool CompilePipelines(Error* error);
 static void DestroyPipelines();
 
 static const Source* ReturnSource(Source* source, const GSVector4i uv_rect, PaletteRecordFlags flags);
@@ -299,13 +312,14 @@ static std::string GetTextureReplacementDirectory();
 static std::string GetTextureDumpDirectory();
 
 static VRAMReplacementName GetVRAMWriteHash(u32 width, u32 height, const void* pixels);
-static std::string GetVRAMWriteDumpFilename(const VRAMReplacementName& name);
+static std::string GetVRAMWriteDumpPath(const VRAMReplacementName& name);
 
 static bool IsMatchingReplacementPalette(HashType full_palette_hash, GPUTextureMode mode, GPUTexturePaletteReg palette,
                                          const TextureReplacementName& name);
 static bool LoadLocalConfiguration(bool load_vram_write_replacement_aliases, bool load_texture_replacement_aliases);
 
-static void FindTextureReplacements(bool load_vram_write_replacements, bool load_texture_replacements);
+static void FindTextureReplacements(bool load_vram_write_replacements, bool load_texture_replacements,
+                                    bool prefill_dumped_texture_list, bool prefill_dumped_vram_list);
 static void LoadTextureReplacementAliases(const ryml::ConstNodeRef& root, bool load_vram_write_replacement_aliases,
                                           bool load_texture_replacement_aliases);
 
@@ -518,6 +532,7 @@ struct GPUTextureCacheState
 
   GPUTexture::Format hash_cache_texture_format = GPUTexture::Format::Unknown;
   HashCache hash_cache;
+  GPU_HW* hw_backend = nullptr; // TODO:FIXME: remove me
 
   /// List of candidates for purging when the hash cache gets too large.
   std::vector<std::pair<HashCache::iterator, s32>> hash_cache_purge_list;
@@ -526,10 +541,10 @@ struct GPUTextureCacheState
   std::vector<VRAMWrite*> temp_vram_write_list;
 
   std::unique_ptr<GPUTexture> replacement_texture_render_target;
+  std::unique_ptr<GPUPipeline> replacement_upscale_pipeline;              // copies alpha as-is with optional bilinear
   std::unique_ptr<GPUPipeline> replacement_draw_pipeline;                 // copies alpha as-is
   std::unique_ptr<GPUPipeline> replacement_semitransparent_draw_pipeline; // inverts alpha (i.e. semitransparent)
 
-  std::string game_id;
   VRAMReplacementMap vram_replacements;
 
   // TODO: Combine these into one map?
@@ -555,69 +570,110 @@ ALIGN_TO_CACHE_LINE GPUTextureCacheState s_state;
 
 bool GPUTextureCache::ShouldTrackVRAMWrites()
 {
-  if (!g_settings.gpu_texture_cache)
+  if (!g_gpu_settings.gpu_texture_cache)
     return false;
+
+  if (g_gpu_settings.texture_replacements.always_track_uploads)
+    return true;
 
 #ifdef ALWAYS_TRACK_VRAM_WRITES
   return true;
 #else
   return (IsDumpingVRAMWriteTextures() ||
-          (g_settings.texture_replacements.enable_texture_replacements && HasVRAMWriteTextureReplacements()));
+          (g_gpu_settings.texture_replacements.enable_texture_replacements && HasVRAMWriteTextureReplacements()));
 #endif
 }
 
 bool GPUTextureCache::IsDumpingVRAMWriteTextures()
 {
-  return (g_settings.texture_replacements.dump_textures && !s_state.config.dump_texture_pages);
+  return (g_gpu_settings.texture_replacements.dump_textures && !s_state.config.dump_texture_pages);
 }
 
-bool GPUTextureCache::Initialize()
+bool GPUTextureCache::Initialize(GPU_HW* backend, Error* error)
 {
+  s_state.hw_backend = backend;
+
   SetHashCacheTextureFormat();
-  LoadLocalConfiguration(false, false);
+  ReloadTextureReplacements(false);
   UpdateVRAMTrackingState();
-  if (!CompilePipelines())
+  if (!CompilePipelines(error))
     return false;
 
   return true;
 }
 
-void GPUTextureCache::UpdateSettings(bool use_texture_cache, const Settings& old_settings)
+bool GPUTextureCache::UpdateSettings(bool use_texture_cache, const GPUSettings& old_settings, Error* error)
 {
-  if (use_texture_cache)
-  {
-    UpdateVRAMTrackingState();
-
-    if (g_settings.texture_replacements.enable_texture_replacements !=
-        old_settings.texture_replacements.enable_texture_replacements)
-    {
-      Invalidate();
-
-      DestroyPipelines();
-      if (!CompilePipelines()) [[unlikely]]
-        Panic("Failed to compile pipelines on TC settings change");
-    }
-  }
+  const bool prev_tracking_state = s_state.track_vram_writes;
 
   // Reload textures if configuration changes.
   const bool old_replacement_scale_linear_filter = s_state.config.replacement_scale_linear_filter;
   if (LoadLocalConfiguration(false, false) ||
-      g_settings.texture_replacements.enable_texture_replacements !=
+      g_gpu_settings.texture_replacements.enable_texture_replacements !=
         old_settings.texture_replacements.enable_texture_replacements ||
-      g_settings.texture_replacements.enable_vram_write_replacements !=
-        old_settings.texture_replacements.enable_vram_write_replacements)
+      g_gpu_settings.texture_replacements.enable_vram_write_replacements !=
+        old_settings.texture_replacements.enable_vram_write_replacements ||
+      g_gpu_settings.texture_replacements.dump_textures != old_settings.texture_replacements.dump_textures ||
+      g_gpu_settings.texture_replacements.dump_vram_writes != old_settings.texture_replacements.dump_vram_writes ||
+      (g_gpu_settings.texture_replacements.dump_replaced_textures !=
+         old_settings.texture_replacements.dump_replaced_textures &&
+       (g_gpu_settings.texture_replacements.dump_textures || g_gpu_settings.texture_replacements.dump_vram_writes)))
   {
     if (use_texture_cache)
     {
-      if (s_state.config.replacement_scale_linear_filter != old_replacement_scale_linear_filter)
+      if (g_gpu_settings.texture_replacements.enable_texture_replacements !=
+            old_settings.texture_replacements.enable_texture_replacements ||
+          s_state.config.replacement_scale_linear_filter != old_replacement_scale_linear_filter)
       {
-        if (!CompilePipelines()) [[unlikely]]
-          Panic("Failed to compile pipelines on TC replacement settings change");
+        DestroyPipelines();
+        if (!CompilePipelines(error)) [[unlikely]]
+        {
+          Error::AddPrefix(error, "Failed to compile pipelines on TC replacement settings change: ");
+          return false;
+        }
       }
     }
 
     ReloadTextureReplacements(false);
   }
+
+  UpdateVRAMTrackingState();
+
+  if (s_state.track_vram_writes != prev_tracking_state)
+    Invalidate();
+
+  return true;
+}
+
+bool GPUTextureCache::GetStateSize(StateWrapper& sw, u32* size)
+{
+  if (sw.GetVersion() < 73)
+  {
+    *size = 0;
+    return true;
+  }
+
+  const size_t start = sw.GetPosition();
+  if (!sw.DoMarker("GPUTextureCache")) [[unlikely]]
+    return false;
+
+  u32 num_vram_writes = 0;
+  sw.Do(&num_vram_writes);
+
+  for (u32 i = 0; i < num_vram_writes; i++)
+  {
+    sw.SkipBytes(sizeof(GSVector4i) * 2 + sizeof(HashType));
+
+    u32 num_palette_records = 0;
+    sw.Do(&num_palette_records);
+    sw.SkipBytes(num_palette_records * STATE_PALETTE_RECORD_SIZE);
+  }
+
+  if (sw.HasError()) [[unlikely]]
+    return false;
+
+  *size = static_cast<u32>(sw.GetPosition() - start);
+  return true;
 }
 
 bool GPUTextureCache::DoState(StateWrapper& sw, bool skip)
@@ -668,7 +724,7 @@ bool GPUTextureCache::DoState(StateWrapper& sw, bool skip)
         sw.Do(&num_palette_records);
 
         // Skip palette records if we're not dumping now.
-        if (g_settings.texture_replacements.dump_textures)
+        if (g_gpu_settings.texture_replacements.dump_textures)
         {
           vrw->palette_records.reserve(num_palette_records);
           for (u32 j = 0; j < num_palette_records; j++)
@@ -760,6 +816,7 @@ void GPUTextureCache::Shutdown()
   s_state.hash_cache_purge_list = {};
   s_state.temp_vram_write_list = {};
   s_state.track_vram_writes = false;
+  s_state.hw_backend = nullptr;
 
   for (auto it = s_state.gpu_replacement_image_cache.begin(); it != s_state.gpu_replacement_image_cache.end();)
   {
@@ -773,7 +830,7 @@ void GPUTextureCache::Shutdown()
   s_state.vram_write_texture_replacements.clear();
   s_state.texture_page_texture_replacements.clear();
   s_state.dumped_textures.clear();
-  s_state.game_id = {};
+  s_state.dumped_vram_writes.clear();
 }
 
 void GPUTextureCache::SetHashCacheTextureFormat()
@@ -789,9 +846,9 @@ void GPUTextureCache::SetHashCacheTextureFormat()
   INFO_LOG("Using {} format for hash cache entries.", GPUTexture::GetFormatName(s_state.hash_cache_texture_format));
 }
 
-bool GPUTextureCache::CompilePipelines()
+bool GPUTextureCache::CompilePipelines(Error* error)
 {
-  if (!g_settings.texture_replacements.enable_texture_replacements)
+  if (!g_gpu_settings.texture_replacements.enable_texture_replacements)
     return true;
 
   GPUPipeline::GraphicsConfig plconfig = {};
@@ -818,28 +875,42 @@ bool GPUTextureCache::CompilePipelines()
 
   std::unique_ptr<GPUShader> fs = g_gpu_device->CreateShader(
     GPUShaderStage::Fragment, shadergen.GetLanguage(),
-    shadergen.GenerateReplacementMergeFragmentShader(false, s_state.config.replacement_scale_linear_filter));
+    shadergen.GenerateReplacementMergeFragmentShader(false, false, s_state.config.replacement_scale_linear_filter));
   if (!fs)
     return false;
+  GL_OBJECT_NAME(fs, "Replacement upscale shader");
+  plconfig.fragment_shader = fs.get();
+  if (!(s_state.replacement_upscale_pipeline = g_gpu_device->CreatePipeline(plconfig)))
+    return false;
+  GL_OBJECT_NAME(s_state.replacement_upscale_pipeline, "Replacement upscale pipeline");
+
+  fs = g_gpu_device->CreateShader(GPUShaderStage::Fragment, shadergen.GetLanguage(),
+                                  shadergen.GenerateReplacementMergeFragmentShader(true, false, false));
+  if (!fs)
+    return false;
+  GL_OBJECT_NAME(fs, "Replacement draw shader");
   plconfig.fragment_shader = fs.get();
   if (!(s_state.replacement_draw_pipeline = g_gpu_device->CreatePipeline(plconfig)))
     return false;
+  GL_OBJECT_NAME(s_state.replacement_draw_pipeline, "Replacement draw pipeline");
 
-  fs = g_gpu_device->CreateShader(
-    GPUShaderStage::Fragment, shadergen.GetLanguage(),
-    shadergen.GenerateReplacementMergeFragmentShader(true, s_state.config.replacement_scale_linear_filter));
+  fs = g_gpu_device->CreateShader(GPUShaderStage::Fragment, shadergen.GetLanguage(),
+                                  shadergen.GenerateReplacementMergeFragmentShader(true, true, false));
   if (!fs)
     return false;
+  GL_OBJECT_NAME(fs, "Replacement semitransparent draw shader");
   plconfig.blend = GPUPipeline::BlendState::GetNoBlendingState();
   plconfig.fragment_shader = fs.get();
   if (!(s_state.replacement_semitransparent_draw_pipeline = g_gpu_device->CreatePipeline(plconfig)))
     return false;
+  GL_OBJECT_NAME(s_state.replacement_semitransparent_draw_pipeline, "Replacement semitransparent draw pipeline");
 
   return true;
 }
 
 void GPUTextureCache::DestroyPipelines()
 {
+  s_state.replacement_upscale_pipeline.reset();
   s_state.replacement_draw_pipeline.reset();
   s_state.replacement_semitransparent_draw_pipeline.reset();
 }
@@ -1390,7 +1461,7 @@ const GPUTextureCache::Source* GPUTextureCache::ReturnSource(Source* source, con
   source->from_hash_cache->last_used_frame = System::GetFrameNumber();
 
   // TODO: Cache var.
-  if (g_settings.texture_replacements.dump_textures)
+  if (g_gpu_settings.texture_replacements.dump_textures)
   {
     source->active_uv_rect = source->active_uv_rect.runion(uv_rect);
     source->palette_record_flags |= flags;
@@ -1548,7 +1619,7 @@ void GPUTextureCache::DestroySource(Source* src, bool remove_from_hash_cache)
 {
   GL_INS_FMT("Invalidate source {}", SourceToString(src));
 
-  if (g_settings.texture_replacements.dump_textures && !src->active_uv_rect.eq(INVALID_RECT))
+  if (g_gpu_settings.texture_replacements.dump_textures && !src->active_uv_rect.eq(INVALID_RECT))
   {
     if (!s_state.config.dump_texture_pages)
     {
@@ -1760,8 +1831,21 @@ void GPUTextureCache::UpdateVRAMWriteSources(VRAMWrite* entry, SourceKey source_
     return;
 
   // Add to the palette tracking list
-  auto iter = std::find_if(entry->palette_records.begin(), entry->palette_records.end(),
-                           [&source_key](const auto& it) { return (it.key == source_key); });
+  std::vector<VRAMWrite::PaletteRecord>::iterator iter;
+  if (source_key.HasPalette())
+  {
+    // Palette requires exact match.
+    iter = std::find_if(entry->palette_records.begin(), entry->palette_records.end(),
+                        [&source_key](const auto& it) { return (it.key == source_key); });
+  }
+  else
+  {
+    // C16 only needs to match on the mode, palette is not used, and page doesn't matter.
+    // In theory we could extend the page skipping to palette textures too, but is it needed?
+    iter = std::find_if(entry->palette_records.begin(), entry->palette_records.end(),
+                        [&source_key](const auto& it) { return (it.key.mode == source_key.mode); });
+  }
+
   if (iter != entry->palette_records.end())
   {
     iter->rect = iter->rect.runion(write_intersection);
@@ -1950,7 +2034,7 @@ void GPUTextureCache::RemoveVRAMWrite(VRAMWrite* entry)
 
 void GPUTextureCache::DumpTexturesFromVRAMWrite(VRAMWrite* entry)
 {
-  if (g_settings.texture_replacements.dump_textures && !s_state.config.dump_texture_pages)
+  if (g_gpu_settings.texture_replacements.dump_textures && !s_state.config.dump_texture_pages)
   {
     for (const VRAMWrite::PaletteRecord& prec : entry->palette_records)
     {
@@ -2200,7 +2284,7 @@ GPUTextureCache::HashCacheEntry* GPUTextureCache::LookupHashCache(SourceKey key,
 
   DecodeTexture(key.page, key.palette, key.mode, entry.texture.get());
 
-  if (g_settings.texture_replacements.enable_texture_replacements)
+  if (g_gpu_settings.texture_replacements.enable_texture_replacements)
     ApplyTextureReplacements(key, tex_hash, pal_hash, &entry);
 
   s_state.hash_cache_memory_usage += entry.texture->GetVRAMUsage();
@@ -2402,13 +2486,14 @@ bool GPUTextureCache::TextureReplacementName::Parse(const std::string_view file_
   if (token.size() != 16 || !(val64 = StringUtil::FromChars<u64>(token, 16)).has_value())
     return false;
   src_hash = val64.value();
-  start_pos = end_pos + 1;
-  end_pos = file_title.find("-", start_pos + 1);
-  if (end_pos == std::string_view::npos)
-    return false;
 
   if (GetTextureMode() < GPUTextureMode::Direct16Bit)
   {
+    start_pos = end_pos + 1;
+    end_pos = file_title.find("-", start_pos + 1);
+    if (end_pos == std::string_view::npos)
+      return false;
+
     // pal_hash
     token = file_title.substr(start_pos, end_pos - start_pos);
     if (token.size() != 16 || !(val64 = StringUtil::FromChars<u64>(token, 16)).has_value())
@@ -2506,6 +2591,11 @@ bool GPUTextureCache::TextureReplacementName::Parse(const std::string_view file_
   }
   else
   {
+    start_pos = end_pos + 1;
+    end_pos = file_title.find("x", start_pos + 1);
+    if (end_pos == std::string_view::npos)
+      return false;
+
     // src_width
     token = file_title.substr(start_pos, end_pos - start_pos);
     std::optional<u16> val16;
@@ -2603,12 +2693,8 @@ size_t GPUTextureCache::DumpedTextureKeyHash::operator()(const DumpedTextureKey&
   return hash;
 }
 
-void GPUTextureCache::SetGameID(std::string game_id)
+void GPUTextureCache::GameSerialChanged()
 {
-  if (s_state.game_id == game_id)
-    return;
-
-  s_state.game_id = game_id;
   ReloadTextureReplacements(false);
 }
 
@@ -2625,7 +2711,8 @@ GPUTexture* GPUTextureCache::GetVRAMReplacement(u32 width, u32 height, const voi
 
 bool GPUTextureCache::ShouldDumpVRAMWrite(u32 width, u32 height)
 {
-  return (g_settings.texture_replacements.dump_vram_writes && width >= s_state.config.vram_write_dump_width_threshold &&
+  return (g_gpu_settings.texture_replacements.dump_vram_writes &&
+          width >= s_state.config.vram_write_dump_width_threshold &&
           height >= s_state.config.vram_write_dump_height_threshold);
 }
 
@@ -2633,12 +2720,15 @@ void GPUTextureCache::DumpVRAMWrite(u32 width, u32 height, const void* pixels)
 {
   const VRAMReplacementName name = GetVRAMWriteHash(width, height, pixels);
   if (s_state.dumped_vram_writes.find(name) != s_state.dumped_vram_writes.end())
+  {
+    DEV_COLOR_LOG(Green, "Not dumping {}", name.ToString());
     return;
+  }
 
   s_state.dumped_vram_writes.insert(name);
 
-  const std::string filename = GetVRAMWriteDumpFilename(name);
-  if (filename.empty() || FileSystem::FileExists(filename.c_str()))
+  const std::string path = GetVRAMWriteDumpPath(name);
+  if (path.empty() || FileSystem::FileExists(path.c_str()))
     return;
 
   Image image(width, height, ImageFormat::RGBA8);
@@ -2647,7 +2737,7 @@ void GPUTextureCache::DumpVRAMWrite(u32 width, u32 height, const void* pixels)
 
   for (u32 y = 0; y < height; y++)
   {
-    u8* row_ptr = image.GetPixels();
+    u8* row_ptr = image.GetRowPixels(y);
     for (u32 x = 0; x < width; x++)
     {
       const u32 pixel32 = VRAMRGBA5551ToRGBA8888(*(src_pixels++));
@@ -2659,9 +2749,14 @@ void GPUTextureCache::DumpVRAMWrite(u32 width, u32 height, const void* pixels)
   if (s_state.config.dump_vram_write_force_alpha_channel)
     image.SetAllPixelsOpaque();
 
-  INFO_LOG("Dumping {}x{} VRAM write to '{}'", width, height, Path::GetFileName(filename));
-  if (!image.SaveToFile(filename.c_str())) [[unlikely]]
-    ERROR_LOG("Failed to dump {}x{} VRAM write to '{}'", width, height, filename);
+  INFO_LOG("Dumping {}x{} VRAM write to '{}'", width, height, Path::GetFileName(path));
+
+  Error error;
+  if (!image.SaveToFile(path.c_str(), Image::DEFAULT_SAVE_QUALITY, &error)) [[unlikely]]
+  {
+    ERROR_LOG("Failed to dump {}x{} VRAM write to '{}': {}", width, height, Path::GetFileName(path),
+              error.GetDescription());
+  }
 }
 
 void GPUTextureCache::DumpTexture(TextureReplacementType type, u32 offset_x, u32 offset_y, u32 src_width,
@@ -2679,27 +2774,6 @@ void GPUTextureCache::DumpTexture(TextureReplacementType type, u32 offset_x, u32
                                 !s_state.config.dump_texture_force_alpha_channel);
   const u8 dumped_texture_mode = static_cast<u8>(mode) | (semitransparent ? 4 : 0);
 
-  const DumpedTextureKey key = {src_hash,
-                                pal_hash,
-                                Truncate16(offset_x),
-                                Truncate16(offset_y),
-                                Truncate16(width),
-                                Truncate16(height),
-                                type,
-                                dumped_texture_mode,
-                                {}};
-  if (s_state.dumped_textures.find(key) != s_state.dumped_textures.end())
-    return;
-
-  if (!EnsureGameDirectoryExists())
-    return;
-
-  const std::string dump_directory = GetTextureDumpDirectory();
-  if (!FileSystem::EnsureDirectoryExists(dump_directory.c_str(), false))
-    return;
-
-  s_state.dumped_textures.insert(key);
-
   const TextureReplacementName name = {
     .src_hash = src_hash,
     .pal_hash = pal_hash,
@@ -2715,23 +2789,21 @@ void GPUTextureCache::DumpTexture(TextureReplacementType type, u32 offset_x, u32
     .pal_max = Truncate8(pal_max),
   };
 
-  // skip if dumped already
-  if (!g_settings.texture_replacements.dump_replaced_textures)
+  const DumpedTextureKey key = DumpedTextureKey::FromName(name);
+  if (s_state.dumped_textures.find(key) != s_state.dumped_textures.end())
   {
-    const TextureReplacementMap& map = (type == TextureReplacementType::TextureFromPage) ?
-                                         s_state.texture_page_texture_replacements :
-                                         s_state.vram_write_texture_replacements;
-    const auto& [begin, end] = map.equal_range(name.GetIndex());
-    for (auto it = begin; it != end; ++it)
-    {
-      // only match on the hash, not the sizes, we could be trying to dump a smaller texture
-      if (it->second.first.pal_hash == name.pal_hash)
-      {
-        DEV_LOG("Not dumping currently-replaced VRAM write {:016X} [{}x{}] at {}", src_hash, width, height, rect);
-        return;
-      }
-    }
+    DEV_COLOR_LOG(Green, "Not dumping {}", name.ToString());
+    return;
   }
+
+  if (!EnsureGameDirectoryExists())
+    return;
+
+  const std::string dump_directory = GetTextureDumpDirectory();
+  if (!FileSystem::EnsureDirectoryExists(dump_directory.c_str(), false))
+    return;
+
+  s_state.dumped_textures.insert(key);
 
   SmallString filename = name.ToString();
   filename.append(".png");
@@ -2838,18 +2910,28 @@ void GPUTextureCache::GetVRAMWriteTextureReplacements(std::vector<TextureReplace
       continue;
     }
 
-    // TODO: This fails in Wild Arms 2, writes that are wider than a page.
-    DebugAssert(rect_in_page_space.width() == name.width && rect_in_page_space.height() == name.height);
-    DebugAssert(rect_in_page_space.width() <= static_cast<s32>(TEXTURE_PAGE_WIDTH));
-    DebugAssert(rect_in_page_space.height() <= static_cast<s32>(TEXTURE_PAGE_HEIGHT));
-
     GPUTexture* texture = GetTextureReplacementGPUImage(it->second.second);
     if (!texture)
       continue;
 
+    // Especially for C16 textures, the write may span multiple pages. In this case, we need to offset
+    // the start of the page into the replacement texture.
+    const GSVector2i rect_in_page_space_start = rect_in_page_space.xy();
+    const GSVector2i src_offset =
+      GSVector2i::zero().sub32(rect_in_page_space_start) & rect_in_page_space_start.lt32(GSVector2i::zero());
+    const GSVector4i clamped_rect_in_page_space =
+      rect_in_page_space.add32(GSVector4i::xyxy(src_offset, GSVector2i::zero()))
+        .rintersect(GSVector4i::cxpr(0, 0, TEXTURE_PAGE_WIDTH, TEXTURE_PAGE_HEIGHT));
+
+    // TODO: This fails in Wild Arms 2, writes that are wider than a page.
+    DebugAssert(rect_in_page_space.width() == name.width && rect_in_page_space.height() == name.height);
+    DebugAssert(clamped_rect_in_page_space.width() <= static_cast<s32>(TEXTURE_PAGE_WIDTH));
+    DebugAssert(clamped_rect_in_page_space.height() <= static_cast<s32>(TEXTURE_PAGE_HEIGHT));
+
     const GSVector2 scale = GSVector2(texture->GetSizeVec()) / GSVector2(name.GetSizeVec());
-    replacements.push_back(TextureReplacementSubImage{rect_in_page_space, GSVector4i::zero(), texture, scale.x, scale.y,
-                                                      name.IsSemitransparent()});
+    replacements.push_back(TextureReplacementSubImage{
+      clamped_rect_in_page_space, GSVector4i::xyxy(src_offset, src_offset.add32(clamped_rect_in_page_space.rsize())),
+      texture, scale.x, scale.y, name.IsSemitransparent()});
   }
 }
 
@@ -2908,8 +2990,8 @@ void GPUTextureCache::GetTexturePageTextureReplacements(std::vector<TextureRepla
       continue;
 
     const GSVector2 scale = GSVector2(texture->GetSizeVec()) / GSVector2(name.GetSizeVec());
-    replacements.push_back(TextureReplacementSubImage{rect_in_page_space, GSVector4i::zero(), texture, scale.x, scale.y,
-                                                      name.IsSemitransparent()});
+    replacements.push_back(TextureReplacementSubImage{rect_in_page_space, GSVector4i::loadh(texture->GetSizeVec()),
+                                                      texture, scale.x, scale.y, name.IsSemitransparent()});
   }
 }
 
@@ -2940,14 +3022,20 @@ bool GPUTextureCache::HasValidReplacementExtension(const std::string_view path)
   return false;
 }
 
-void GPUTextureCache::FindTextureReplacements(bool load_vram_write_replacements, bool load_texture_replacements)
+void GPUTextureCache::FindTextureReplacements(bool load_vram_write_replacements, bool load_texture_replacements,
+                                              bool prefill_dumped_texture_list, bool prefill_dumped_vram_list)
 {
-  if (s_state.game_id.empty())
+  if (GPUThread::GetGameSerial().empty())
     return;
 
   FileSystem::FindResultsArray files;
   FileSystem::FindFiles(GetTextureReplacementDirectory().c_str(), "*",
                         FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_RECURSIVE, &files);
+
+  const bool add_texture_replacements_to_dumped =
+    prefill_dumped_texture_list && !g_gpu_settings.texture_replacements.dump_replaced_textures;
+  const bool add_vram_replacements_to_dumped =
+    prefill_dumped_vram_list && !g_gpu_settings.texture_replacements.dump_replaced_textures;
 
   for (FILESYSTEM_FIND_DATA& fd : files)
   {
@@ -2964,17 +3052,23 @@ void GPUTextureCache::FindTextureReplacements(bool load_vram_write_replacements,
       case TextureReplacementType::VRAMReplacement:
       {
         VRAMReplacementName name;
-        if (!load_vram_write_replacements || !name.Parse(file_title))
+        if (!name.Parse(file_title))
           continue;
 
-        if (const auto it = s_state.vram_replacements.find(name); it != s_state.vram_replacements.end())
+        if (add_vram_replacements_to_dumped)
+          s_state.dumped_vram_writes.insert(name);
+
+        if (load_vram_write_replacements)
         {
-          WARNING_LOG("Duplicate VRAM replacement: '{}' and '{}'", Path::GetFileName(it->second),
-                      Path::GetFileName(fd.FileName));
-          continue;
-        }
+          if (const auto it = s_state.vram_replacements.find(name); it != s_state.vram_replacements.end())
+          {
+            WARNING_LOG("Duplicate VRAM replacement: '{}' and '{}'", Path::GetFileName(it->second),
+                        Path::GetFileName(fd.FileName));
+            continue;
+          }
 
-        s_state.vram_replacements.emplace(name, std::move(fd.FileName));
+          s_state.vram_replacements.emplace(name, std::move(fd.FileName));
+        }
       }
       break;
 
@@ -2982,32 +3076,38 @@ void GPUTextureCache::FindTextureReplacements(bool load_vram_write_replacements,
       case TextureReplacementType::TextureFromPage:
       {
         TextureReplacementName name;
-        if (!load_texture_replacements || !name.Parse(file_title))
+        if (!name.Parse(file_title))
           continue;
 
-        DebugAssert(name.type == type.value());
+        if (add_texture_replacements_to_dumped)
+          s_state.dumped_textures.insert(DumpedTextureKey::FromName(name));
 
-        const TextureReplacementIndex index = name.GetIndex();
-        TextureReplacementMap& dest_map = (type.value() == TextureReplacementType::TextureFromVRAMWrite) ?
-                                            s_state.vram_write_texture_replacements :
-                                            s_state.texture_page_texture_replacements;
-
-        // Multiple replacements in the same write are fine. But they should have different rects.
-        const auto range = dest_map.equal_range(index);
-        bool duplicate = false;
-        for (auto it = range.first; it != range.second; ++it)
+        if (load_texture_replacements)
         {
-          if (it->second.first == name) [[unlikely]]
-          {
-            WARNING_LOG("Duplicate texture replacement: '{}' and '{}'", Path::GetFileName(it->second.second),
-                        Path::GetFileName(fd.FileName));
-            duplicate = true;
-          }
-        }
-        if (duplicate) [[unlikely]]
-          continue;
+          DebugAssert(name.type == type.value());
 
-        dest_map.emplace(index, std::make_pair(name, std::move(fd.FileName)));
+          const TextureReplacementIndex index = name.GetIndex();
+          TextureReplacementMap& dest_map = (type.value() == TextureReplacementType::TextureFromVRAMWrite) ?
+                                              s_state.vram_write_texture_replacements :
+                                              s_state.texture_page_texture_replacements;
+
+          // Multiple replacements in the same write are fine. But they should have different rects.
+          const auto range = dest_map.equal_range(index);
+          bool duplicate = false;
+          for (auto it = range.first; it != range.second; ++it)
+          {
+            if (it->second.first == name) [[unlikely]]
+            {
+              WARNING_LOG("Duplicate texture replacement: '{}' and '{}'", Path::GetFileName(it->second.second),
+                          Path::GetFileName(fd.FileName));
+              duplicate = true;
+            }
+          }
+          if (duplicate) [[unlikely]]
+            continue;
+
+          dest_map.emplace(index, std::make_pair(name, std::move(fd.FileName)));
+        }
       }
       break;
 
@@ -3015,23 +3115,69 @@ void GPUTextureCache::FindTextureReplacements(bool load_vram_write_replacements,
     }
   }
 
-  if (g_settings.texture_replacements.enable_texture_replacements)
+  if (g_gpu_settings.texture_replacements.enable_texture_replacements)
   {
     INFO_LOG("Found {} replacement upload textures for '{}'", s_state.vram_write_texture_replacements.size(),
-             s_state.game_id);
+             GPUThread::GetGameSerial());
     INFO_LOG("Found {} replacement page textures for '{}'", s_state.texture_page_texture_replacements.size(),
-             s_state.game_id);
+             GPUThread::GetGameSerial());
   }
 
-  if (g_settings.texture_replacements.enable_vram_write_replacements)
-    INFO_LOG("Found {} replacement VRAM for '{}'", s_state.vram_replacements.size(), s_state.game_id);
+  if (g_gpu_settings.texture_replacements.enable_vram_write_replacements)
+    INFO_LOG("Found {} replacement VRAM for '{}'", s_state.vram_replacements.size(), GPUThread::GetGameSerial());
+
+  // if we're dumping, need to prefill the dumped list with those in the dumps directory as well
+  if (prefill_dumped_texture_list || prefill_dumped_vram_list)
+  {
+    FileSystem::FindFiles(GetTextureDumpDirectory().c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_RECURSIVE,
+                          &files);
+
+    for (FILESYSTEM_FIND_DATA& fd : files)
+    {
+      if ((fd.Attributes & FILESYSTEM_FILE_ATTRIBUTE_DIRECTORY) || !HasValidReplacementExtension(fd.FileName))
+        continue;
+
+      const std::string_view file_title = Path::GetFileTitle(fd.FileName);
+      const std::optional<TextureReplacementType> type = GetTextureReplacementTypeFromFileTitle(file_title);
+      if (!type.has_value())
+        continue;
+
+      switch (type.value())
+      {
+        case TextureReplacementType::VRAMReplacement:
+        {
+          VRAMReplacementName name;
+          if (!name.Parse(file_title))
+            continue;
+
+          if (prefill_dumped_vram_list)
+            s_state.dumped_vram_writes.insert(name);
+        }
+        break;
+
+        case TextureReplacementType::TextureFromVRAMWrite:
+        case TextureReplacementType::TextureFromPage:
+        {
+          TextureReplacementName name;
+          if (!name.Parse(file_title))
+            continue;
+
+          if (prefill_dumped_texture_list)
+            s_state.dumped_textures.insert(DumpedTextureKey::FromName(name));
+        }
+        break;
+
+          DefaultCaseIsUnreachable()
+      }
+    }
+  }
 }
 
 void GPUTextureCache::LoadTextureReplacementAliases(const ryml::ConstNodeRef& root,
                                                     bool load_vram_write_replacement_aliases,
                                                     bool load_texture_replacement_aliases)
 {
-  if (s_state.game_id.empty())
+  if (GPUThread::GetGameSerial().empty())
     return;
 
   const std::string source_dir = GetTextureReplacementDirectory();
@@ -3107,17 +3253,19 @@ void GPUTextureCache::LoadTextureReplacementAliases(const ryml::ConstNodeRef& ro
     }
   }
 
-  if (g_settings.texture_replacements.enable_texture_replacements)
+  if (g_gpu_settings.texture_replacements.enable_texture_replacements)
   {
     INFO_LOG("Found {} replacement upload textures after applying aliases for '{}'",
-             s_state.vram_write_texture_replacements.size(), s_state.game_id);
+             s_state.vram_write_texture_replacements.size(), GPUThread::GetGameSerial());
     INFO_LOG("Found {} replacement page textures after applying aliases for '{}'",
-             s_state.texture_page_texture_replacements.size(), s_state.game_id);
+             s_state.texture_page_texture_replacements.size(), GPUThread::GetGameSerial());
   }
 
-  if (g_settings.texture_replacements.enable_vram_write_replacements)
+  if (g_gpu_settings.texture_replacements.enable_vram_write_replacements)
+  {
     INFO_LOG("Found {} replacement VRAM after applying aliases for '{}'", s_state.vram_replacements.size(),
-             s_state.game_id);
+             GPUThread::GetGameSerial());
+  }
 }
 
 const GPUTextureCache::TextureReplacementImage* GPUTextureCache::GetTextureReplacementImage(const std::string& path)
@@ -3241,8 +3389,8 @@ void GPUTextureCache::PreloadReplacementTextures()
 #define UPDATE_PROGRESS()                                                                                              \
   if (last_update_time.GetTimeSeconds() >= UPDATE_INTERVAL)                                                            \
   {                                                                                                                    \
-    Host::DisplayLoadingScreen("Preloading replacement textures...", 0, static_cast<int>(total_textures),              \
-                               static_cast<int>(num_textures_loaded));                                                 \
+    ImGuiFullscreen::RenderLoadingScreen(ImGuiManager::LOGO_IMAGE_NAME, "Preloading replacement textures...", 0,       \
+                                         static_cast<int>(total_textures), static_cast<int>(num_textures_loaded));     \
     last_update_time.Reset();                                                                                          \
   }
 
@@ -3269,10 +3417,10 @@ void GPUTextureCache::PreloadReplacementTextures()
 
 bool GPUTextureCache::EnsureGameDirectoryExists()
 {
-  if (s_state.game_id.empty())
+  if (GPUThread::GetGameSerial().empty())
     return false;
 
-  const std::string game_directory = Path::Combine(EmuFolders::Textures, s_state.game_id);
+  const std::string game_directory = Path::Combine(EmuFolders::Textures, GPUThread::GetGameSerial());
   if (FileSystem::DirectoryExists(game_directory.c_str()))
     return true;
 
@@ -3309,12 +3457,13 @@ bool GPUTextureCache::EnsureGameDirectoryExists()
 
 std::string GPUTextureCache::GetTextureReplacementDirectory()
 {
-  std::string dir = Path::Combine(
-    EmuFolders::Textures, SmallString::from_format("{}" FS_OSPATH_SEPARATOR_STR "replacements", s_state.game_id));
+  std::string dir =
+    Path::Combine(EmuFolders::Textures,
+                  SmallString::from_format("{}" FS_OSPATH_SEPARATOR_STR "replacements", GPUThread::GetGameSerial()));
   if (!FileSystem::DirectoryExists(dir.c_str()))
   {
     // Check for the old directory structure without a replacements subdirectory.
-    std::string altdir = Path::Combine(EmuFolders::Textures, s_state.game_id);
+    std::string altdir = Path::Combine(EmuFolders::Textures, GPUThread::GetGameSerial());
     if (FileSystem::DirectoryExists(altdir.c_str()))
       WARNING_LOG("Using deprecated texture replacement directory {}", altdir);
     dir = std::move(altdir);
@@ -3326,7 +3475,7 @@ std::string GPUTextureCache::GetTextureReplacementDirectory()
 std::string GPUTextureCache::GetTextureDumpDirectory()
 {
   return Path::Combine(EmuFolders::Textures,
-                       SmallString::from_format("{}" FS_OSPATH_SEPARATOR_STR "dumps", s_state.game_id));
+                       SmallString::from_format("{}" FS_OSPATH_SEPARATOR_STR "dumps", GPUThread::GetGameSerial()));
 }
 
 GPUTextureCache::VRAMReplacementName GPUTextureCache::GetVRAMWriteHash(u32 width, u32 height, const void* pixels)
@@ -3335,7 +3484,7 @@ GPUTextureCache::VRAMReplacementName GPUTextureCache::GetVRAMWriteHash(u32 width
   return {hash.low64, hash.high64};
 }
 
-std::string GPUTextureCache::GetVRAMWriteDumpFilename(const VRAMReplacementName& name)
+std::string GPUTextureCache::GetVRAMWriteDumpPath(const VRAMReplacementName& name)
 {
   std::string ret;
   if (!EnsureGameDirectoryExists())
@@ -3354,14 +3503,15 @@ bool GPUTextureCache::LoadLocalConfiguration(bool load_vram_write_replacement_al
   const Settings::TextureReplacementSettings::Configuration old_config = s_state.config;
 
   // load settings from ini
-  s_state.config = g_settings.texture_replacements.config;
+  s_state.config = g_gpu_settings.texture_replacements.config;
 
-  if (s_state.game_id.empty())
+  const std::string& game_serial = GPUThread::GetGameSerial();
+  if (game_serial.empty())
     return (s_state.config != old_config);
 
   const std::optional<std::string> ini_data = FileSystem::ReadFileToString(
     Path::Combine(EmuFolders::Textures,
-                  SmallString::from_format("{}" FS_OSPATH_SEPARATOR_STR "{}", s_state.game_id, LOCAL_CONFIG_FILENAME))
+                  SmallString::from_format("{}" FS_OSPATH_SEPARATOR_STR "{}", game_serial, LOCAL_CONFIG_FILENAME))
       .c_str());
   if (!ini_data.has_value() || ini_data->empty())
     return (s_state.config != old_config);
@@ -3391,17 +3541,17 @@ bool GPUTextureCache::LoadLocalConfiguration(bool load_vram_write_replacement_al
                                               .value_or(static_cast<bool>(s_state.config.convert_copies_to_writes));
   s_state.config.max_vram_write_splits =
     GetOptionalTFromObject<bool>(root, "MaxVRAMWriteSplits").value_or(s_state.config.max_vram_write_splits);
-  s_state.config.max_vram_write_coalesce_width = GetOptionalTFromObject<u32>(root, "MaxVRAMWriteCoalesceWidth")
+  s_state.config.max_vram_write_coalesce_width = GetOptionalTFromObject<u16>(root, "MaxVRAMWriteCoalesceWidth")
                                                    .value_or(s_state.config.max_vram_write_coalesce_width);
-  s_state.config.max_vram_write_coalesce_height = GetOptionalTFromObject<u32>(root, "MaxVRAMWriteCoalesceHeight")
+  s_state.config.max_vram_write_coalesce_height = GetOptionalTFromObject<u16>(root, "MaxVRAMWriteCoalesceHeight")
                                                     .value_or(s_state.config.max_vram_write_coalesce_height);
-  s_state.config.texture_dump_width_threshold = GetOptionalTFromObject<u32>(root, "DumpTextureWidthThreshold")
+  s_state.config.texture_dump_width_threshold = GetOptionalTFromObject<u16>(root, "DumpTextureWidthThreshold")
                                                   .value_or(s_state.config.texture_dump_width_threshold);
-  s_state.config.texture_dump_height_threshold = GetOptionalTFromObject<u32>(root, "DumpTextureHeightThreshold")
+  s_state.config.texture_dump_height_threshold = GetOptionalTFromObject<u16>(root, "DumpTextureHeightThreshold")
                                                    .value_or(s_state.config.texture_dump_height_threshold);
-  s_state.config.vram_write_dump_width_threshold = GetOptionalTFromObject<u32>(root, "DumpVRAMWriteWidthThreshold")
+  s_state.config.vram_write_dump_width_threshold = GetOptionalTFromObject<u16>(root, "DumpVRAMWriteWidthThreshold")
                                                      .value_or(s_state.config.vram_write_dump_width_threshold);
-  s_state.config.vram_write_dump_height_threshold = GetOptionalTFromObject<u32>(root, "DumpVRAMWriteHeightThreshold")
+  s_state.config.vram_write_dump_height_threshold = GetOptionalTFromObject<u16>(root, "DumpVRAMWriteHeightThreshold")
                                                       .value_or(s_state.config.vram_write_dump_height_threshold);
   s_state.config.max_hash_cache_entries =
     GetOptionalTFromObject<u32>(root, "MaxHashCacheEntries").value_or(s_state.config.max_hash_cache_entries);
@@ -3426,24 +3576,33 @@ bool GPUTextureCache::LoadLocalConfiguration(bool load_vram_write_replacement_al
 
 void GPUTextureCache::ReloadTextureReplacements(bool show_info)
 {
+  s_state.dumped_textures.clear();
+  s_state.dumped_vram_writes.clear();
   s_state.vram_replacements.clear();
   s_state.vram_write_texture_replacements.clear();
   s_state.texture_page_texture_replacements.clear();
 
-  const bool load_vram_write_replacements = (g_settings.texture_replacements.enable_vram_write_replacements);
+  const bool load_vram_write_replacements = (g_gpu_settings.texture_replacements.enable_vram_write_replacements);
   const bool load_texture_replacements =
-    (g_settings.gpu_texture_cache && g_settings.texture_replacements.enable_texture_replacements);
-  if (load_vram_write_replacements || load_texture_replacements)
-    FindTextureReplacements(load_vram_write_replacements, load_texture_replacements);
+    (g_gpu_settings.gpu_texture_cache && g_gpu_settings.texture_replacements.enable_texture_replacements);
+  const bool prefill_dumped_texture_list =
+    (g_gpu_settings.texture_replacements.dump_vram_writes || g_gpu_settings.texture_replacements.dump_textures);
+  const bool prefill_dumped_vram_list =
+    (g_gpu_settings.texture_replacements.dump_vram_writes || g_gpu_settings.texture_replacements.dump_textures);
+  if (load_vram_write_replacements || load_texture_replacements || prefill_dumped_texture_list ||
+      prefill_dumped_vram_list)
+  {
+    FindTextureReplacements(load_vram_write_replacements, load_texture_replacements, prefill_dumped_texture_list,
+                            prefill_dumped_vram_list);
+  }
 
   LoadLocalConfiguration(load_vram_write_replacements, load_texture_replacements);
 
-  if (g_settings.texture_replacements.preload_textures)
+  if (g_gpu_settings.texture_replacements.preload_textures)
     PreloadReplacementTextures();
 
   PurgeUnreferencedTexturesFromCache();
 
-  DebugAssert(g_gpu);
   UpdateVRAMTrackingState();
   InvalidateSources();
 
@@ -3504,7 +3663,8 @@ void GPUTextureCache::ApplyTextureReplacements(SourceKey key, HashType tex_hash,
 
   if (HasVRAMWriteTextureReplacements())
   {
-    const GSVector4i page_rect = VRAMPageRect(key.page);
+    // Wrapping around the edge for replacement testing breaks 8/16-bit textures in the rightmost page.
+    const GSVector4i page_rect = GetTextureRectWithoutWrap(key.page, key.mode);
     LoopRectPages(page_rect, [&key, &pal_hash, &subimages, &page_rect](u32 pn) {
       const PageEntry& page = s_state.pages[pn];
       ListIterate(page.writes, [&key, &pal_hash, &subimages, &page_rect](const VRAMWrite* vrw) {
@@ -3565,29 +3725,45 @@ void GPUTextureCache::ApplyTextureReplacements(SourceKey key, HashType tex_hash,
     return;
   }
 
+  GL_SCOPE_FMT("ApplyTextureReplacements({:016X}, {:016X}) => {}x{}", tex_hash, pal_hash, replacement_tex->GetWidth(),
+               replacement_tex->GetHeight());
+
   // TODO: Use rects instead of fullscreen tris, maybe avoid the copy..
-  alignas(VECTOR_ALIGNMENT) float uniforms[4];
-  GSVector2 texture_size = GSVector2(GSVector2i(entry->texture->GetWidth(), entry->texture->GetHeight()));
-  GSVector2::store<true>(&uniforms[0], texture_size);
-  GSVector2::store<true>(&uniforms[2], GSVector2::cxpr(1.0f) / texture_size);
   g_gpu_device->InvalidateRenderTarget(s_state.replacement_texture_render_target.get());
   g_gpu_device->SetRenderTarget(s_state.replacement_texture_render_target.get());
+
+  GL_INS("Upscale Texture Page");
+  alignas(VECTOR_ALIGNMENT) float uniforms[8];
+  GSVector2 texture_size = GSVector2(GSVector2i(entry->texture->GetWidth(), entry->texture->GetHeight()));
+  GSVector4::store<true>(&uniforms[0], GSVector4::cxpr(0.0f, 0.0f, 1.0f, 1.0f));
+  GSVector2::store<true>(&uniforms[4], texture_size);
+  GSVector2::store<true>(&uniforms[6], GSVector2::cxpr(1.0f) / texture_size);
   g_gpu_device->SetViewportAndScissor(0, 0, new_width, new_height);
-  g_gpu_device->SetPipeline(s_state.replacement_draw_pipeline.get());
+  g_gpu_device->SetPipeline(s_state.replacement_upscale_pipeline.get());
   g_gpu_device->PushUniformBuffer(uniforms, sizeof(uniforms));
   g_gpu_device->SetTextureSampler(0, entry->texture.get(), g_gpu_device->GetNearestSampler());
   g_gpu_device->Draw(3, 0);
 
   for (const TextureReplacementSubImage& si : subimages)
   {
+    GL_INS_FMT("Blit {}x{} replacement from {} to {}", si.texture->GetWidth(), si.texture->GetHeight(), si.src_rect,
+               si.dst_rect);
+
+    const GSVector4 src_rect = (GSVector4(GSVector4i::xyxy(si.src_rect.xy(), si.src_rect.rsize())) *
+                                GSVector4::xyxy(GSVector2(si.scale_x, si.scale_y))) /
+                               GSVector4(GSVector4i::xyxy(si.texture->GetSizeVec()));
     const GSVector4i dst_rect = GSVector4i(GSVector4(si.dst_rect) * max_scale_v);
     texture_size = GSVector2(si.texture->GetSizeVec());
-    GSVector2::store<true>(&uniforms[0], texture_size);
-    GSVector2::store<true>(&uniforms[2], GSVector2::cxpr(1.0f) / texture_size);
+    GSVector4::store<true>(&uniforms[0], src_rect);
+    GSVector2::store<true>(&uniforms[4], texture_size);
+    GSVector2::store<true>(&uniforms[6], GSVector2::cxpr(1.0f) / texture_size);
     g_gpu_device->SetViewportAndScissor(dst_rect);
-    g_gpu_device->SetTextureSampler(0, si.texture, g_gpu_device->GetNearestSampler());
+    g_gpu_device->SetTextureSampler(0, si.texture,
+                                    s_state.config.replacement_scale_linear_filter ? g_gpu_device->GetLinearSampler() :
+                                                                                     g_gpu_device->GetNearestSampler());
     g_gpu_device->SetPipeline(si.invert_alpha ? s_state.replacement_semitransparent_draw_pipeline.get() :
                                                 s_state.replacement_draw_pipeline.get());
+    g_gpu_device->PushUniformBuffer(uniforms, sizeof(uniforms));
     g_gpu_device->Draw(3, 0);
   }
 
@@ -3596,5 +3772,5 @@ void GPUTextureCache::ApplyTextureReplacements(SourceKey key, HashType tex_hash,
   g_gpu_device->RecycleTexture(std::move(entry->texture));
   entry->texture = std::move(replacement_tex);
 
-  g_gpu->RestoreDeviceContext();
+  s_state.hw_backend->RestoreDeviceContext();
 }

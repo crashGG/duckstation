@@ -8,6 +8,9 @@
 #include "fullscreen_ui.h"
 #include "gpu.h"
 #include "gpu_hw_texture_cache.h"
+#include "gpu_presenter.h"
+#include "gpu_thread.h"
+#include "gte.h"
 #include "host.h"
 #include "imgui_overlays.h"
 #include "settings.h"
@@ -58,9 +61,8 @@ static void HotkeyModifyResolutionScale(s32 increment)
 
   if (System::IsValid())
   {
-    g_gpu->RestoreDeviceContext();
-    g_gpu->UpdateSettings(old_settings);
-    System::ClearMemorySaveStates();
+    GPUThread::UpdateSettings(true, false);
+    System::ClearMemorySaveStates(true, false);
   }
 }
 
@@ -87,7 +89,7 @@ static void HotkeyLoadStateSlot(bool global, s32 slot)
   }
 
   Error error;
-  if (!System::LoadState(path.c_str(), &error, true))
+  if (!System::LoadState(path.c_str(), &error, true, false))
   {
     Host::AddKeyedOSDMessage(
       "LoadState",
@@ -133,6 +135,8 @@ static void HotkeyToggleOSD()
   g_settings.display_show_status_indicators ^= Host::GetBoolSettingValue("Display", "ShowStatusIndicators", true);
   g_settings.display_show_inputs ^= Host::GetBoolSettingValue("Display", "ShowInputs", false);
   g_settings.display_show_enhancements ^= Host::GetBoolSettingValue("Display", "ShowEnhancements", false);
+
+  GPUThread::UpdateSettings(true, false);
 }
 
 #ifndef __ANDROID__
@@ -210,7 +214,12 @@ DEFINE_HOTKEY("OpenCheatsMenu", TRANSLATE_NOOP("Hotkeys", "General"), TRANSLATE_
                 if (!pressed && CanPause())
                   FullscreenUI::OpenCheatsMenu();
               })
-#endif
+
+DEFINE_HOTKEY("ChangeDisc", TRANSLATE_NOOP("Hotkeys", "System"), TRANSLATE_NOOP("Hotkeys", "Change Disc"),
+              [](s32 pressed) {
+                if (!pressed)
+                  FullscreenUI::OpenDiscChangeMenu();
+              })
 
 DEFINE_HOTKEY("Screenshot", TRANSLATE_NOOP("Hotkeys", "General"), TRANSLATE_NOOP("Hotkeys", "Save Screenshot"),
               [](s32 pressed) {
@@ -218,21 +227,6 @@ DEFINE_HOTKEY("Screenshot", TRANSLATE_NOOP("Hotkeys", "General"), TRANSLATE_NOOP
                   System::SaveScreenshot();
               })
 
-DEFINE_HOTKEY("RecordSingleFrameGPUDump", TRANSLATE_NOOP("Hotkeys", "Graphics"),
-              TRANSLATE_NOOP("Hotkeys", "Record Single Frame GPU Trace"), [](s32 pressed) {
-                if (!pressed)
-                  System::StartRecordingGPUDump(nullptr, 1);
-              })
-
-DEFINE_HOTKEY("RecordMultiFrameGPUDump", TRANSLATE_NOOP("Hotkeys", "Graphics"),
-              TRANSLATE_NOOP("Hotkeys", "Record Multi-Frame GPU Trace"), [](s32 pressed) {
-                if (pressed > 0)
-                  System::StartRecordingGPUDump(nullptr, 0);
-                else
-                  System::StopRecordingGPUDump();
-              })
-
-#ifndef __ANDROID__
 DEFINE_HOTKEY("ToggleMediaCapture", TRANSLATE_NOOP("Hotkeys", "General"),
               TRANSLATE_NOOP("Hotkeys", "Toggle Media Capture"), [](s32 pressed) {
                 if (!pressed)
@@ -257,21 +251,24 @@ DEFINE_HOTKEY("OpenLeaderboards", TRANSLATE_NOOP("Hotkeys", "General"),
               })
 #endif
 
+DEFINE_HOTKEY("RecordSingleFrameGPUDump", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Record Single Frame GPU Trace"), [](s32 pressed) {
+                if (!pressed)
+                  System::StartRecordingGPUDump(nullptr, 1);
+              })
+
+DEFINE_HOTKEY("RecordMultiFrameGPUDump", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Record Multi-Frame GPU Trace"), [](s32 pressed) {
+                if (pressed > 0)
+                  System::StartRecordingGPUDump(nullptr, 0);
+                else
+                  System::StopRecordingGPUDump();
+              })
+
 DEFINE_HOTKEY("Reset", TRANSLATE_NOOP("Hotkeys", "System"), TRANSLATE_NOOP("Hotkeys", "Reset System"), [](s32 pressed) {
   if (!pressed)
     Host::RunOnCPUThread(System::ResetSystem);
 })
-
-DEFINE_HOTKEY("ChangeDisc", TRANSLATE_NOOP("Hotkeys", "System"), TRANSLATE_NOOP("Hotkeys", "Change Disc"),
-              [](s32 pressed) {
-                if (!pressed && System::IsValid() && System::HasMediaSubImages())
-                {
-                  const u32 current = System::GetMediaSubImageIndex();
-                  const u32 next = (current + 1) % System::GetMediaSubImageCount();
-                  if (current != next)
-                    Host::RunOnCPUThread([next]() { System::SwitchMediaSubImage(next); });
-                }
-              })
 
 DEFINE_HOTKEY("SwapMemoryCards", TRANSLATE_NOOP("Hotkeys", "System"),
               TRANSLATE_NOOP("Hotkeys", "Swap Memory Card Slots"), [](s32 pressed) {
@@ -375,11 +372,11 @@ DEFINE_HOTKEY("TogglePGXP", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOO
               [](s32 pressed) {
                 if (!pressed && System::IsValid())
                 {
-                  Settings old_settings = g_settings;
+                  System::ClearMemorySaveStates(true, true);
+
                   g_settings.gpu_pgxp_enable = !g_settings.gpu_pgxp_enable;
-                  g_gpu->RestoreDeviceContext();
-                  g_gpu->UpdateSettings(old_settings);
-                  System::ClearMemorySaveStates();
+                  GPUThread::UpdateSettings(true, false);
+
                   Host::AddKeyedOSDMessage("TogglePGXP",
                                            g_settings.gpu_pgxp_enable ?
                                              TRANSLATE_STR("OSDMessage", "PGXP is now enabled.") :
@@ -414,25 +411,19 @@ DEFINE_HOTKEY("DecreaseResolutionScale", TRANSLATE_NOOP("Hotkeys", "Graphics"),
 DEFINE_HOTKEY("TogglePostProcessing", TRANSLATE_NOOP("Hotkeys", "Graphics"),
               TRANSLATE_NOOP("Hotkeys", "Toggle Post-Processing"), [](s32 pressed) {
                 if (!pressed && System::IsValid())
-                  PostProcessing::DisplayChain.Toggle();
-              })
-
-DEFINE_HOTKEY("ToggleInternalPostProcessing", TRANSLATE_NOOP("Hotkeys", "Graphics"),
-              TRANSLATE_NOOP("Hotkeys", "Toggle Internal Post-Processing"), [](s32 pressed) {
-                if (!pressed && System::IsValid())
-                  PostProcessing::InternalChain.Toggle();
+                  GPUPresenter::TogglePostProcessing();
               })
 
 DEFINE_HOTKEY("ReloadPostProcessingShaders", TRANSLATE_NOOP("Hotkeys", "Graphics"),
               TRANSLATE_NOOP("Hotkeys", "Reload Post Processing Shaders"), [](s32 pressed) {
                 if (!pressed && System::IsValid())
-                  PostProcessing::ReloadShaders();
+                  GPUPresenter::ReloadPostProcessingSettings(true, true, true);
               })
 
 DEFINE_HOTKEY("ReloadTextureReplacements", TRANSLATE_NOOP("Hotkeys", "Graphics"),
               TRANSLATE_NOOP("Hotkeys", "Reload Texture Replacements"), [](s32 pressed) {
                 if (!pressed && System::IsValid())
-                  GPUTextureCache::ReloadTextureReplacements(true);
+                  GPUThread::RunOnThread([]() { GPUTextureCache::ReloadTextureReplacements(true); });
               })
 
 DEFINE_HOTKEY("ToggleWidescreen", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Toggle Widescreen"),
@@ -448,12 +439,11 @@ DEFINE_HOTKEY("TogglePGXPDepth", TRANSLATE_NOOP("Hotkeys", "Graphics"),
                   if (!g_settings.gpu_pgxp_enable)
                     return;
 
-                  const Settings old_settings = g_settings;
-                  g_settings.gpu_pgxp_depth_buffer = !g_settings.gpu_pgxp_depth_buffer;
+                  System::ClearMemorySaveStates(true, true);
 
-                  g_gpu->RestoreDeviceContext();
-                  g_gpu->UpdateSettings(old_settings);
-                  System::ClearMemorySaveStates();
+                  g_settings.gpu_pgxp_depth_buffer = !g_settings.gpu_pgxp_depth_buffer;
+                  GPUThread::UpdateSettings(true, false);
+
                   Host::AddKeyedOSDMessage("TogglePGXPDepth",
                                            g_settings.gpu_pgxp_depth_buffer ?
                                              TRANSLATE_STR("OSDMessage", "PGXP Depth Buffer is now enabled.") :
@@ -469,12 +459,11 @@ DEFINE_HOTKEY("TogglePGXPCPU", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_
                   if (!g_settings.gpu_pgxp_enable)
                     return;
 
-                  const Settings old_settings = g_settings;
+                  System::ClearMemorySaveStates(true, true);
+
+                  // GPU thread is unchanged
                   g_settings.gpu_pgxp_cpu = !g_settings.gpu_pgxp_cpu;
 
-                  g_gpu->RestoreDeviceContext();
-                  g_gpu->UpdateSettings(old_settings);
-                  System::ClearMemorySaveStates();
                   Host::AddKeyedOSDMessage("TogglePGXPCPU",
                                            g_settings.gpu_pgxp_cpu ?
                                              TRANSLATE_STR("OSDMessage", "PGXP CPU mode is now enabled.") :
@@ -519,6 +508,106 @@ DEFINE_HOTKEY("RotateCounterclockwise", TRANSLATE_NOOP("Hotkeys", "Graphics"),
                 }
               })
 
+// See gte.cpp.
+#ifndef __ANDROID__
+
+DEFINE_HOTKEY("FreecamToggle", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Freecam Toggle"),
+              [](s32 pressed) {
+                if (!pressed && !Achievements::IsHardcoreModeActive())
+                  GTE::SetFreecamEnabled(!GTE::IsFreecamEnabled());
+              })
+DEFINE_HOTKEY("FreecamReset", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Freecam Reset"),
+              [](s32 pressed) {
+                if (!pressed && !Achievements::IsHardcoreModeActive())
+                  GTE::ResetFreecam();
+              })
+DEFINE_HOTKEY("FreecamMoveLeft", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Freecam Move Left"),
+              [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamMoveAxis(0, std::max(static_cast<float>(pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamMoveRight", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Move Right"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamMoveAxis(0, std::min(static_cast<float>(-pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamMoveUp", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Freecam Move Up"),
+              [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamMoveAxis(1, std::max(static_cast<float>(pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamMoveDown", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Freecam Move Down"),
+              [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamMoveAxis(1, std::min(static_cast<float>(-pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamMoveForward", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Move Forward"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamMoveAxis(2, std::min(static_cast<float>(-pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamMoveBackward", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Move Backward"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamMoveAxis(2, std::max(static_cast<float>(pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamRotateLeft", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Rotate Left"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamRotateAxis(1, std::max(static_cast<float>(pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamRotateRight", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Rotate Right"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamRotateAxis(1, std::min(static_cast<float>(-pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamRotateForward", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Rotate Forward"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamRotateAxis(0, std::min(static_cast<float>(-pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamRotateBackward", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Rotate Backward"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamRotateAxis(0, std::max(static_cast<float>(pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamRollLeft", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Freecam Roll Left"),
+              [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamRotateAxis(2, std::min(static_cast<float>(-pressed), 0.0f));
+              })
+DEFINE_HOTKEY("FreecamRollRight", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+              TRANSLATE_NOOP("Hotkeys", "Freecam Roll Right"), [](s32 pressed) {
+                if (Achievements::IsHardcoreModeActive())
+                  return;
+
+                GTE::SetFreecamRotateAxis(2, std::max(static_cast<float>(pressed), 0.0f));
+              })
+
+#endif // __ANDROID__
+
 DEFINE_HOTKEY("AudioMute", TRANSLATE_NOOP("Hotkeys", "Audio"), TRANSLATE_NOOP("Hotkeys", "Toggle Mute"),
               [](s32 pressed) {
                 if (!pressed && System::IsValid())
@@ -557,7 +646,8 @@ DEFINE_HOTKEY("AudioVolumeUp", TRANSLATE_NOOP("Hotkeys", "Audio"), TRANSLATE_NOO
                 {
                   g_settings.audio_output_muted = false;
 
-                  const s32 volume = std::min<s32>(System::GetAudioOutputVolume() + 10, 200);
+                  const u8 volume =
+                    Truncate8(std::min<s32>(static_cast<s32>(System::GetAudioOutputVolume()) + 10, 200));
                   g_settings.audio_output_volume = volume;
                   g_settings.audio_fast_forward_volume = volume;
                   SPU::GetOutputStream()->SetOutputVolume(volume);
@@ -571,7 +661,7 @@ DEFINE_HOTKEY("AudioVolumeDown", TRANSLATE_NOOP("Hotkeys", "Audio"), TRANSLATE_N
                 {
                   g_settings.audio_output_muted = false;
 
-                  const s32 volume = std::max<s32>(System::GetAudioOutputVolume() - 10, 0);
+                  const u8 volume = Truncate8(std::max<s32>(static_cast<s32>(System::GetAudioOutputVolume()) - 10, 0));
                   g_settings.audio_output_volume = volume;
                   g_settings.audio_fast_forward_volume = volume;
                   SPU::GetOutputStream()->SetOutputVolume(volume);
@@ -584,29 +674,31 @@ DEFINE_HOTKEY("AudioVolumeDown", TRANSLATE_NOOP("Hotkeys", "Audio"), TRANSLATE_N
 DEFINE_HOTKEY("LoadSelectedSaveState", TRANSLATE_NOOP("Hotkeys", "Save States"),
               TRANSLATE_NOOP("Hotkeys", "Load From Selected Slot"), [](s32 pressed) {
                 if (!pressed)
-                  Host::RunOnCPUThread(SaveStateSelectorUI::LoadCurrentSlot);
+                  GPUThread::RunOnThread(SaveStateSelectorUI::LoadCurrentSlot);
               })
 DEFINE_HOTKEY("SaveSelectedSaveState", TRANSLATE_NOOP("Hotkeys", "Save States"),
               TRANSLATE_NOOP("Hotkeys", "Save To Selected Slot"), [](s32 pressed) {
                 if (!pressed)
-                  Host::RunOnCPUThread(SaveStateSelectorUI::SaveCurrentSlot);
+                  GPUThread::RunOnThread(SaveStateSelectorUI::SaveCurrentSlot);
               })
 DEFINE_HOTKEY("SelectPreviousSaveStateSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
               TRANSLATE_NOOP("Hotkeys", "Select Previous Save Slot"), [](s32 pressed) {
                 if (!pressed)
-                  Host::RunOnCPUThread([]() { SaveStateSelectorUI::SelectPreviousSlot(true); });
+                  GPUThread::RunOnThread([]() { SaveStateSelectorUI::SelectPreviousSlot(true); });
               })
 DEFINE_HOTKEY("SelectNextSaveStateSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
               TRANSLATE_NOOP("Hotkeys", "Select Next Save Slot"), [](s32 pressed) {
                 if (!pressed)
-                  Host::RunOnCPUThread([]() { SaveStateSelectorUI::SelectNextSlot(true); });
+                  GPUThread::RunOnThread([]() { SaveStateSelectorUI::SelectNextSlot(true); });
               })
 DEFINE_HOTKEY("SaveStateAndSelectNextSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
               TRANSLATE_NOOP("Hotkeys", "Save State and Select Next Slot"), [](s32 pressed) {
                 if (!pressed && System::IsValid())
                 {
-                  SaveStateSelectorUI::SaveCurrentSlot();
-                  SaveStateSelectorUI::SelectNextSlot(false);
+                  GPUThread::RunOnThread([]() {
+                    SaveStateSelectorUI::SaveCurrentSlot();
+                    SaveStateSelectorUI::SelectNextSlot(false);
+                  });
                 }
               })
 

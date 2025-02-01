@@ -10,9 +10,11 @@
 #include "input_manager.h"
 
 // TODO: Remove me when GPUDevice config is also cleaned up.
+#include "core/gpu_thread.h"
 #include "core/host.h"
 
 #include "common/assert.h"
+#include "common/bitutils.h"
 #include "common/easing.h"
 #include "common/error.h"
 #include "common/file_system.h"
@@ -71,12 +73,12 @@ static void SetStyle(ImGuiStyle& style, float scale);
 static void SetKeyMap();
 static bool LoadFontData(Error* error);
 static void ReloadFontDataIfActive();
-static bool AddImGuiFonts(bool fullscreen_fonts);
-static ImFont* AddTextFont(float size, bool full_glyph_range);
+static bool AddImGuiFonts(bool debug_font, bool fullscreen_fonts);
+static ImFont* AddTextFont(float size, const ImWchar* glyph_range);
 static ImFont* AddFixedFont(float size);
-static bool AddIconFonts(float size);
+static bool AddIconFonts(float size, const ImWchar* emoji_range);
 static void SetCommonIOOptions(ImGuiIO& io);
-static void SetImKeyState(ImGuiIO& io, u32 key, bool pressed);
+static void SetImKeyState(ImGuiIO& io, ImGuiKey imkey, bool pressed);
 static const char* GetClipboardTextImpl(void* userdata);
 static void SetClipboardTextImpl(void* userdata, const char* text);
 static void AddOSDMessage(std::string key, std::string message, float duration, bool is_warning);
@@ -89,89 +91,90 @@ static void UpdateSoftwareCursorTexture(u32 index);
 static void DestroySoftwareCursorTextures();
 static void DrawSoftwareCursor(const SoftwareCursor& sc, const std::pair<float, float>& pos);
 
-static float s_global_prescale = 0.0f; // before window scale
-static float s_global_scale = 0.0f;
-static float s_screen_margin = 0.0f;
-
-static constexpr std::array<ImWchar, 4> s_ascii_font_range = {{0x20, 0x7F, 0x00, 0x00}};
-
-static std::string s_font_path;
-static std::vector<WCharType> s_font_range;
-static std::vector<WCharType> s_emoji_range;
-
-static ImGuiContext* s_imgui_context;
-static ImFont* s_standard_font;
-static ImFont* s_osd_font;
-static ImFont* s_fixed_font;
-static ImFont* s_medium_font;
-static ImFont* s_large_font;
-
-static DynamicHeapArray<u8> s_standard_font_data;
-static DynamicHeapArray<u8> s_fixed_font_data;
-static DynamicHeapArray<u8> s_icon_fa_font_data;
-static DynamicHeapArray<u8> s_icon_pf_font_data;
-static DynamicHeapArray<u8> s_emoji_font_data;
-
-static float s_window_width;
-static float s_window_height;
-static Timer s_last_render_time;
-
-// cached copies of WantCaptureKeyboard/Mouse, used to know when to dispatch events
-static std::atomic_bool s_imgui_wants_keyboard{false};
-static std::atomic_bool s_imgui_wants_mouse{false};
-
-// mapping of host key -> imgui key
-static std::unordered_map<u32, ImGuiKey> s_imgui_key_map;
-
 static constexpr float OSD_FADE_IN_TIME = 0.1f;
 static constexpr float OSD_FADE_OUT_TIME = 0.4f;
 
-static std::deque<OSDMessage> s_osd_active_messages;
-static std::deque<OSDMessage> s_osd_posted_messages;
-static std::mutex s_osd_messages_lock;
-static bool s_show_osd_messages = true;
-static bool s_scale_changed = false;
+static constexpr std::array<ImWchar, 4> ASCII_FONT_RANGE = {{0x20, 0x7F, 0x00, 0x00}};
+static constexpr std::array<ImWchar, 6> DEFAULT_FONT_RANGE = {{0x0020, 0x00FF, 0x2022, 0x2022, 0x0000, 0x0000}};
 
-static std::array<ImGuiManager::SoftwareCursor, InputManager::MAX_SOFTWARE_CURSORS> s_software_cursors = {};
+namespace {
+
+struct ALIGN_TO_CACHE_LINE State
+{
+  ImGuiContext* imgui_context = nullptr;
+
+  // cached copies of WantCaptureKeyboard/Mouse, used to know when to dispatch events
+  std::atomic_bool imgui_wants_keyboard{false};
+  std::atomic_bool imgui_wants_mouse{false};
+  std::atomic_bool imgui_wants_text{false};
+
+  std::deque<OSDMessage> osd_posted_messages;
+  std::mutex osd_messages_lock;
+  bool show_osd_messages = true;
+
+  // Owned by GPU thread
+  ALIGN_TO_CACHE_LINE Timer::Value last_render_time = 0;
+
+  float global_prescale = 0.0f; // before window scale
+  float global_scale = 0.0f;
+  float screen_margin = 0.0f;
+
+  float window_width = 0.0f;
+  float window_height = 0.0f;
+  bool scale_changed = false;
+
+  // we maintain a second copy of the stick state here so we can map it to the dpad
+  std::array<s8, 2> left_stick_axis_state = {};
+
+  ImFont* debug_font = nullptr;
+  ImFont* osd_font = nullptr;
+  ImFont* fixed_font = nullptr;
+  ImFont* medium_font = nullptr;
+  ImFont* large_font = nullptr;
+
+  std::deque<OSDMessage> osd_active_messages;
+
+  std::array<ImGuiManager::SoftwareCursor, InputManager::MAX_SOFTWARE_CURSORS> software_cursors = {};
+
+  // mapping of host key -> imgui key
+  ALIGN_TO_CACHE_LINE std::unordered_map<u32, ImGuiKey> imgui_key_map;
+
+  std::string font_path;
+  std::vector<WCharType> font_range;
+  std::vector<WCharType> dynamic_font_range;
+  std::vector<WCharType> dynamic_emoji_range;
+
+  DynamicHeapArray<u8> standard_font_data;
+  DynamicHeapArray<u8> fixed_font_data;
+  DynamicHeapArray<u8> icon_fa_font_data;
+  DynamicHeapArray<u8> icon_pf_font_data;
+  DynamicHeapArray<u8> emoji_font_data;
+};
+
+} // namespace
+
+static State s_state;
+
 } // namespace ImGuiManager
 
 void ImGuiManager::SetFontPathAndRange(std::string path, std::vector<WCharType> range)
 {
-  if (s_font_path == path && s_font_range == range)
+  if (s_state.font_path == path && s_state.font_range == range)
     return;
 
-  s_font_path = std::move(path);
-  s_font_range = std::move(range);
-  s_standard_font_data = {};
+  s_state.font_path = std::move(path);
+  s_state.font_range = std::move(range);
+  s_state.standard_font_data = {};
   ReloadFontDataIfActive();
 }
 
-void ImGuiManager::SetEmojiFontRange(std::vector<WCharType> range)
+void ImGuiManager::SetDynamicFontRange(std::vector<WCharType> font_range, std::vector<WCharType> emoji_range)
 {
-  static constexpr size_t builtin_size = std::size(EMOJI_ICON_RANGE);
-  const size_t runtime_size = range.size();
+  if (s_state.dynamic_font_range == font_range && s_state.dynamic_emoji_range == emoji_range)
+    return;
 
-  if (runtime_size == 0)
-  {
-    if (s_emoji_range.empty())
-      return;
-
-    s_emoji_range = {};
-  }
-  else
-  {
-    if (!s_emoji_range.empty() && (s_emoji_range.size() - builtin_size) == range.size() &&
-        std::memcmp(s_emoji_range.data(), range.data(), range.size() * sizeof(ImWchar)) == 0)
-    {
-      // no change
-      return;
-    }
-
-    s_emoji_range = std::move(range);
-    s_emoji_range.resize(s_emoji_range.size() + builtin_size);
-    std::memcpy(&s_emoji_range[runtime_size], EMOJI_ICON_RANGE, sizeof(EMOJI_ICON_RANGE));
-  }
-
+  s_state.dynamic_font_range = std::move(font_range);
+  s_state.dynamic_emoji_range = std::move(emoji_range);
   ReloadFontDataIfActive();
 }
 
@@ -209,24 +212,24 @@ std::vector<ImGuiManager::WCharType> ImGuiManager::CompactFontRange(std::span<co
 
 void ImGuiManager::SetGlobalScale(float global_scale)
 {
-  if (s_global_prescale == global_scale)
+  if (s_state.global_prescale == global_scale)
     return;
 
-  s_global_prescale = global_scale;
-  s_scale_changed = true;
+  s_state.global_prescale = global_scale;
+  s_state.scale_changed = true;
 }
 
 bool ImGuiManager::IsShowingOSDMessages()
 {
-  return s_show_osd_messages;
+  return s_state.show_osd_messages;
 }
 
 void ImGuiManager::SetShowOSDMessages(bool enable)
 {
-  if (s_show_osd_messages == enable)
+  if (s_state.show_osd_messages == enable)
     return;
 
-  s_show_osd_messages = enable;
+  s_state.show_osd_messages = enable;
   if (!enable)
     Host::ClearOSDMessages(false);
 }
@@ -239,15 +242,15 @@ bool ImGuiManager::Initialize(float global_scale, float screen_margin, Error* er
     return false;
   }
 
-  s_global_prescale = global_scale;
-  s_global_scale = std::max(
+  s_state.global_prescale = global_scale;
+  s_state.global_scale = std::max(
     (g_gpu_device->HasMainSwapChain() ? g_gpu_device->GetMainSwapChain()->GetScale() : 1.0f) * global_scale, 1.0f);
-  s_screen_margin = std::max(screen_margin, 0.0f);
-  s_scale_changed = false;
+  s_state.screen_margin = std::max(screen_margin, 0.0f);
+  s_state.scale_changed = false;
 
-  s_imgui_context = ImGui::CreateContext();
+  s_state.imgui_context = ImGui::CreateContext();
 
-  ImGuiIO& io = s_imgui_context->IO;
+  ImGuiIO& io = s_state.imgui_context->IO;
   io.IniFilename = nullptr;
   io.BackendFlags |= ImGuiBackendFlags_HasGamepad | ImGuiBackendFlags_RendererHasVtxOffset;
 #ifndef __ANDROID__
@@ -259,17 +262,18 @@ bool ImGuiManager::Initialize(float global_scale, float screen_margin, Error* er
 #endif
   SetCommonIOOptions(io);
 
-  s_window_width =
+  s_state.last_render_time = Timer::GetCurrentValue();
+  s_state.window_width =
     g_gpu_device->HasMainSwapChain() ? static_cast<float>(g_gpu_device->GetMainSwapChain()->GetWidth()) : 0.0f;
-  s_window_height =
+  s_state.window_height =
     g_gpu_device->HasMainSwapChain() ? static_cast<float>(g_gpu_device->GetMainSwapChain()->GetHeight()) : 0.0f;
   io.DisplayFramebufferScale = ImVec2(1, 1); // We already scale things ourselves, this would double-apply scaling
-  io.DisplaySize = ImVec2(s_window_width, s_window_height);
+  io.DisplaySize = ImVec2(s_state.window_width, s_state.window_height);
 
   SetKeyMap();
-  SetStyle(s_imgui_context->Style, s_global_scale);
+  SetStyle(s_state.imgui_context->Style, s_state.global_scale);
 
-  if (!AddImGuiFonts(false) || !g_gpu_device->UpdateImGuiFontTexture())
+  if (!AddImGuiFonts(false, false) || !g_gpu_device->UpdateImGuiFontTexture())
   {
     Error::SetString(error, "Failed to create ImGui font text");
     ImGui::DestroyContext();
@@ -289,44 +293,44 @@ void ImGuiManager::Shutdown()
 {
   DestroySoftwareCursorTextures();
 
-  if (s_imgui_context)
+  if (s_state.imgui_context)
   {
-    ImGui::DestroyContext(s_imgui_context);
-    s_imgui_context = nullptr;
+    ImGui::DestroyContext(s_state.imgui_context);
+    s_state.imgui_context = nullptr;
   }
 
-  s_standard_font = nullptr;
-  s_fixed_font = nullptr;
-  s_medium_font = nullptr;
-  s_large_font = nullptr;
+  s_state.debug_font = nullptr;
+  s_state.fixed_font = nullptr;
+  s_state.medium_font = nullptr;
+  s_state.large_font = nullptr;
   ImGuiFullscreen::SetFonts(nullptr, nullptr);
 }
 
 ImGuiContext* ImGuiManager::GetMainContext()
 {
-  return s_imgui_context;
+  return s_state.imgui_context;
 }
 
 void ImGuiManager::SetScreenMargin(float margin)
 {
-  s_screen_margin = std::max(margin, 0.0f);
+  s_state.screen_margin = std::max(margin, 0.0f);
 }
 
 float ImGuiManager::GetWindowWidth()
 {
-  return s_window_width;
+  return s_state.window_width;
 }
 
 float ImGuiManager::GetWindowHeight()
 {
-  return s_window_height;
+  return s_state.window_height;
 }
 
 void ImGuiManager::WindowResized(float width, float height)
 {
-  s_window_width = width;
-  s_window_height = height;
-  ImGui::GetIO().DisplaySize = ImVec2(width, height);
+  s_state.window_width = width;
+  s_state.window_height = height;
+  ImGui::GetMainViewport()->Size = ImGui::GetIO().DisplaySize = ImVec2(width, height);
 
   // Scale might have changed as a result of window resize.
   RequestScaleUpdate();
@@ -335,22 +339,22 @@ void ImGuiManager::WindowResized(float width, float height)
 void ImGuiManager::RequestScaleUpdate()
 {
   // Might need to update the scale.
-  s_scale_changed = true;
+  s_state.scale_changed = true;
 }
 
 void ImGuiManager::UpdateScale()
 {
   const float window_scale =
     (g_gpu_device && g_gpu_device->HasMainSwapChain()) ? g_gpu_device->GetMainSwapChain()->GetScale() : 1.0f;
-  const float scale = std::max(window_scale * s_global_prescale, 1.0f);
+  const float scale = std::max(window_scale * s_state.global_prescale, 1.0f);
 
-  if ((!HasFullscreenFonts() || !ImGuiFullscreen::UpdateLayoutScale()) && scale == s_global_scale)
+  if ((!HasFullscreenFonts() || !ImGuiFullscreen::UpdateLayoutScale()) && scale == s_state.global_scale)
     return;
 
-  s_global_scale = scale;
-  SetStyle(s_imgui_context->Style, s_global_scale);
+  s_state.global_scale = scale;
+  SetStyle(s_state.imgui_context->Style, s_state.global_scale);
 
-  if (!AddImGuiFonts(HasFullscreenFonts()))
+  if (!AddImGuiFonts(HasDebugFont(), HasFullscreenFonts()))
     Panic("Failed to create ImGui font text");
 
   if (!g_gpu_device->UpdateImGuiFontTexture())
@@ -359,12 +363,15 @@ void ImGuiManager::UpdateScale()
 
 void ImGuiManager::NewFrame()
 {
-  ImGuiIO& io = ImGui::GetIO();
-  io.DeltaTime = static_cast<float>(s_last_render_time.GetTimeSecondsAndReset());
+  const Timer::Value current_time = Timer::GetCurrentValue();
 
-  if (s_scale_changed)
+  ImGuiIO& io = ImGui::GetIO();
+  io.DeltaTime = static_cast<float>(Timer::ConvertValueToSeconds(current_time - s_state.last_render_time));
+  s_state.last_render_time = current_time;
+
+  if (s_state.scale_changed)
   {
-    s_scale_changed = false;
+    s_state.scale_changed = false;
     UpdateScale();
   }
 
@@ -373,8 +380,18 @@ void ImGuiManager::NewFrame()
   // Disable nav input on the implicit (Debug##Default) window. Otherwise we end up requesting keyboard
   // focus when there's nothing there. We use GetCurrentWindowRead() because otherwise it'll make it visible.
   ImGui::GetCurrentWindowRead()->Flags |= ImGuiWindowFlags_NoNavInputs;
-  s_imgui_wants_keyboard.store(io.WantCaptureKeyboard, std::memory_order_relaxed);
-  s_imgui_wants_mouse.store(io.WantCaptureMouse, std::memory_order_release);
+  s_state.imgui_wants_keyboard.store(io.WantCaptureKeyboard, std::memory_order_relaxed);
+  s_state.imgui_wants_mouse.store(io.WantCaptureMouse, std::memory_order_release);
+
+  const bool wants_text_input = io.WantTextInput;
+  if (s_state.imgui_wants_text.load(std::memory_order_relaxed) != wants_text_input)
+  {
+    s_state.imgui_wants_text.store(wants_text_input, std::memory_order_release);
+    if (wants_text_input)
+      Host::BeginTextInput();
+    else
+      Host::EndTextInput();
+  }
 }
 
 void ImGuiManager::SetStyle(ImGuiStyle& style, float scale)
@@ -549,88 +566,88 @@ void ImGuiManager::SetKeyMap()
                                            {ImGuiKey_KeypadEnter, "KeypadReturn", nullptr},
                                            {ImGuiKey_KeypadEqual, "KeypadEqual", nullptr}};
 
-  s_imgui_key_map.clear();
+  s_state.imgui_key_map.clear();
   for (const KeyMapping& km : mapping)
   {
     std::optional<u32> map(InputManager::ConvertHostKeyboardStringToCode(km.name));
     if (!map.has_value() && km.alt_name)
       map = InputManager::ConvertHostKeyboardStringToCode(km.alt_name);
     if (map.has_value())
-      s_imgui_key_map[map.value()] = km.index;
+      s_state.imgui_key_map[map.value()] = km.index;
   }
 }
 
 bool ImGuiManager::LoadFontData(Error* error)
 {
-  if (s_standard_font_data.empty())
+  if (s_state.standard_font_data.empty())
   {
-    std::optional<DynamicHeapArray<u8>> font_data = s_font_path.empty() ?
+    std::optional<DynamicHeapArray<u8>> font_data = s_state.font_path.empty() ?
                                                       Host::ReadResourceFile("fonts/Roboto-Regular.ttf", true, error) :
-                                                      FileSystem::ReadBinaryFile(s_font_path.c_str(), error);
+                                                      FileSystem::ReadBinaryFile(s_state.font_path.c_str(), error);
     if (!font_data.has_value())
       return false;
 
-    s_standard_font_data = std::move(font_data.value());
+    s_state.standard_font_data = std::move(font_data.value());
   }
 
-  if (s_fixed_font_data.empty())
+  if (s_state.fixed_font_data.empty())
   {
     std::optional<DynamicHeapArray<u8>> font_data = Host::ReadResourceFile("fonts/RobotoMono-Medium.ttf", true, error);
     if (!font_data.has_value())
       return false;
 
-    s_fixed_font_data = std::move(font_data.value());
+    s_state.fixed_font_data = std::move(font_data.value());
   }
 
-  if (s_icon_fa_font_data.empty())
+  if (s_state.icon_fa_font_data.empty())
   {
     std::optional<DynamicHeapArray<u8>> font_data = Host::ReadResourceFile("fonts/fa-solid-900.ttf", true, error);
     if (!font_data.has_value())
       return false;
 
-    s_icon_fa_font_data = std::move(font_data.value());
+    s_state.icon_fa_font_data = std::move(font_data.value());
   }
 
-  if (s_icon_pf_font_data.empty())
+  if (s_state.icon_pf_font_data.empty())
   {
     std::optional<DynamicHeapArray<u8>> font_data = Host::ReadResourceFile("fonts/promptfont.otf", true, error);
     if (!font_data.has_value())
       return false;
 
-    s_icon_pf_font_data = std::move(font_data.value());
+    s_state.icon_pf_font_data = std::move(font_data.value());
   }
 
-  if (s_emoji_font_data.empty())
+  if (s_state.emoji_font_data.empty())
   {
     std::optional<DynamicHeapArray<u8>> font_data =
       Host::ReadCompressedResourceFile("fonts/TwitterColorEmoji-SVGinOT.ttf.zst", true, error);
     if (!font_data.has_value())
       return false;
 
-    s_emoji_font_data = std::move(font_data.value());
+    s_state.emoji_font_data = std::move(font_data.value());
   }
 
   return true;
 }
 
-ImFont* ImGuiManager::AddTextFont(float size, bool full_glyph_range)
+ImFont* ImGuiManager::AddTextFont(float size, const ImWchar* glyph_range)
 {
   ImFontConfig cfg;
   cfg.FontDataOwnedByAtlas = false;
-  return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(s_standard_font_data.data(),
-                                                    static_cast<int>(s_standard_font_data.size()), size, &cfg,
-                                                    full_glyph_range ? s_font_range.data() : s_ascii_font_range.data());
+  return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
+    s_state.standard_font_data.data(), static_cast<int>(s_state.standard_font_data.size()), size, &cfg, glyph_range);
 }
 
 ImFont* ImGuiManager::AddFixedFont(float size)
 {
   ImFontConfig cfg;
   cfg.FontDataOwnedByAtlas = false;
-  return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-    s_fixed_font_data.data(), static_cast<int>(s_fixed_font_data.size()), size, &cfg, s_ascii_font_range.data());
+  return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(s_state.fixed_font_data.data(),
+                                                    static_cast<int>(s_state.fixed_font_data.size()), size, &cfg,
+                                                    ASCII_FONT_RANGE.data());
 }
 
-bool ImGuiManager::AddIconFonts(float size)
+bool ImGuiManager::AddIconFonts(float size, const ImWchar* emoji_range)
 {
   {
     ImFontConfig cfg;
@@ -640,9 +657,9 @@ bool ImGuiManager::AddIconFonts(float size)
     cfg.GlyphMaxAdvanceX = size;
     cfg.FontDataOwnedByAtlas = false;
 
-    if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-          s_icon_fa_font_data.data(), static_cast<int>(s_icon_fa_font_data.size()), size * 0.75f, &cfg, FA_ICON_RANGE))
-      [[unlikely]]
+    if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(s_state.icon_fa_font_data.data(),
+                                                    static_cast<int>(s_state.icon_fa_font_data.size()), size * 0.75f,
+                                                    &cfg, FA_ICON_RANGE)) [[unlikely]]
     {
       return false;
     }
@@ -656,9 +673,9 @@ bool ImGuiManager::AddIconFonts(float size)
     cfg.GlyphMaxAdvanceX = size;
     cfg.FontDataOwnedByAtlas = false;
 
-    if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-          s_icon_pf_font_data.data(), static_cast<int>(s_icon_pf_font_data.size()), size * 1.2f, &cfg, PF_ICON_RANGE))
-      [[unlikely]]
+    if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(s_state.icon_pf_font_data.data(),
+                                                    static_cast<int>(s_state.icon_pf_font_data.size()), size * 1.2f,
+                                                    &cfg, PF_ICON_RANGE)) [[unlikely]]
     {
       return false;
     }
@@ -673,9 +690,9 @@ bool ImGuiManager::AddIconFonts(float size)
     cfg.FontDataOwnedByAtlas = false;
     cfg.FontBuilderFlags = ImGuiFreeTypeBuilderFlags_LoadColor | ImGuiFreeTypeBuilderFlags_Bitmap;
 
-    if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-          s_emoji_font_data.data(), static_cast<int>(s_emoji_font_data.size()), size * 0.9f, &cfg,
-          s_emoji_range.empty() ? EMOJI_ICON_RANGE : s_emoji_range.data())) [[unlikely]]
+    if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(s_state.emoji_font_data.data(),
+                                                    static_cast<int>(s_state.emoji_font_data.size()), size * 0.9f, &cfg,
+                                                    emoji_range)) [[unlikely]]
     {
       return false;
     }
@@ -684,52 +701,94 @@ bool ImGuiManager::AddIconFonts(float size)
   return true;
 }
 
-bool ImGuiManager::AddImGuiFonts(bool fullscreen_fonts)
+bool ImGuiManager::AddImGuiFonts(bool debug_font, bool fullscreen_fonts)
 {
-  const float standard_font_size = std::ceil(15.0f * s_global_scale);
-  const float osd_font_size = std::ceil(17.0f * s_global_scale);
+  const float window_scale =
+    (g_gpu_device && g_gpu_device->HasMainSwapChain()) ? g_gpu_device->GetMainSwapChain()->GetScale() : 1.0f;
+  const float debug_font_size = std::ceil(15.0f * window_scale);
+  const float standard_font_size = std::ceil(15.0f * s_state.global_scale);
+  const float osd_font_size = std::ceil(17.0f * s_state.global_scale);
+
+  INFO_LOG("Allocating fonts winscale={} globalscale={} debug={} fullscreen={}", window_scale, s_state.global_scale,
+           debug_font, fullscreen_fonts);
+
+  // need to generate arrays if dynamic ranges are present
+  const ImWchar* text_range = s_state.font_range.empty() ? DEFAULT_FONT_RANGE.data() : s_state.font_range.data();
+  const ImWchar* emoji_range = EMOJI_ICON_RANGE;
+  std::vector<ImWchar> full_text_range, full_emoji_range;
+  if (!s_state.dynamic_font_range.empty())
+  {
+    // skip the zeros, we'll add them afterwards
+    const size_t base_size = s_state.font_range.empty() ? DEFAULT_FONT_RANGE.size() : s_state.font_range.size();
+    Assert(base_size > 2);
+    full_text_range.reserve(base_size + s_state.dynamic_font_range.size());
+    full_text_range.insert(full_text_range.end(), &text_range[0], &text_range[base_size - 2]);
+    full_text_range.insert(full_text_range.end(), s_state.dynamic_font_range.begin(), s_state.dynamic_font_range.end());
+    full_text_range.insert(full_text_range.end(), 2, 0);
+    text_range = full_text_range.data();
+  }
+  if (!s_state.dynamic_emoji_range.empty())
+  {
+    // skip the zeros, we'll add them afterwards
+    size_t base_size = 0;
+    for (const ImWchar* c = EMOJI_ICON_RANGE; *c != 0; c++)
+      base_size++;
+
+    Assert(base_size > 2);
+    full_emoji_range.reserve(base_size + s_state.dynamic_emoji_range.size());
+    full_emoji_range.insert(full_emoji_range.end(), &EMOJI_ICON_RANGE[0], &EMOJI_ICON_RANGE[base_size - 2]);
+    full_emoji_range.insert(full_emoji_range.end(), s_state.dynamic_emoji_range.begin(),
+                            s_state.dynamic_emoji_range.end());
+    full_emoji_range.insert(full_emoji_range.end(), 2, 0);
+    emoji_range = full_emoji_range.data();
+  }
 
   ImGuiIO& io = ImGui::GetIO();
   io.Fonts->Clear();
 
-  s_standard_font = AddTextFont(standard_font_size, false);
-  if (!s_standard_font)
+  if (debug_font)
+  {
+    s_state.debug_font = AddTextFont(debug_font_size, ASCII_FONT_RANGE.data());
+    if (!s_state.debug_font)
+      return false;
+  }
+
+  s_state.fixed_font = AddFixedFont(standard_font_size);
+  if (!s_state.fixed_font)
     return false;
 
-  s_fixed_font = AddFixedFont(standard_font_size);
-  if (!s_fixed_font)
+  s_state.osd_font = AddTextFont(osd_font_size, text_range);
+  if (!s_state.osd_font || !AddIconFonts(osd_font_size, emoji_range))
     return false;
-
-  s_osd_font = AddTextFont(osd_font_size, true);
-  if (!s_osd_font || !AddIconFonts(osd_font_size))
-    return false;
+  if (!debug_font)
+    s_state.debug_font = s_state.osd_font;
 
   if (fullscreen_fonts)
   {
     const float medium_font_size = ImGuiFullscreen::LayoutScale(ImGuiFullscreen::LAYOUT_MEDIUM_FONT_SIZE);
-    s_medium_font = AddTextFont(medium_font_size, true);
-    if (!s_medium_font || !AddIconFonts(medium_font_size))
+    s_state.medium_font = AddTextFont(medium_font_size, text_range);
+    if (!s_state.medium_font || !AddIconFonts(medium_font_size, emoji_range))
       return false;
 
     const float large_font_size = ImGuiFullscreen::LayoutScale(ImGuiFullscreen::LAYOUT_LARGE_FONT_SIZE);
-    s_large_font = AddTextFont(large_font_size, true);
-    if (!s_large_font || !AddIconFonts(large_font_size))
+    s_state.large_font = AddTextFont(large_font_size, text_range);
+    if (!s_state.large_font || !AddIconFonts(large_font_size, emoji_range))
       return false;
   }
   else
   {
-    s_medium_font = nullptr;
-    s_large_font = nullptr;
+    s_state.medium_font = nullptr;
+    s_state.large_font = nullptr;
   }
 
-  ImGuiFullscreen::SetFonts(s_medium_font, s_large_font);
+  ImGuiFullscreen::SetFonts(s_state.medium_font, s_state.large_font);
 
   return io.Fonts->Build();
 }
 
 void ImGuiManager::ReloadFontDataIfActive()
 {
-  if (!s_imgui_context)
+  if (!s_state.imgui_context)
     return;
 
   ImGui::EndFrame();
@@ -737,7 +796,7 @@ void ImGuiManager::ReloadFontDataIfActive()
   if (!LoadFontData(nullptr))
     Panic("Failed to load font data");
 
-  if (!AddImGuiFonts(HasFullscreenFonts()))
+  if (!AddImGuiFonts(HasDebugFont(), HasFullscreenFonts()))
     Panic("Failed to create ImGui font text");
 
   if (!g_gpu_device->UpdateImGuiFontTexture())
@@ -754,10 +813,11 @@ bool ImGuiManager::AddFullscreenFontsIfMissing()
   // can't do this in the middle of a frame
   ImGui::EndFrame();
 
-  if (!AddImGuiFonts(true))
+  const bool debug_font = HasDebugFont();
+  if (!AddImGuiFonts(debug_font, true))
   {
     ERROR_LOG("Failed to lazily allocate fullscreen fonts.");
-    AddImGuiFonts(false);
+    AddImGuiFonts(debug_font, false);
   }
 
   g_gpu_device->UpdateImGuiFontTexture();
@@ -766,9 +826,35 @@ bool ImGuiManager::AddFullscreenFontsIfMissing()
   return HasFullscreenFonts();
 }
 
+bool ImGuiManager::HasDebugFont()
+{
+  return (s_state.debug_font != s_state.osd_font);
+}
+
+bool ImGuiManager::AddDebugFontIfMissing()
+{
+  if (HasDebugFont())
+    return true;
+
+  // can't do this in the middle of a frame
+  ImGui::EndFrame();
+
+  const bool fullscreen_font = HasFullscreenFonts();
+  if (!AddImGuiFonts(true, fullscreen_font))
+  {
+    ERROR_LOG("Failed to lazily allocate fullscreen fonts.");
+    AddImGuiFonts(true, fullscreen_font);
+  }
+
+  g_gpu_device->UpdateImGuiFontTexture();
+  NewFrame();
+
+  return HasDebugFont();
+}
+
 bool ImGuiManager::HasFullscreenFonts()
 {
-  return (s_medium_font && s_large_font);
+  return (s_state.medium_font && s_state.large_font);
 }
 
 void ImGuiManager::AddOSDMessage(std::string key, std::string message, float duration, bool is_warning)
@@ -778,7 +864,7 @@ void ImGuiManager::AddOSDMessage(std::string key, std::string message, float dur
   else
     INFO_LOG("OSD: {}", message);
 
-  if (!s_show_osd_messages && !is_warning)
+  if (!s_state.show_osd_messages && !is_warning)
     return;
 
   const Timer::Value current_time = Timer::GetCurrentValue();
@@ -793,13 +879,13 @@ void ImGuiManager::AddOSDMessage(std::string key, std::string message, float dur
   msg.last_y = -1.0f;
   msg.is_warning = is_warning;
 
-  std::unique_lock<std::mutex> lock(s_osd_messages_lock);
-  s_osd_posted_messages.push_back(std::move(msg));
+  std::unique_lock<std::mutex> lock(s_state.osd_messages_lock);
+  s_state.osd_posted_messages.push_back(std::move(msg));
 }
 
 void ImGuiManager::RemoveKeyedOSDMessage(std::string key, bool is_warning)
 {
-  if (!s_show_osd_messages && !is_warning)
+  if (!s_state.show_osd_messages && !is_warning)
     return;
 
   ImGuiManager::OSDMessage msg = {};
@@ -807,24 +893,24 @@ void ImGuiManager::RemoveKeyedOSDMessage(std::string key, bool is_warning)
   msg.duration = 0.0f;
   msg.is_warning = is_warning;
 
-  std::unique_lock<std::mutex> lock(s_osd_messages_lock);
-  s_osd_posted_messages.push_back(std::move(msg));
+  std::unique_lock<std::mutex> lock(s_state.osd_messages_lock);
+  s_state.osd_posted_messages.push_back(std::move(msg));
 }
 
 void ImGuiManager::ClearOSDMessages(bool clear_warnings)
 {
   {
-    std::unique_lock<std::mutex> lock(s_osd_messages_lock);
+    std::unique_lock<std::mutex> lock(s_state.osd_messages_lock);
     if (clear_warnings)
     {
-      s_osd_posted_messages.clear();
+      s_state.osd_posted_messages.clear();
     }
     else
     {
-      for (auto iter = s_osd_posted_messages.begin(); iter != s_osd_posted_messages.end();)
+      for (auto iter = s_state.osd_posted_messages.begin(); iter != s_state.osd_posted_messages.end();)
       {
         if (!iter->is_warning)
-          iter = s_osd_posted_messages.erase(iter);
+          iter = s_state.osd_posted_messages.erase(iter);
         else
           ++iter;
       }
@@ -833,14 +919,14 @@ void ImGuiManager::ClearOSDMessages(bool clear_warnings)
 
   if (clear_warnings)
   {
-    s_osd_active_messages.clear();
+    s_state.osd_active_messages.clear();
   }
   else
   {
-    for (auto iter = s_osd_active_messages.begin(); iter != s_osd_active_messages.end();)
+    for (auto iter = s_state.osd_active_messages.begin(); iter != s_state.osd_active_messages.end();)
     {
       if (!iter->is_warning)
-        s_osd_active_messages.erase(iter);
+        s_state.osd_active_messages.erase(iter);
       else
         ++iter;
     }
@@ -850,21 +936,21 @@ void ImGuiManager::ClearOSDMessages(bool clear_warnings)
 void ImGuiManager::AcquirePendingOSDMessages(Timer::Value current_time)
 {
   std::atomic_thread_fence(std::memory_order_consume);
-  if (s_osd_posted_messages.empty())
+  if (s_state.osd_posted_messages.empty())
     return;
 
-  std::unique_lock lock(s_osd_messages_lock);
+  std::unique_lock lock(s_state.osd_messages_lock);
   for (;;)
   {
-    if (s_osd_posted_messages.empty())
+    if (s_state.osd_posted_messages.empty())
       break;
 
-    OSDMessage& new_msg = s_osd_posted_messages.front();
+    OSDMessage& new_msg = s_state.osd_posted_messages.front();
     std::deque<OSDMessage>::iterator iter;
-    if (!new_msg.key.empty() && (iter = std::find_if(s_osd_active_messages.begin(), s_osd_active_messages.end(),
-                                                     [&new_msg](const OSDMessage& other) {
-                                                       return new_msg.key == other.key;
-                                                     })) != s_osd_active_messages.end())
+    if (!new_msg.key.empty() &&
+        (iter = std::find_if(s_state.osd_active_messages.begin(), s_state.osd_active_messages.end(),
+                             [&new_msg](const OSDMessage& other) { return new_msg.key == other.key; })) !=
+          s_state.osd_active_messages.end())
     {
       iter->text = std::move(new_msg.text);
       iter->duration = new_msg.duration;
@@ -875,14 +961,14 @@ void ImGuiManager::AcquirePendingOSDMessages(Timer::Value current_time)
     }
     else
     {
-      s_osd_active_messages.push_back(std::move(new_msg));
+      s_state.osd_active_messages.push_back(std::move(new_msg));
     }
 
-    s_osd_posted_messages.pop_front();
+    s_state.osd_posted_messages.pop_front();
 
     static constexpr size_t MAX_ACTIVE_OSD_MESSAGES = 512;
-    if (s_osd_active_messages.size() > MAX_ACTIVE_OSD_MESSAGES)
-      s_osd_active_messages.pop_front();
+    if (s_state.osd_active_messages.size() > MAX_ACTIVE_OSD_MESSAGES)
+      s_state.osd_active_messages.pop_front();
   }
 }
 
@@ -890,24 +976,24 @@ void ImGuiManager::DrawOSDMessages(Timer::Value current_time)
 {
   static constexpr float MOVE_DURATION = 0.5f;
 
-  ImFont* const font = s_osd_font;
-  const float scale = s_global_scale;
+  ImFont* const font = s_state.osd_font;
+  const float scale = s_state.global_scale;
   const float spacing = std::ceil(6.0f * scale);
-  const float margin = std::ceil(s_screen_margin * scale);
+  const float margin = std::ceil(s_state.screen_margin * scale);
   const float padding = std::ceil(9.0f * scale);
   const float rounding = std::ceil(6.0f * scale);
-  const float max_width = s_window_width - (margin + padding) * 2.0f;
+  const float max_width = s_state.window_width - (margin + padding) * 2.0f;
   float position_x = margin;
   float position_y = margin;
 
-  auto iter = s_osd_active_messages.begin();
-  while (iter != s_osd_active_messages.end())
+  auto iter = s_state.osd_active_messages.begin();
+  while (iter != s_state.osd_active_messages.end())
   {
     OSDMessage& msg = *iter;
     const float time_passed = static_cast<float>(Timer::ConvertValueToSeconds(current_time - msg.start_time));
     if (time_passed >= msg.duration)
     {
-      iter = s_osd_active_messages.erase(iter);
+      iter = s_state.osd_active_messages.erase(iter);
       continue;
     }
 
@@ -1025,68 +1111,70 @@ void Host::ClearOSDMessages(bool clear_warnings)
 
 float ImGuiManager::GetGlobalScale()
 {
-  return s_global_scale;
+  return s_state.global_scale;
 }
 
 float ImGuiManager::GetScreenMargin()
 {
-  return s_screen_margin;
+  return s_state.screen_margin;
 }
 
-ImFont* ImGuiManager::GetStandardFont()
+ImFont* ImGuiManager::GetDebugFont()
 {
-  return s_standard_font;
+  return s_state.debug_font;
 }
 
 ImFont* ImGuiManager::GetOSDFont()
 {
-  return s_osd_font;
+  return s_state.osd_font;
 }
 
 ImFont* ImGuiManager::GetFixedFont()
 {
-  return s_fixed_font;
+  return s_state.fixed_font;
 }
 
 ImFont* ImGuiManager::GetMediumFont()
 {
   AddFullscreenFontsIfMissing();
-  return s_medium_font;
+  return s_state.medium_font;
 }
 
 ImFont* ImGuiManager::GetLargeFont()
 {
   AddFullscreenFontsIfMissing();
-  return s_large_font;
+  return s_state.large_font;
 }
 
 bool ImGuiManager::WantsTextInput()
 {
-  return s_imgui_wants_keyboard.load(std::memory_order_acquire);
+  return s_state.imgui_wants_keyboard.load(std::memory_order_acquire);
 }
 
 bool ImGuiManager::WantsMouseInput()
 {
-  return s_imgui_wants_mouse.load(std::memory_order_acquire);
+  return s_state.imgui_wants_mouse.load(std::memory_order_acquire);
 }
 
 void ImGuiManager::AddTextInput(std::string str)
 {
-  if (!s_imgui_context)
+  if (!s_state.imgui_context || !s_state.imgui_wants_keyboard.load(std::memory_order_acquire))
     return;
 
-  if (!s_imgui_wants_keyboard.load(std::memory_order_acquire))
-    return;
+  GPUThread::RunOnThread([str = std::move(str)]() {
+    if (!s_state.imgui_context)
+      return;
 
-  s_imgui_context->IO.AddInputCharactersUTF8(str.c_str());
+    s_state.imgui_context->IO.AddInputCharactersUTF8(str.c_str());
+  });
 }
 
 void ImGuiManager::UpdateMousePosition(float x, float y)
 {
-  if (!s_imgui_context)
+  if (!s_state.imgui_context)
     return;
 
-  s_imgui_context->IO.MousePos = ImVec2(x, y);
+  s_state.imgui_context->IO.MousePos = ImVec2(x, y);
   std::atomic_thread_fence(std::memory_order_release);
 }
 
@@ -1101,95 +1189,142 @@ void ImGuiManager::SetCommonIOOptions(ImGuiIO& io)
 
 bool ImGuiManager::ProcessPointerButtonEvent(InputBindingKey key, float value)
 {
-  if (!s_imgui_context || key.data >= std::size(ImGui::GetIO().MouseDown))
+  if (!s_state.imgui_context || key.data >= std::size(ImGui::GetIO().MouseDown))
     return false;
 
   // still update state anyway
-  s_imgui_context->IO.AddMouseButtonEvent(key.data, value != 0.0f);
+  const int button = static_cast<int>(key.data);
+  const bool pressed = (value != 0.0f);
+  GPUThread::RunOnThread([button, pressed]() {
+    if (!s_state.imgui_context)
+      return;
 
-  return s_imgui_wants_mouse.load(std::memory_order_acquire);
+    s_state.imgui_context->IO.AddMouseButtonEvent(button, pressed);
+  });
+
+  return s_state.imgui_wants_mouse.load(std::memory_order_acquire);
 }
 
 bool ImGuiManager::ProcessPointerAxisEvent(InputBindingKey key, float value)
 {
-  if (!s_imgui_context || key.data < static_cast<u32>(InputPointerAxis::WheelX))
+  if (!s_state.imgui_context || key.data < static_cast<u32>(InputPointerAxis::WheelX))
     return false;
 
   // still update state anyway
   const bool horizontal = (key.data == static_cast<u32>(InputPointerAxis::WheelX));
-  s_imgui_context->IO.AddMouseWheelEvent(horizontal ? value : 0.0f, horizontal ? 0.0f : value);
+  GPUThread::RunOnThread([value, horizontal]() {
+    if (!s_state.imgui_context)
+      return;
 
-  return s_imgui_wants_mouse.load(std::memory_order_acquire);
+    s_state.imgui_context->IO.AddMouseWheelEvent(horizontal ? value : 0.0f, horizontal ? 0.0f : value);
+  });
+
+  return s_state.imgui_wants_mouse.load(std::memory_order_acquire);
 }
 
 bool ImGuiManager::ProcessHostKeyEvent(InputBindingKey key, float value)
 {
-  if (!s_imgui_context)
+  if (!s_state.imgui_context)
     return false;
 
-  // still update state anyway
-  SetImKeyState(s_imgui_context->IO, key.data, (value != 0.0f));
+  const auto iter = s_state.imgui_key_map.find(key.data);
+  if (iter == s_state.imgui_key_map.end())
+    return false;
 
-  return s_imgui_wants_keyboard.load(std::memory_order_acquire);
+  GPUThread::RunOnThread([imkey = iter->second, pressed = (value != 0.0f)]() {
+    if (!s_state.imgui_context)
+      return;
+
+    SetImKeyState(s_state.imgui_context->IO, imkey, pressed);
+  });
+
+  return s_state.imgui_wants_keyboard.load(std::memory_order_acquire);
 }
 
-void ImGuiManager::SetImKeyState(ImGuiIO& io, u32 key, bool pressed)
+void ImGuiManager::SetImKeyState(ImGuiIO& io, ImGuiKey imkey, bool pressed)
 {
-  const auto iter = s_imgui_key_map.find(key);
-  if (iter == s_imgui_key_map.end())
-    return;
-
-  const ImGuiKey imkey = iter->second;
-  s_imgui_context->IO.AddKeyEvent(imkey, pressed);
+  io.AddKeyEvent(imkey, pressed);
 
   // modifier keys need to be handled separately
   if ((imkey >= ImGuiKey_LeftCtrl && imkey <= ImGuiKey_LeftSuper) ||
       (imkey >= ImGuiKey_RightCtrl && imkey <= ImGuiKey_RightSuper))
   {
     const u32 idx = imkey - ((imkey >= ImGuiKey_RightCtrl) ? ImGuiKey_RightCtrl : ImGuiKey_LeftCtrl);
-    s_imgui_context->IO.AddKeyEvent(static_cast<ImGuiKey>(static_cast<u32>(ImGuiMod_Ctrl) << idx), pressed);
+    io.AddKeyEvent(static_cast<ImGuiKey>(static_cast<u32>(ImGuiMod_Ctrl) << idx), pressed);
   }
 }
 
 bool ImGuiManager::ProcessGenericInputEvent(GenericInputBinding key, float value)
 {
-  static constexpr ImGuiKey key_map[] = {
-    ImGuiKey_None,             // Unknown,
-    ImGuiKey_GamepadDpadUp,    // DPadUp
-    ImGuiKey_GamepadDpadRight, // DPadRight
-    ImGuiKey_GamepadDpadLeft,  // DPadLeft
-    ImGuiKey_GamepadDpadDown,  // DPadDown
-    ImGuiKey_None,             // LeftStickUp
-    ImGuiKey_None,             // LeftStickRight
-    ImGuiKey_None,             // LeftStickDown
-    ImGuiKey_None,             // LeftStickLeft
-    ImGuiKey_GamepadL3,        // L3
-    ImGuiKey_None,             // RightStickUp
-    ImGuiKey_None,             // RightStickRight
-    ImGuiKey_None,             // RightStickDown
-    ImGuiKey_None,             // RightStickLeft
-    ImGuiKey_GamepadR3,        // R3
-    ImGuiKey_GamepadFaceUp,    // Triangle
-    ImGuiKey_GamepadFaceRight, // Circle
-    ImGuiKey_GamepadFaceDown,  // Cross
-    ImGuiKey_GamepadFaceLeft,  // Square
-    ImGuiKey_GamepadBack,      // Select
-    ImGuiKey_GamepadStart,     // Start
-    ImGuiKey_None,             // System
-    ImGuiKey_GamepadL1,        // L1
-    ImGuiKey_GamepadL2,        // L2
-    ImGuiKey_GamepadR1,        // R1
-    ImGuiKey_GamepadL2,        // R2
+  static constexpr std::array key_map = {
+    ImGuiKey_None,               // Unknown,
+    ImGuiKey_GamepadDpadUp,      // DPadUp
+    ImGuiKey_GamepadDpadRight,   // DPadRight
+    ImGuiKey_GamepadDpadLeft,    // DPadLeft
+    ImGuiKey_GamepadDpadDown,    // DPadDown
+    ImGuiKey_GamepadLStickUp,    // LeftStickUp
+    ImGuiKey_GamepadLStickRight, // LeftStickRight
+    ImGuiKey_GamepadLStickDown,  // LeftStickDown
+    ImGuiKey_GamepadLStickLeft,  // LeftStickLeft
+    ImGuiKey_GamepadL3,          // L3
+    ImGuiKey_None,               // RightStickUp
+    ImGuiKey_None,               // RightStickRight
+    ImGuiKey_None,               // RightStickDown
+    ImGuiKey_None,               // RightStickLeft
+    ImGuiKey_GamepadR3,          // R3
+    ImGuiKey_GamepadFaceUp,      // Triangle
+    ImGuiKey_GamepadFaceRight,   // Circle
+    ImGuiKey_GamepadFaceDown,    // Cross
+    ImGuiKey_GamepadFaceLeft,    // Square
+    ImGuiKey_GamepadBack,        // Select
+    ImGuiKey_GamepadStart,       // Start
+    ImGuiKey_None,               // System
+    ImGuiKey_GamepadL1,          // L1
+    ImGuiKey_GamepadL2,          // L2
+    ImGuiKey_GamepadR1,          // R1
+    ImGuiKey_GamepadL2,          // R2
   };
 
-  if (!s_imgui_context)
+  const ImGuiKey imkey = (static_cast<u32>(key) < key_map.size()) ? key_map[static_cast<u32>(key)] : ImGuiKey_None;
+  if (imkey == ImGuiKey_None)
     return false;
 
-  if (static_cast<u32>(key) >= std::size(key_map) || key_map[static_cast<u32>(key)] == ImGuiKey_None)
+  // Racey read, but that's okay, worst case we push a couple of keys during shutdown.
+  if (!s_state.imgui_context)
     return false;
 
-  s_imgui_context->IO.AddKeyAnalogEvent(key_map[static_cast<u32>(key)], (value > 0.0f), value);
-  return s_imgui_wants_keyboard.load(std::memory_order_acquire);
+  GPUThread::RunOnThread([imkey, value]() {
+    if (!s_state.imgui_context)
+      return;
+
+    if (imkey >= ImGuiKey_GamepadLStickLeft && imkey <= ImGuiKey_GamepadLStickDown)
+    {
+      // NOTE: This assumes the source is sending a whole axis value, not half axis.
+      const u32 axis = BoolToUInt32(imkey >= ImGuiKey_GamepadLStickUp);
+      const s8 old_state = s_state.left_stick_axis_state[axis];
+      const s8 new_state = (value <= -0.5f) ? -1 : ((value >= 0.5f) ? 1 : 0);
+      if (old_state != new_state)
+      {
+        static constexpr auto map_to_key = [](u32 axis, s8 state) {
+          // 0:-1/1 => ImGuiKey_GamepadDpadLeft/Right, 1:-1/1 => ImGuiKey_GamepadDpadUp/ImGuiKey_GamepadDpadDown
+          return static_cast<ImGuiKey>(static_cast<u32>(ImGuiKey_GamepadDpadLeft) + (axis << 1) +
+                                       BoolToUInt32(state > 0));
+        };
+
+        s_state.left_stick_axis_state[axis] = new_state;
+        if (old_state != 0)
+          s_state.imgui_context->IO.AddKeyAnalogEvent(map_to_key(axis, old_state), false, 0.0f);
+        if (new_state != 0)
+          s_state.imgui_context->IO.AddKeyAnalogEvent(map_to_key(axis, new_state), true, 1.0f);
+      }
+    }
+    else
+    {
+      s_state.imgui_context->IO.AddKeyAnalogEvent(imkey, (value > 0.0f), value);
+    }
+  });
+
+  return s_state.imgui_wants_keyboard.load(std::memory_order_acquire);
 }
 
 const char* ImGuiManager::GetClipboardTextImpl(void* userdata)
@@ -1216,22 +1351,22 @@ void ImGuiManager::SetClipboardTextImpl(void* userdata, const char* text)
 
 void ImGuiManager::CreateSoftwareCursorTextures()
 {
-  for (u32 i = 0; i < static_cast<u32>(s_software_cursors.size()); i++)
+  for (u32 i = 0; i < static_cast<u32>(s_state.software_cursors.size()); i++)
   {
-    if (!s_software_cursors[i].image_path.empty())
+    if (!s_state.software_cursors[i].image_path.empty())
       UpdateSoftwareCursorTexture(i);
   }
 }
 
 void ImGuiManager::DestroySoftwareCursorTextures()
 {
-  for (SoftwareCursor& sc : s_software_cursors)
+  for (SoftwareCursor& sc : s_state.software_cursors)
     sc.texture.reset();
 }
 
 void ImGuiManager::UpdateSoftwareCursorTexture(u32 index)
 {
-  SoftwareCursor& sc = s_software_cursors[index];
+  SoftwareCursor& sc = s_state.software_cursors[index];
   if (sc.image_path.empty())
   {
     sc.texture.reset();
@@ -1256,8 +1391,8 @@ void ImGuiManager::UpdateSoftwareCursorTexture(u32 index)
     return;
   }
 
-  sc.extent_x = std::ceil(static_cast<float>(image.GetWidth()) * sc.scale * s_global_scale) / 2.0f;
-  sc.extent_y = std::ceil(static_cast<float>(image.GetHeight()) * sc.scale * s_global_scale) / 2.0f;
+  sc.extent_x = std::ceil(static_cast<float>(image.GetWidth()) * sc.scale * s_state.global_scale) / 2.0f;
+  sc.extent_y = std::ceil(static_cast<float>(image.GetHeight()) * sc.scale * s_state.global_scale) / 2.0f;
 }
 
 void ImGuiManager::DrawSoftwareCursor(const SoftwareCursor& sc, const std::pair<float, float>& pos)
@@ -1279,16 +1414,16 @@ void ImGuiManager::RenderSoftwareCursors()
   // This one's okay to race, worst that happens is we render the wrong number of cursors for a frame.
   const u32 pointer_count = InputManager::GetPointerCount();
   for (u32 i = 0; i < pointer_count; i++)
-    DrawSoftwareCursor(s_software_cursors[i], InputManager::GetPointerAbsolutePosition(i));
+    DrawSoftwareCursor(s_state.software_cursors[i], InputManager::GetPointerAbsolutePosition(i));
 
   for (u32 i = InputManager::MAX_POINTER_DEVICES; i < InputManager::MAX_SOFTWARE_CURSORS; i++)
-    DrawSoftwareCursor(s_software_cursors[i], s_software_cursors[i].pos);
+    DrawSoftwareCursor(s_state.software_cursors[i], s_state.software_cursors[i].pos);
 }
 
 void ImGuiManager::SetSoftwareCursor(u32 index, std::string image_path, float image_scale, u32 multiply_color)
 {
-  DebugAssert(index < std::size(s_software_cursors));
-  SoftwareCursor& sc = s_software_cursors[index];
+  DebugAssert(index < std::size(s_state.software_cursors));
+  SoftwareCursor& sc = s_state.software_cursors[index];
   sc.color = multiply_color | 0xFF000000;
   if (sc.image_path == image_path && sc.scale == image_scale)
     return;
@@ -1306,7 +1441,7 @@ void ImGuiManager::SetSoftwareCursor(u32 index, std::string image_path, float im
 
 bool ImGuiManager::HasSoftwareCursor(u32 index)
 {
-  return (index < s_software_cursors.size() && !s_software_cursors[index].image_path.empty());
+  return (index < s_state.software_cursors.size() && !s_state.software_cursors[index].image_path.empty());
 }
 
 void ImGuiManager::ClearSoftwareCursor(u32 index)
@@ -1317,7 +1452,7 @@ void ImGuiManager::ClearSoftwareCursor(u32 index)
 void ImGuiManager::SetSoftwareCursorPosition(u32 index, float pos_x, float pos_y)
 {
   DebugAssert(index >= InputManager::MAX_POINTER_DEVICES);
-  SoftwareCursor& sc = s_software_cursors[index];
+  SoftwareCursor& sc = s_state.software_cursors[index];
   sc.pos.first = pos_x;
   sc.pos.second = pos_y;
 }
@@ -1385,8 +1520,10 @@ bool ImGuiManager::CreateAuxiliaryRenderWindow(AuxiliaryRenderWindowState* state
     return false;
   }
 
-  state->imgui_context = ImGui::CreateContext(s_imgui_context->IO.Fonts);
-  state->imgui_context->IO.DisplaySize =
+  AddDebugFontIfMissing();
+
+  state->imgui_context = ImGui::CreateContext(s_state.imgui_context->IO.Fonts);
+  state->imgui_context->Viewports[0]->Size = state->imgui_context->IO.DisplaySize =
     ImVec2(static_cast<float>(state->swap_chain->GetWidth()), static_cast<float>(state->swap_chain->GetHeight()));
   state->imgui_context->IO.IniFilename = nullptr;
   state->imgui_context->IO.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -1454,6 +1591,7 @@ bool ImGuiManager::RenderAuxiliaryRenderWindow(AuxiliaryRenderWindowState* state
   ImGui::SetCurrentContext(state->imgui_context);
 
   ImGui::NewFrame();
+  ImGui::PushFont(s_state.debug_font);
   ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
   ImGui::SetNextWindowSize(state->imgui_context->IO.DisplaySize, ImGuiCond_Always);
   if (ImGui::Begin("AuxRenderWindowMain", nullptr,
@@ -1464,6 +1602,7 @@ bool ImGuiManager::RenderAuxiliaryRenderWindow(AuxiliaryRenderWindowState* state
   }
 
   ImGui::End();
+  ImGui::PopFont();
 
   const GPUDevice::PresentResult pres = g_gpu_device->BeginPresent(state->swap_chain.get());
   if (pres == GPUDevice::PresentResult::OK)
@@ -1511,15 +1650,23 @@ void ImGuiManager::ProcessAuxiliaryRenderWindowInputEvent(Host::AuxiliaryRenderW
         return;
       }
 
-      state->imgui_context->IO.DisplaySize.x = static_cast<float>(param1.uint_param);
-      state->imgui_context->IO.DisplaySize.y = static_cast<float>(param2.uint_param);
+      state->imgui_context->Viewports[0]->Size = state->imgui_context->IO.DisplaySize =
+        ImVec2(static_cast<float>(param1.uint_param), static_cast<float>(param2.uint_param));
     }
     break;
 
     case Host::AuxiliaryRenderWindowEvent::KeyPressed:
     case Host::AuxiliaryRenderWindowEvent::KeyReleased:
     {
-      SetImKeyState(io, param1.uint_param, (event == Host::AuxiliaryRenderWindowEvent::KeyPressed));
+      const auto iter = s_state.imgui_key_map.find(param1.uint_param);
+      if (iter != s_state.imgui_key_map.end())
+        SetImKeyState(io, iter->second, (event == Host::AuxiliaryRenderWindowEvent::KeyPressed));
+    }
+    break;
+
+    case Host::AuxiliaryRenderWindowEvent::TextEntered:
+    {
+      io.AddInputCharacter(param1.uint_param);
     }
     break;
 

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -188,6 +189,13 @@ public:
 };
 
 namespace InputManager {
+
+/// Maximum number of buttons that can be part of a chord.
+static constexpr u32 MAX_KEYS_PER_BINDING = 4;
+
+/// Maximum number of output vibration motors per pad.
+static constexpr u32 MAX_MOTORS_PER_PAD = 2;
+
 /// Minimum interval between vibration updates when the effect is continuous.
 static constexpr double VIBRATION_UPDATE_INTERVAL_SECONDS = 0.5; // 500ms
 
@@ -253,16 +261,20 @@ std::string ConvertInputBindingKeysToString(InputBindingInfo::Type binding_type,
                                             size_t num_keys);
 
 /// Represents a binding with icon fonts, if available.
-bool PrettifyInputBinding(SmallStringBase& binding);
+/// Optionally maps icon fonts to a different style, e.g. xbox icons -> PS buttons.
+using BindingIconMappingFunction = std::string_view (*)(std::string_view);
+bool PrettifyInputBinding(SmallStringBase& binding, BindingIconMappingFunction mapper = nullptr);
 
 /// Returns a list of all hotkeys.
 std::vector<const HotkeyInfo*> GetHotkeyList();
 
 /// Enumerates available devices. Returns a pair of the prefix (e.g. SDL-0) and the device name.
-std::vector<std::pair<std::string, std::string>> EnumerateDevices();
+using DeviceList = std::vector<std::tuple<InputBindingKey, std::string, std::string>>;
+DeviceList EnumerateDevices();
 
 /// Enumerates available vibration motors at the time of call.
-std::vector<InputBindingKey> EnumerateMotors();
+using VibrationMotorList = std::vector<InputBindingKey>;
+VibrationMotorList EnumerateVibrationMotors(std::optional<InputBindingKey> for_device = std::nullopt);
 
 /// Retrieves bindings that match the generic bindings for the specified device.
 GenericInputBindingMapping GetGenericBindingMapping(std::string_view device);
@@ -338,6 +350,9 @@ std::pair<float, float> GetPointerAbsolutePosition(u32 index);
 /// Updates absolute pointer position. Can call from UI thread, use when the host only reports absolute coordinates.
 void UpdatePointerAbsolutePosition(u32 index, float x, float y);
 
+/// Resets the accumulated pointer movement. Use when pointer tracking was interrupted.
+void ResetPointerRelativeDelta(u32 index);
+
 /// Updates relative pointer position. Can call from the UI thread, use when host supports relative coordinate
 /// reporting.
 void UpdatePointerRelativeDelta(u32 index, InputPointerAxis axis, float d, bool raw_input = false);
@@ -345,6 +360,7 @@ void UpdatePointerRelativeDelta(u32 index, InputPointerAxis axis, float d, bool 
 /// Updates host mouse mode (relative/cursor hiding).
 void UpdateRelativeMouseMode();
 void UpdateHostMouseMode();
+bool IsRelativeMouseModeActive();
 
 /// Sets the state of the specified macro button.
 void SetMacroButtonState(u32 pad, u32 index, bool state);
@@ -354,6 +370,7 @@ bool IsUsingRawInput();
 
 /// Updates InputManager's view of the window size, used for clamping raw input coordinates.
 void SetDisplayWindowSize(float width, float height);
+std::pair<float, float> GetDisplayWindowSize();
 
 /// Restores default configuration.
 void SetDefaultSourceConfig(SettingsInterface& si);
@@ -367,13 +384,17 @@ void CopyConfiguration(SettingsInterface* dest_si, const SettingsInterface& src_
 
 /// Performs automatic controller mapping with the provided list of generic mappings.
 bool MapController(SettingsInterface& si, u32 controller,
-                   const std::vector<std::pair<GenericInputBinding, std::string>>& mapping);
+                   const std::vector<std::pair<GenericInputBinding, std::string>>& mapping,
+                   bool clear_existing_mappings);
+
+/// Returns the name of the first physical device mapped to the emulated controller, "None", or "Multiple Devices".
+std::string GetPhysicalDeviceForController(SettingsInterface& si, u32 controller);
 
 /// Returns a list of input profiles available.
 std::vector<std::string> GetInputProfileNames();
 
 /// Called when a new input device is connected.
-void OnInputDeviceConnected(std::string_view identifier, std::string_view device_name);
+void OnInputDeviceConnected(InputBindingKey key, std::string_view identifier, std::string_view device_name);
 
 /// Called when an input device is disconnected.
 void OnInputDeviceDisconnected(InputBindingKey key, std::string_view identifier);
@@ -387,7 +408,7 @@ namespace Host {
 void AddFixedInputBindings(const SettingsInterface& si);
 
 /// Called when a new input device is connected.
-void OnInputDeviceConnected(std::string_view identifier, std::string_view device_name);
+void OnInputDeviceConnected(InputBindingKey key, std::string_view identifier, std::string_view device_name);
 
 /// Called when an input device is disconnected.
 void OnInputDeviceDisconnected(InputBindingKey key, std::string_view identifier);

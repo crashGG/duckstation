@@ -40,9 +40,11 @@ private Q_SLOTS:
   void onMediaCaptureAudioEnabledChanged();
 
   void onEnableTextureCacheChanged();
-  void onEnableTextureDumpingChanged();
+  void onEnableAnyTextureDumpingChanged();
   void onEnableAnyTextureReplacementsChanged();
   void onTextureReplacementOptionsClicked();
+
+  void onGPUThreadChanged();
 
 private:
   static constexpr int TAB_INDEX_RENDERING = 0;

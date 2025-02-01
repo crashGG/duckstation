@@ -246,8 +246,6 @@ private:
   };
   static_assert(sizeof(PIPELINE_CACHE_HEADER) == 16);
 
-  using SamplerMap = std::unordered_map<u64, D3D12DescriptorHandle>;
-
   void GetPipelineCacheHeader(PIPELINE_CACHE_HEADER* hdr);
   void SetFeatures(D3D_FEATURE_LEVEL feature_level, FeatureMask disabled_features);
 
@@ -261,8 +259,6 @@ private:
   void DestroyDescriptorHeaps();
   bool CreateTimestampQuery();
   void DestroyTimestampQuery();
-  D3D12DescriptorHandle GetSampler(const GPUSampler::Config& config, Error* error);
-  void DestroySamplers();
   void DestroyDeferredObjects(u64 fence_value);
 
   void RenderBlankFrame(D3D12SwapChain* swap_chain);
@@ -320,7 +316,6 @@ private:
   D3D12DescriptorHeapManager m_sampler_heap_manager;
   D3D12DescriptorHandle m_null_srv_descriptor;
   D3D12DescriptorHandle m_null_uav_descriptor;
-  D3D12DescriptorHandle m_point_sampler;
 
   ComPtr<ID3D12QueryHeap> m_timestamp_query_heap;
   ComPtr<ID3D12Resource> m_timestamp_query_buffer;
@@ -342,7 +337,6 @@ private:
   u32 m_uniform_buffer_position = 0;
   bool m_in_render_pass = false;
 
-  SamplerMap m_sampler_map;
   ComPtr<ID3D12PipelineLibrary> m_pipeline_library;
 
   // Which bindings/state has to be updated before the next draw.
@@ -387,7 +381,6 @@ public:
   ALWAYS_INLINE IDXGISwapChain1* GetSwapChain() const { return m_swap_chain.Get(); }
   ALWAYS_INLINE const BufferPair& GetCurrentBuffer() const { return m_swap_chain_buffers[m_current_swap_chain_buffer]; }
   ALWAYS_INLINE bool IsUsingAllowTearing() const { return m_using_allow_tearing; }
-  ALWAYS_INLINE bool IsExclusiveFullscreen() const { return m_fullscreen_mode.has_value(); }
 
   void AdvanceBuffer()
   {
@@ -395,6 +388,7 @@ public:
   }
   bool ResizeBuffers(u32 new_width, u32 new_height, float new_scale, Error* error) override;
   bool SetVSyncMode(GPUVSyncMode mode, bool allow_present_throttle, Error* error) override;
+  bool IsExclusiveFullscreen() const override;
 
 private:
   static u32 GetNewBufferCount(GPUVSyncMode vsync_mode);

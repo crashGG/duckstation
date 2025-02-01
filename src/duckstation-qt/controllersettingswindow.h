@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #pragma once
@@ -14,6 +14,7 @@
 #include <QtCore/QString>
 #include <QtCore/QStringList>
 #include <QtWidgets/QDialog>
+#include <QtCore/QAbstractListModel>
 
 #include <array>
 #include <string>
@@ -41,25 +42,23 @@ public:
     Count
   };
 
-  ControllerSettingsWindow(SettingsInterface* game_sif = nullptr, QWidget* parent = nullptr);
+  ControllerSettingsWindow(SettingsInterface* game_sif = nullptr, bool edit_profiles = false,
+                           QWidget* parent = nullptr);
   ~ControllerSettingsWindow();
 
   static void editControllerSettingsForGame(QWidget* parent, SettingsInterface* sif);
 
   ALWAYS_INLINE HotkeySettingsWidget* getHotkeySettingsWidget() const { return m_hotkey_settings; }
 
-  ALWAYS_INLINE const std::vector<std::pair<std::string, std::string>>& getDeviceList() const { return m_device_list; }
-  ALWAYS_INLINE const QStringList& getVibrationMotors() const { return m_vibration_motors; }
-
   ALWAYS_INLINE bool isEditingGlobalSettings() const
   {
-    return (m_profile_name.isEmpty() && !m_editing_settings_interface);
+    return (!m_editing_input_profiles && !m_editing_settings_interface);
   }
   ALWAYS_INLINE bool isEditingGameSettings() const
   {
-    return (m_profile_name.isEmpty() && m_editing_settings_interface);
+    return (!m_editing_input_profiles && m_editing_settings_interface);
   }
-  ALWAYS_INLINE bool isEditingProfile() const { return !m_profile_name.isEmpty(); }
+  ALWAYS_INLINE bool isEditingProfile() const { return m_editing_input_profiles; }
   ALWAYS_INLINE SettingsInterface* getEditingSettingsInterface() { return m_editing_settings_interface; }
 
   Category getCurrentCategory() const;
@@ -93,12 +92,6 @@ private Q_SLOTS:
   void onDeleteProfileClicked();
   void onRestoreDefaultsClicked();
   void onCopyGlobalSettingsClicked();
-  void onRestoreDefaultsForGameClicked();
-
-  void onInputDevicesEnumerated(const std::vector<std::pair<std::string, std::string>>& devices);
-  void onInputDeviceConnected(const std::string& identifier, const std::string& device_name);
-  void onInputDeviceDisconnected(const std::string& identifier);
-  void onVibrationMotorsEnumerated(const QList<InputBindingKey>& motors);
 
   void createWidgets();
 
@@ -119,9 +112,7 @@ private:
   std::array<ControllerBindingWidget*, NUM_CONTROLLER_AND_CARD_PORTS> m_port_bindings{};
   HotkeySettingsWidget* m_hotkey_settings = nullptr;
 
-  std::vector<std::pair<std::string, std::string>> m_device_list;
-  QStringList m_vibration_motors;
-
   QString m_profile_name;
   std::unique_ptr<SettingsInterface> m_profile_settings_interface;
+  bool m_editing_input_profiles = false;
 };

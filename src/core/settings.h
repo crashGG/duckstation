@@ -8,8 +8,6 @@
 #include "util/audio_stream.h"
 
 #include "common/log.h"
-#include "common/settings_interface.h"
-#include "common/small_string.h"
 
 #include <array>
 #include <optional>
@@ -17,6 +15,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+class SettingsInterface;
 
 enum class RenderAPI : u8;
 enum class MediaCaptureBackend : u8;
@@ -57,75 +57,15 @@ struct SettingInfo
   float FloatStepValue() const;
 };
 
-struct Settings
+struct GPUSettings
 {
-  Settings();
-
-  ConsoleRegion region = DEFAULT_CONSOLE_REGION;
-
-  CPUExecutionMode cpu_execution_mode = DEFAULT_CPU_EXECUTION_MODE;
-  CPUFastmemMode cpu_fastmem_mode = DEFAULT_CPU_FASTMEM_MODE;
-  bool cpu_overclock_enable : 1 = false;
-  bool cpu_overclock_active : 1 = false;
-  bool cpu_recompiler_memory_exceptions : 1 = false;
-  bool cpu_recompiler_block_linking : 1 = true;
-  bool cpu_recompiler_icache : 1 = false;
-  u32 cpu_overclock_numerator = 1;
-  u32 cpu_overclock_denominator = 1;
-
-  float emulation_speed = 1.0f;
-  float fast_forward_speed = 0.0f;
-  float turbo_speed = 0.0f;
-  bool sync_to_host_refresh_rate : 1 = false;
-  bool inhibit_screensaver : 1 = true;
-  bool pause_on_focus_loss : 1 = false;
-  bool pause_on_controller_disconnection : 1 = false;
-  bool save_state_on_exit : 1 = true;
-  bool create_save_state_backups : 1 = DEFAULT_SAVE_STATE_BACKUPS;
-  bool confim_power_off : 1 = true;
-  bool load_devices_from_save_states : 1 = false;
-  bool apply_compatibility_settings : 1 = true;
-  bool apply_game_settings : 1 = true;
-  bool disable_all_enhancements : 1 = false;
-  bool enable_discord_presence : 1 = false;
-
-  bool rewind_enable : 1 = false;
-  float rewind_save_frequency = 10.0f;
-  u16 rewind_save_slots = 10;
-  u8 runahead_frames = 0;
+  GPUSettings();
 
   GPURenderer gpu_renderer = DEFAULT_GPU_RENDERER;
-  std::string gpu_adapter;
   u8 gpu_resolution_scale = 1;
   u8 gpu_multisamples = 1;
-  bool gpu_use_thread : 1 = true;
-  bool gpu_use_software_renderer_for_readbacks : 1 = false;
-  bool gpu_use_debug_device : 1 = false;
-  bool gpu_disable_shader_cache : 1 = false;
-  bool gpu_disable_dual_source_blend : 1 = false;
-  bool gpu_disable_framebuffer_fetch : 1 = false;
-  bool gpu_disable_texture_buffers : 1 = false;
-  bool gpu_disable_texture_copy_to_self : 1 = false;
-  bool gpu_disable_memory_import : 1 = false;
-  bool gpu_disable_raster_order_views : 1 = false;
-  bool gpu_disable_compute_shaders : 1 = false;
-  bool gpu_disable_compressed_textures : 1 = false;
-  bool gpu_per_sample_shading : 1 = false;
-  bool gpu_true_color : 1 = true;
-  bool gpu_scaled_dithering : 1 = true;
-  bool gpu_force_round_texcoords : 1 = false;
-  bool gpu_accurate_blending : 1 = false;
-  bool gpu_widescreen_hack : 1 = false;
-  bool gpu_texture_cache : 1 = false;
-  bool gpu_pgxp_enable : 1 = false;
-  bool gpu_pgxp_culling : 1 = true;
-  bool gpu_pgxp_texture_correction : 1 = true;
-  bool gpu_pgxp_color_correction : 1 = false;
-  bool gpu_pgxp_vertex_cache : 1 = false;
-  bool gpu_pgxp_cpu : 1 = false;
-  bool gpu_pgxp_preserve_proj_fp : 1 = false;
-  bool gpu_pgxp_depth_buffer : 1 = false;
-  bool gpu_pgxp_disable_2d : 1 = false;
+  u8 gpu_max_queued_frames = DEFAULT_GPU_MAX_QUEUED_FRAMES;
+
   ForceVideoTimingMode gpu_force_video_timing = DEFAULT_FORCE_VIDEO_TIMING_MODE;
   GPUTextureFilter gpu_texture_filter = DEFAULT_GPU_TEXTURE_FILTER;
   GPUTextureFilter gpu_sprite_texture_filter = DEFAULT_GPU_TEXTURE_FILTER;
@@ -149,6 +89,42 @@ struct Settings
   s16 display_active_end_offset = 0;
   s8 display_line_start_offset = 0;
   s8 display_line_end_offset = 0;
+
+  bool gpu_use_thread : 1 = true;
+  bool gpu_use_software_renderer_for_readbacks : 1 = false;
+  bool gpu_use_debug_device : 1 = false;
+  bool gpu_disable_shader_cache : 1 = false;
+  bool gpu_disable_dual_source_blend : 1 = false;
+  bool gpu_disable_framebuffer_fetch : 1 = false;
+  bool gpu_disable_texture_buffers : 1 = false;
+  bool gpu_disable_texture_copy_to_self : 1 = false;
+  bool gpu_disable_memory_import : 1 = false;
+  bool gpu_disable_raster_order_views : 1 = false;
+  bool gpu_disable_compute_shaders : 1 = false;
+  bool gpu_disable_compressed_textures : 1 = false;
+  bool gpu_per_sample_shading : 1 = false;
+  bool gpu_true_color : 1 = true;
+  bool gpu_scaled_dithering : 1 = true;
+  bool gpu_force_round_texcoords : 1 = false;
+  bool gpu_accurate_blending : 1 = false;
+  bool gpu_widescreen_hack : 1 = false;
+  bool gpu_texture_cache : 1 = false;
+  bool gpu_show_vram : 1 = false;
+  bool gpu_dump_cpu_to_vram_copies : 1 = false;
+  bool gpu_dump_vram_to_cpu_copies : 1 = false;
+  bool gpu_dump_fast_replay_mode : 1 = false;
+
+  bool gpu_pgxp_enable : 1 = false;
+  bool gpu_pgxp_culling : 1 = true;
+  bool gpu_pgxp_texture_correction : 1 = true;
+  bool gpu_pgxp_color_correction : 1 = false;
+  bool gpu_pgxp_vertex_cache : 1 = false;
+  bool gpu_pgxp_cpu : 1 = false;
+  bool gpu_pgxp_preserve_proj_fp : 1 = false;
+  bool gpu_pgxp_depth_buffer : 1 = false;
+  bool gpu_pgxp_disable_2d : 1 = false;
+  bool gpu_pgxp_transparent_depth : 1 = false;
+
   bool display_optimal_frame_pacing : 1 = false;
   bool display_pre_frame_sleep : 1 = false;
   bool display_skip_presenting_duplicate_frames : 1 = false;
@@ -175,62 +151,6 @@ struct Settings
   float gpu_pgxp_tolerance = -1.0f;
   float gpu_pgxp_depth_clear_threshold = DEFAULT_GPU_PGXP_DEPTH_THRESHOLD / GPU_PGXP_DEPTH_THRESHOLD_SCALE;
 
-  SaveStateCompressionMode save_state_compression = DEFAULT_SAVE_STATE_COMPRESSION_MODE;
-
-  u8 cdrom_readahead_sectors = DEFAULT_CDROM_READAHEAD_SECTORS;
-  CDROMMechaconVersion cdrom_mechacon_version = DEFAULT_CDROM_MECHACON_VERSION;
-  bool cdrom_region_check : 1 = false;
-  bool cdrom_subq_skew : 1 = false;
-  bool cdrom_load_image_to_ram : 1 = false;
-  bool cdrom_load_image_patches : 1 = false;
-  bool cdrom_mute_cd_audio : 1 = false;
-  u32 cdrom_read_speedup = 1;
-  u32 cdrom_seek_speedup = 1;
-
-  std::string audio_driver;
-  std::string audio_output_device;
-  u32 audio_output_volume = 100;
-  u32 audio_fast_forward_volume = 100;
-  AudioStreamParameters audio_stream_parameters;
-  AudioBackend audio_backend = AudioStream::DEFAULT_BACKEND;
-  bool audio_output_muted : 1 = false;
-
-  bool use_old_mdec_routines : 1 = false;
-  bool pcdrv_enable : 1 = false;
-  bool export_shared_memory : 1 = false;
-
-  // timing hacks section
-  TickCount dma_max_slice_ticks = DEFAULT_DMA_MAX_SLICE_TICKS;
-  TickCount dma_halt_ticks = DEFAULT_DMA_HALT_TICKS;
-  u32 gpu_fifo_size = DEFAULT_GPU_FIFO_SIZE;
-  TickCount gpu_max_run_ahead = DEFAULT_GPU_MAX_RUN_AHEAD;
-
-  // achievements
-  bool achievements_enabled : 1 = false;
-  bool achievements_hardcore_mode : 1 = false;
-  bool achievements_notifications : 1 = true;
-  bool achievements_leaderboard_notifications : 1 = true;
-  bool achievements_sound_effects : 1 = true;
-  bool achievements_overlays : 1 = true;
-  bool achievements_encore_mode : 1 = false;
-  bool achievements_spectator_mode : 1 = false;
-  bool achievements_unofficial_test_mode : 1 = false;
-  bool achievements_use_raintegration : 1 = false;
-  s32 achievements_notification_duration = DEFAULT_ACHIEVEMENT_NOTIFICATION_TIME;
-  s32 achievements_leaderboard_duration = DEFAULT_LEADERBOARD_NOTIFICATION_TIME;
-
-  struct DebugSettings
-  {
-#ifndef __ANDROID__
-    u16 gdb_server_port = DEFAULT_GDB_SERVER_PORT;
-    bool enable_gdb_server : 1 = false;
-#endif
-
-    bool show_vram : 1 = false;
-    bool dump_cpu_to_vram_copies : 1 = false;
-    bool dump_vram_to_cpu_copies : 1 = false;
-  } debugging;
-
   // texture replacements
   struct TextureReplacementSettings
   {
@@ -249,20 +169,20 @@ struct Settings
       bool dump_c16_textures : 1 = false;
       bool reduce_palette_range : 1 = true;
       bool convert_copies_to_writes : 1 = false;
-      bool replacement_scale_linear_filter = false;
+      bool replacement_scale_linear_filter : 1 = false;
 
       u32 max_hash_cache_entries = DEFAULT_MAX_HASH_CACHE_ENTRIES;
       u32 max_hash_cache_vram_usage_mb = DEFAULT_MAX_HASH_CACHE_VRAM_USAGE_MB;
       u32 max_replacement_cache_vram_usage_mb = DEFAULT_MAX_REPLACEMENT_CACHE_VRAM_USAGE_MB;
 
-      u32 max_vram_write_splits = 0;
-      u32 max_vram_write_coalesce_width = 0;
-      u32 max_vram_write_coalesce_height = 0;
-      u32 texture_dump_width_threshold = 16;
-      u32 texture_dump_height_threshold = 16;
+      u16 max_vram_write_splits = 0;
+      u16 max_vram_write_coalesce_width = 0;
+      u16 max_vram_write_coalesce_height = 0;
+      u16 texture_dump_width_threshold = 16;
+      u16 texture_dump_height_threshold = 16;
 
-      u32 vram_write_dump_width_threshold = 128;
-      u32 vram_write_dump_height_threshold = 128;
+      u16 vram_write_dump_width_threshold = 128;
+      u16 vram_write_dump_height_threshold = 128;
 
       bool operator==(const Configuration& rhs) const;
       bool operator!=(const Configuration& rhs) const;
@@ -272,6 +192,7 @@ struct Settings
 
     bool enable_texture_replacements : 1 = false;
     bool enable_vram_write_replacements : 1 = false;
+    bool always_track_uploads : 1 = false;
     bool preload_textures : 1 = false;
 
     bool dump_textures : 1 = false;
@@ -284,38 +205,15 @@ struct Settings
     bool operator!=(const TextureReplacementSettings& rhs) const;
   } texture_replacements;
 
-  bool bios_tty_logging : 1 = false;
-  bool bios_patch_fast_boot : 1 = DEFAULT_FAST_BOOT_VALUE;
-  bool bios_fast_forward_boot : 1 = false;
-  bool enable_8mb_ram : 1 = false;
-  bool gpu_dump_fast_replay_mode : 1 = false;
+  std::string overlay_image_path;
 
-  std::array<ControllerType, NUM_CONTROLLER_AND_CARD_PORTS> controller_types{};
-  std::array<MemoryCardType, NUM_CONTROLLER_AND_CARD_PORTS> memory_card_types{};
-  std::array<std::string, NUM_CONTROLLER_AND_CARD_PORTS> memory_card_paths{};
-  bool memory_card_use_playlist_title = true;
-
-  MultitapMode multitap_mode = DEFAULT_MULTITAP_MODE;
-
-  PIODeviceType pio_device_type = DEFAULT_PIO_DEVICE_TYPE;
-  std::string pio_flash_image_path;
-  bool pio_switch_active = true;
-  bool pio_flash_write_enable = false;
-
-  std::string pcdrv_root;
-  bool pcdrv_enable_writes = false;
+  float GetDisplayAspectRatioValue() const;
 
   ALWAYS_INLINE bool IsUsingSoftwareRenderer() const { return (gpu_renderer == GPURenderer::Software); }
   ALWAYS_INLINE bool IsUsingAccurateBlending() const { return (gpu_accurate_blending && !gpu_true_color); }
-  ALWAYS_INLINE bool IsRunaheadEnabled() const { return (runahead_frames > 0); }
 
-  ALWAYS_INLINE PGXPMode GetPGXPMode()
-  {
-    return gpu_pgxp_enable ? (gpu_pgxp_cpu ? PGXPMode::CPU : PGXPMode::Memory) : PGXPMode::Disabled;
-  }
-
-  ALWAYS_INLINE bool UsingPGXPDepthBuffer() const { return gpu_pgxp_enable && gpu_pgxp_depth_buffer; }
   ALWAYS_INLINE bool UsingPGXPCPUMode() const { return gpu_pgxp_enable && gpu_pgxp_cpu; }
+  ALWAYS_INLINE bool UsingPGXPDepthBuffer() const { return gpu_pgxp_enable && gpu_pgxp_depth_buffer; }
   ALWAYS_INLINE float GetPGXPDepthClearThreshold() const
   {
     return gpu_pgxp_depth_clear_threshold * GPU_PGXP_DEPTH_THRESHOLD_SCALE;
@@ -325,12 +223,160 @@ struct Settings
     gpu_pgxp_depth_clear_threshold = value / GPU_PGXP_DEPTH_THRESHOLD_SCALE;
   }
 
-  ALWAYS_INLINE s32 GetAudioOutputVolume(bool fast_forwarding) const
+  static constexpr GPURenderer DEFAULT_GPU_RENDERER = GPURenderer::Automatic;
+  static constexpr GPUTextureFilter DEFAULT_GPU_TEXTURE_FILTER = GPUTextureFilter::Nearest;
+  static constexpr GPULineDetectMode DEFAULT_GPU_LINE_DETECT_MODE = GPULineDetectMode::Disabled;
+  static constexpr GPUDownsampleMode DEFAULT_GPU_DOWNSAMPLE_MODE = GPUDownsampleMode::Disabled;
+  static constexpr GPUWireframeMode DEFAULT_GPU_WIREFRAME_MODE = GPUWireframeMode::Disabled;
+  static constexpr GPUDumpCompressionMode DEFAULT_GPU_DUMP_COMPRESSION_MODE = GPUDumpCompressionMode::ZstDefault;
+  static constexpr float DEFAULT_GPU_PGXP_DEPTH_THRESHOLD = 300.0f;
+  static constexpr float GPU_PGXP_DEPTH_THRESHOLD_SCALE = 4096.0f;
+
+  static constexpr DisplayDeinterlacingMode DEFAULT_DISPLAY_DEINTERLACING_MODE = DisplayDeinterlacingMode::Progressive;
+  static constexpr DisplayCropMode DEFAULT_DISPLAY_CROP_MODE = DisplayCropMode::Overscan;
+  static constexpr DisplayAspectRatio DEFAULT_DISPLAY_ASPECT_RATIO = DisplayAspectRatio::Auto;
+  static constexpr DisplayAlignment DEFAULT_DISPLAY_ALIGNMENT = DisplayAlignment::Center;
+  static constexpr DisplayRotation DEFAULT_DISPLAY_ROTATION = DisplayRotation::Normal;
+  static constexpr DisplayScalingMode DEFAULT_DISPLAY_SCALING = DisplayScalingMode::BilinearSmooth;
+  static constexpr ForceVideoTimingMode DEFAULT_FORCE_VIDEO_TIMING_MODE = ForceVideoTimingMode::Disabled;
+  static constexpr DisplayExclusiveFullscreenControl DEFAULT_DISPLAY_EXCLUSIVE_FULLSCREEN_CONTROL =
+    DisplayExclusiveFullscreenControl::Automatic;
+  static constexpr DisplayScreenshotMode DEFAULT_DISPLAY_SCREENSHOT_MODE = DisplayScreenshotMode::ScreenResolution;
+  static constexpr DisplayScreenshotFormat DEFAULT_DISPLAY_SCREENSHOT_FORMAT = DisplayScreenshotFormat::PNG;
+  static constexpr u8 DEFAULT_DISPLAY_SCREENSHOT_QUALITY = 85;
+  static constexpr float DEFAULT_DISPLAY_PRE_FRAME_SLEEP_BUFFER = 2.0f;
+  static constexpr float DEFAULT_OSD_SCALE = 100.0f;
+
+#ifndef __ANDROID__
+  static constexpr u8 DEFAULT_GPU_MAX_QUEUED_FRAMES = 2;
+#else
+  static constexpr u8 DEFAULT_GPU_MAX_QUEUED_FRAMES = 3;
+#endif
+};
+
+struct Settings : public GPUSettings
+{
+  Settings();
+
+  ALIGN_TO_CACHE_LINE u32 cpu_overclock_numerator = 1;
+  u32 cpu_overclock_denominator = 1;
+
+  TickCount dma_max_slice_ticks = DEFAULT_DMA_MAX_SLICE_TICKS;
+  TickCount dma_halt_ticks = DEFAULT_DMA_HALT_TICKS;
+  u32 gpu_fifo_size = DEFAULT_GPU_FIFO_SIZE;
+  TickCount gpu_max_run_ahead = DEFAULT_GPU_MAX_RUN_AHEAD;
+
+  ConsoleRegion region = DEFAULT_CONSOLE_REGION;
+
+  CPUExecutionMode cpu_execution_mode = DEFAULT_CPU_EXECUTION_MODE;
+  CPUFastmemMode cpu_fastmem_mode = DEFAULT_CPU_FASTMEM_MODE;
+  bool cpu_overclock_enable : 1 = false;
+  bool cpu_overclock_active : 1 = false;
+  bool cpu_recompiler_memory_exceptions : 1 = false;
+  bool cpu_recompiler_block_linking : 1 = true;
+  bool cpu_recompiler_icache : 1 = false;
+
+  bool sync_to_host_refresh_rate : 1 = false;
+  bool inhibit_screensaver : 1 = true;
+  bool pause_on_focus_loss : 1 = false;
+  bool pause_on_controller_disconnection : 1 = false;
+  bool save_state_on_exit : 1 = true;
+  bool create_save_state_backups : 1 = DEFAULT_SAVE_STATE_BACKUPS;
+  bool confim_power_off : 1 = true;
+  bool load_devices_from_save_states : 1 = false;
+  bool apply_compatibility_settings : 1 = true;
+  bool apply_game_settings : 1 = true;
+  bool disable_all_enhancements : 1 = false;
+  bool enable_discord_presence : 1 = false;
+
+  bool rewind_enable : 1 = false;
+
+  bool cdrom_region_check : 1 = false;
+  bool cdrom_subq_skew : 1 = false;
+  bool cdrom_load_image_to_ram : 1 = false;
+  bool cdrom_load_image_patches : 1 = false;
+  bool cdrom_mute_cd_audio : 1 = false;
+
+  u16 rewind_save_slots = 10;
+  u8 runahead_frames = 0;
+
+  SaveStateCompressionMode save_state_compression = DEFAULT_SAVE_STATE_COMPRESSION_MODE;
+
+  u8 cdrom_read_speedup = 1;
+  u8 cdrom_seek_speedup = 1;
+  u32 cdrom_max_speedup_cycles = DEFAULT_CDROM_MAX_SPEEDUP_CYCLES;
+
+  u8 cdrom_readahead_sectors = DEFAULT_CDROM_READAHEAD_SECTORS;
+  CDROMMechaconVersion cdrom_mechacon_version = DEFAULT_CDROM_MECHACON_VERSION;
+
+  u8 audio_output_volume = 100;
+  u8 audio_fast_forward_volume = 100;
+
+  bool audio_output_muted : 1 = false;
+
+  bool use_old_mdec_routines : 1 = false;
+  bool pcdrv_enable : 1 = false;
+  bool export_shared_memory : 1 = false;
+
+  bool bios_tty_logging : 1 = false;
+  bool bios_patch_fast_boot : 1 = DEFAULT_FAST_BOOT_VALUE;
+  bool bios_fast_forward_boot : 1 = false;
+  bool enable_8mb_ram : 1 = false;
+  bool memory_card_use_playlist_title : 1 = true;
+  bool pio_switch_active : 1 = true;
+  bool pio_flash_write_enable : 1 = false;
+  bool pcdrv_enable_writes : 1 = false;
+
+  // achievements
+  bool achievements_enabled : 1 = false;
+  bool achievements_hardcore_mode : 1 = false;
+  bool achievements_notifications : 1 = true;
+  bool achievements_leaderboard_notifications : 1 = true;
+  bool achievements_sound_effects : 1 = true;
+  bool achievements_overlays : 1 = true;
+  bool achievements_encore_mode : 1 = false;
+  bool achievements_spectator_mode : 1 = false;
+  bool achievements_unofficial_test_mode : 1 = false;
+  bool achievements_use_raintegration : 1 = false;
+  s32 achievements_notification_duration = DEFAULT_ACHIEVEMENT_NOTIFICATION_TIME;
+  s32 achievements_leaderboard_duration = DEFAULT_LEADERBOARD_NOTIFICATION_TIME;
+
+  float emulation_speed = 1.0f;
+  float fast_forward_speed = 0.0f;
+  float turbo_speed = 0.0f;
+
+  float rewind_save_frequency = 10.0f;
+
+  std::array<ControllerType, NUM_CONTROLLER_AND_CARD_PORTS> controller_types{};
+  std::array<MemoryCardType, NUM_CONTROLLER_AND_CARD_PORTS> memory_card_types{};
+  std::array<std::string, NUM_CONTROLLER_AND_CARD_PORTS> memory_card_paths{};
+
+  MultitapMode multitap_mode = DEFAULT_MULTITAP_MODE;
+
+  PIODeviceType pio_device_type = DEFAULT_PIO_DEVICE_TYPE;
+
+  AudioBackend audio_backend = AudioStream::DEFAULT_BACKEND;
+  AudioStreamParameters audio_stream_parameters;
+
+  std::string gpu_adapter;
+  std::string audio_driver;
+  std::string audio_output_device;
+
+  std::string pio_flash_image_path;
+
+  std::string pcdrv_root;
+
+#ifndef __ANDROID__
+  u16 gdb_server_port = DEFAULT_GDB_SERVER_PORT;
+  bool enable_gdb_server = false;
+#endif
+
+  ALWAYS_INLINE bool IsRunaheadEnabled() const { return (runahead_frames > 0); }
+
+  ALWAYS_INLINE u8 GetAudioOutputVolume(bool fast_forwarding) const
   {
     return audio_output_muted ? 0 : (fast_forwarding ? audio_fast_forward_volume : audio_output_volume);
   }
-
-  float GetDisplayAspectRatioValue() const;
 
   ALWAYS_INLINE bool IsPort1MultitapEnabled() const
   {
@@ -343,6 +389,12 @@ struct Settings
   ALWAYS_INLINE bool IsMultitapPortEnabled(u32 port) const
   {
     return (port == 0) ? IsPort1MultitapEnabled() : IsPort2MultitapEnabled();
+  }
+
+  /// Returns the default type for the specified port.
+  ALWAYS_INLINE static ControllerType GetDefaultControllerType(u32 pad)
+  {
+    return (pad == 0) ? DEFAULT_CONTROLLER_1_TYPE : DEFAULT_CONTROLLER_2_TYPE;
   }
 
   ALWAYS_INLINE static bool IsPerGameMemoryCardType(MemoryCardType type)
@@ -378,7 +430,9 @@ struct Settings
   void Save(SettingsInterface& si, bool ignore_base) const;
   static void Clear(SettingsInterface& si);
 
-  void FixIncompatibleSettings(bool display_osd_messages);
+  void FixIncompatibleSettings(const SettingsInterface& si, bool display_osd_messages);
+
+  bool AreGPUDeviceSettingsChanged(const Settings& old_settings) const;
 
   /// Initializes configuration.
   static void SetDefaultLogConfig(SettingsInterface& si);
@@ -495,15 +549,7 @@ struct Settings
   static const char* GetPIODeviceTypeModeName(PIODeviceType type);
   static const char* GetPIODeviceTypeModeDisplayName(PIODeviceType type);
 
-  static constexpr GPURenderer DEFAULT_GPU_RENDERER = GPURenderer::Automatic;
-  static constexpr GPUTextureFilter DEFAULT_GPU_TEXTURE_FILTER = GPUTextureFilter::Nearest;
-  static constexpr GPULineDetectMode DEFAULT_GPU_LINE_DETECT_MODE = GPULineDetectMode::Disabled;
-  static constexpr GPUDownsampleMode DEFAULT_GPU_DOWNSAMPLE_MODE = GPUDownsampleMode::Disabled;
-  static constexpr GPUWireframeMode DEFAULT_GPU_WIREFRAME_MODE = GPUWireframeMode::Disabled;
-  static constexpr GPUDumpCompressionMode DEFAULT_GPU_DUMP_COMPRESSION_MODE = GPUDumpCompressionMode::ZstDefault;
   static constexpr ConsoleRegion DEFAULT_CONSOLE_REGION = ConsoleRegion::Auto;
-  static constexpr float DEFAULT_GPU_PGXP_DEPTH_THRESHOLD = 300.0f;
-  static constexpr float GPU_PGXP_DEPTH_THRESHOLD_SCALE = 4096.0f;
 
   // Prefer recompiler when supported.
 #ifdef ENABLE_RECOMPILER
@@ -521,22 +567,8 @@ struct Settings
   static constexpr CPUFastmemMode DEFAULT_CPU_FASTMEM_MODE = CPUFastmemMode::LUT;
 #endif
 
-  static constexpr DisplayDeinterlacingMode DEFAULT_DISPLAY_DEINTERLACING_MODE = DisplayDeinterlacingMode::Progressive;
-  static constexpr DisplayCropMode DEFAULT_DISPLAY_CROP_MODE = DisplayCropMode::Overscan;
-  static constexpr DisplayAspectRatio DEFAULT_DISPLAY_ASPECT_RATIO = DisplayAspectRatio::Auto;
-  static constexpr DisplayAlignment DEFAULT_DISPLAY_ALIGNMENT = DisplayAlignment::Center;
-  static constexpr DisplayRotation DEFAULT_DISPLAY_ROTATION = DisplayRotation::Normal;
-  static constexpr DisplayScalingMode DEFAULT_DISPLAY_SCALING = DisplayScalingMode::BilinearSmooth;
-  static constexpr ForceVideoTimingMode DEFAULT_FORCE_VIDEO_TIMING_MODE = ForceVideoTimingMode::Disabled;
-  static constexpr DisplayExclusiveFullscreenControl DEFAULT_DISPLAY_EXCLUSIVE_FULLSCREEN_CONTROL =
-    DisplayExclusiveFullscreenControl::Automatic;
-  static constexpr DisplayScreenshotMode DEFAULT_DISPLAY_SCREENSHOT_MODE = DisplayScreenshotMode::ScreenResolution;
-  static constexpr DisplayScreenshotFormat DEFAULT_DISPLAY_SCREENSHOT_FORMAT = DisplayScreenshotFormat::PNG;
-  static constexpr u8 DEFAULT_DISPLAY_SCREENSHOT_QUALITY = 85;
-  static constexpr float DEFAULT_DISPLAY_PRE_FRAME_SLEEP_BUFFER = 2.0f;
-  static constexpr float DEFAULT_OSD_SCALE = 100.0f;
-
   static constexpr u8 DEFAULT_CDROM_READAHEAD_SECTORS = 8;
+  static constexpr u32 DEFAULT_CDROM_MAX_SPEEDUP_CYCLES = 30000;
   static constexpr CDROMMechaconVersion DEFAULT_CDROM_MECHACON_VERSION = CDROMMechaconVersion::VC1A;
 
   static constexpr ControllerType DEFAULT_CONTROLLER_1_TYPE = ControllerType::AnalogController;
@@ -571,7 +603,8 @@ struct Settings
 #endif
 };
 
-extern Settings g_settings;
+ALIGN_TO_CACHE_LINE extern Settings g_settings;        // CPU thread copy.
+ALIGN_TO_CACHE_LINE extern GPUSettings g_gpu_settings; // GPU thread copy.
 
 namespace EmuFolders {
 extern std::string AppRoot;
@@ -596,7 +629,7 @@ extern std::string Videos;
 
 // Assumes that AppRoot and DataRoot have been initialized.
 void SetDefaults();
-bool EnsureFoldersExist();
+void EnsureFoldersExist();
 void LoadConfig(SettingsInterface& si);
 void Save(SettingsInterface& si);
 

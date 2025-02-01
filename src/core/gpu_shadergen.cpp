@@ -12,11 +12,7 @@ GPUShaderGen::~GPUShaderGen() = default;
 
 void GPUShaderGen::WriteDisplayUniformBuffer(std::stringstream& ss) const
 {
-  // Rotation matrix split into rows to avoid padding in HLSL.
-  DeclareUniformBuffer(ss,
-                       {"float4 u_src_rect", "float4 u_src_size", "float4 u_clamp_rect", "float4 u_params",
-                        "float2 u_rotation_matrix0", "float2 u_rotation_matrix1"},
-                       true);
+  DeclareUniformBuffer(ss, {"float4 u_src_size", "float4 u_clamp_rect", "float4 u_params"}, true);
 
   ss << R"(
 float2 ClampUV(float2 uv) {
@@ -29,16 +25,13 @@ std::string GPUShaderGen::GenerateDisplayVertexShader() const
   std::stringstream ss;
   WriteHeader(ss);
   WriteDisplayUniformBuffer(ss);
-  DeclareVertexEntryPoint(ss, {}, 0, 1, {}, true);
+  DeclareVertexEntryPoint(ss, {"float2 a_pos", "float2 a_tex0"}, 0, 1, {}, false, "", false, false, false);
   ss << R"(
 {
-  float2 pos = float2(float((v_id << 1) & 2u), float(v_id & 2u));
-  v_tex0 = u_src_rect.xy + pos * u_src_rect.zw;
-  v_pos = float4(pos * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+  v_pos = float4(a_pos, 0.0f, 1.0f);
+  v_tex0 = a_tex0;
 
-  // Avoid HLSL/GLSL constructor differences by explicitly multiplying the matrix.
-  v_pos.xy = float2(dot(u_rotation_matrix0, v_pos.xy), dot(u_rotation_matrix1, v_pos.xy));
-
+  // NDC space Y flip in Vulkan.
   #if API_VULKAN
     v_pos.y = -v_pos.y;
   #endif
@@ -102,39 +95,21 @@ std::string GPUShaderGen::GenerateDisplaySharpBilinearFragmentShader() const
   return ss.str();
 }
 
-std::string GPUShaderGen::GenerateInterleavedFieldExtractFragmentShader() const
-{
-  std::stringstream ss;
-  WriteHeader(ss);
-  DeclareUniformBuffer(ss, {"uint2 u_src_offset", "uint u_line_skip"}, true);
-  DeclareTexture(ss, "samp0", 0, false);
-
-  DeclareFragmentEntryPoint(ss, 0, 1, {}, true);
-  ss << R"(
-{
-  uint2 tcoord = u_src_offset + uint2(uint(v_pos.x), uint(v_pos.y) << u_line_skip);
-  o_col0 = LOAD_TEXTURE(samp0, int2(tcoord), 0);
-}
-)";
-
-  return ss.str();
-}
-
 std::string GPUShaderGen::GenerateDeinterlaceWeaveFragmentShader() const
 {
   std::stringstream ss;
   WriteHeader(ss);
-  DeclareUniformBuffer(ss, {"uint2 u_src_offset", "uint u_render_field", "uint u_line_skip"}, true);
+  DeclareUniformBuffer(ss, {"uint2 u_src_offset", "uint u_render_field"}, true);
   DeclareTexture(ss, "samp0", 0, false);
 
   DeclareFragmentEntryPoint(ss, 0, 1, {}, true);
   ss << R"(
 {
   uint2 fcoord = uint2(v_pos.xy);
-  if ((fcoord.y & 1) != u_render_field)
+  if ((fcoord.y & 1u) != u_render_field)
     discard;
 
-  uint2 tcoord = u_src_offset + uint2(fcoord.x, (fcoord.y / 2u) << u_line_skip);
+  uint2 tcoord = u_src_offset + uint2(fcoord.x, (fcoord.y / 2u));
   o_col0 = LOAD_TEXTURE(samp0, int2(tcoord), 0);
 })";
 

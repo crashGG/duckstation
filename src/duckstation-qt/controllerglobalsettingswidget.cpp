@@ -21,6 +21,10 @@ ControllerGlobalSettingsWidget::ControllerGlobalSettingsWidget(QWidget* parent, 
   ControllerSettingWidgetBinder::BindWidgetToInputProfileBool(sif, m_ui.enableSDLSource, "InputSources", "SDL", true);
   ControllerSettingWidgetBinder::BindWidgetToInputProfileBool(sif, m_ui.enableSDLEnhancedMode, "InputSources",
                                                               "SDLControllerEnhancedMode", false);
+  ControllerSettingWidgetBinder::BindWidgetToInputProfileBool(sif, m_ui.enableTouchPadAsPointer, "InputSources",
+                                                              "SDLTouchpadAsPointer", false);
+  ControllerSettingWidgetBinder::BindWidgetToInputProfileBool(sif, m_ui.enableSDLPS5PlayerLED, "InputSources",
+                                                              "SDLPS5PlayerLED", false);
   connect(m_ui.enableSDLSource, &QCheckBox::checkStateChanged, this,
           &ControllerGlobalSettingsWidget::updateSDLOptionsEnabled);
   connect(m_ui.ledSettings, &QToolButton::clicked, this, &ControllerGlobalSettingsWidget::ledSettingsClicked);
@@ -83,14 +87,7 @@ ControllerGlobalSettingsWidget::ControllerGlobalSettingsWidget(QWidget* parent, 
     m_ui.profileSettings = nullptr;
   }
 
-  if (dialog->isEditingGameSettings())
-  {
-    m_ui.mainLayout->removeWidget(m_ui.deviceListGroup);
-    delete m_ui.deviceList;
-    m_ui.deviceList = nullptr;
-    delete m_ui.deviceListGroup;
-    m_ui.deviceListGroup = nullptr;
-  }
+  m_ui.deviceList->setModel(g_emu_thread->getInputDeviceListModel());
 
   connect(m_ui.multitapMode, &QComboBox::currentIndexChanged, this, [this]() { emit bindingSetupChanged(); });
 
@@ -106,28 +103,6 @@ ControllerGlobalSettingsWidget::ControllerGlobalSettingsWidget(QWidget* parent, 
 
 ControllerGlobalSettingsWidget::~ControllerGlobalSettingsWidget() = default;
 
-void ControllerGlobalSettingsWidget::addDeviceToList(const QString& identifier, const QString& name)
-{
-  QListWidgetItem* item = new QListWidgetItem();
-  item->setText(QStringLiteral("%1: %2").arg(identifier).arg(name));
-  item->setData(Qt::UserRole, identifier);
-  m_ui.deviceList->addItem(item);
-}
-
-void ControllerGlobalSettingsWidget::removeDeviceFromList(const QString& identifier)
-{
-  const int count = m_ui.deviceList->count();
-  for (int i = 0; i < count; i++)
-  {
-    QListWidgetItem* item = m_ui.deviceList->item(i);
-    if (item->data(Qt::UserRole) != identifier)
-      continue;
-
-    delete m_ui.deviceList->takeItem(i);
-    break;
-  }
-}
-
 void ControllerGlobalSettingsWidget::ledSettingsClicked()
 {
   ControllerLEDSettingsDialog dialog(this, m_dialog);
@@ -137,8 +112,14 @@ void ControllerGlobalSettingsWidget::ledSettingsClicked()
 void ControllerGlobalSettingsWidget::updateSDLOptionsEnabled()
 {
   const bool enabled = m_ui.enableSDLSource->isChecked();
-  m_ui.enableSDLEnhancedMode->setEnabled(enabled);
-  m_ui.ledSettings->setEnabled(enabled);
+  if (m_ui.enableSDLEnhancedMode)
+    m_ui.enableSDLEnhancedMode->setEnabled(enabled);
+  if (m_ui.enableTouchPadAsPointer)
+    m_ui.enableTouchPadAsPointer->setEnabled(enabled);
+  if (m_ui.enableSDLPS5PlayerLED)
+    m_ui.enableSDLPS5PlayerLED->setEnabled(enabled);
+  if (m_ui.ledSettings)
+    m_ui.ledSettings->setEnabled(enabled);
 }
 
 ControllerLEDSettingsDialog::ControllerLEDSettingsDialog(QWidget* parent, ControllerSettingsWindow* dialog)
@@ -151,10 +132,6 @@ ControllerLEDSettingsDialog::ControllerLEDSettingsDialog(QWidget* parent, Contro
   linkButton(m_ui.SDL2LED, 2);
   linkButton(m_ui.SDL3LED, 3);
 
-  SettingsInterface* sif = dialog->getEditingSettingsInterface();
-
-  ControllerSettingWidgetBinder::BindWidgetToInputProfileBool(sif, m_ui.enableSDLPS5PlayerLED, "InputSources",
-                                                              "SDLPS5PlayerLED", false);
   connect(m_ui.buttonBox->button(QDialogButtonBox::Close), &QPushButton::clicked, this, &QDialog::accept);
 }
 

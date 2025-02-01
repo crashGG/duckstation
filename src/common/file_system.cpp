@@ -1067,7 +1067,7 @@ std::string Path::URLEncode(std::string_view str)
   {
     const char c = str[i];
     if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_' ||
-        c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')')
+        c == '.' || c == '~')
     {
       ret.push_back(c);
     }
@@ -1077,8 +1077,8 @@ std::string Path::URLEncode(std::string_view str)
 
       const unsigned char n1 = static_cast<unsigned char>(c) >> 4;
       const unsigned char n2 = static_cast<unsigned char>(c) & 0x0F;
-      ret.push_back((n1 >= 10) ? ('a' + (n1 - 10)) : ('0' + n1));
-      ret.push_back((n2 >= 10) ? ('a' + (n2 - 10)) : ('0' + n2));
+      ret.push_back((n1 >= 10) ? ('A' + (n1 - 10)) : ('0' + n1));
+      ret.push_back((n2 >= 10) ? ('A' + (n2 - 10)) : ('0' + n2));
     }
   }
 
@@ -1090,34 +1090,29 @@ std::string Path::URLDecode(std::string_view str)
   std::string ret;
   ret.reserve(str.length());
 
-  for (size_t i = 0, l = str.size(); i < l; i++)
+  for (size_t i = 0, l = str.size(); i < l;)
   {
-    const char c = str[i];
-    if (c == '+')
+    const char c = str[i++];
+    if (c == '%')
     {
-      ret.push_back(c);
-    }
-    else if (c == '%')
-    {
-      if ((i + 2) >= str.length())
+      if ((i + 2) > str.length())
         break;
 
-      const char clower = str[i + 1];
-      const char cupper = str[i + 2];
-      const unsigned char lower =
-        (clower >= '0' && clower <= '9') ?
-          static_cast<unsigned char>(clower - '0') :
-          ((clower >= 'a' && clower <= 'f') ?
-             static_cast<unsigned char>(clower - 'a') :
-             ((clower >= 'A' && clower <= 'F') ? static_cast<unsigned char>(clower - 'A') : 0));
-      const unsigned char upper =
-        (cupper >= '0' && cupper <= '9') ?
-          static_cast<unsigned char>(cupper - '0') :
-          ((cupper >= 'a' && cupper <= 'f') ?
-             static_cast<unsigned char>(cupper - 'a') :
-             ((cupper >= 'A' && cupper <= 'F') ? static_cast<unsigned char>(cupper - 'A') : 0));
-      const char dch = static_cast<char>(lower | (upper << 4));
-      ret.push_back(dch);
+      // return -1 which will be negative when or'ed with anything else, so it becomes invalid.
+      static constexpr auto to_nibble = [](char ch) -> int {
+        return (ch >= '0' && ch <= '9') ?
+                 static_cast<int>(ch - '0') :
+                 ((ch >= 'a' && ch <= 'f') ? (static_cast<int>(ch - 'a') + 0xa) :
+                                             ((ch >= 'A' && ch <= 'F') ? (static_cast<int>(ch - 'A') + 0xa) : -1));
+      };
+
+      const int upper = to_nibble(str[i++]);
+      const int lower = to_nibble(str[i++]);
+      const int dch = lower | (upper << 4);
+      if (dch < 0)
+        break;
+
+      ret.push_back(static_cast<char>(dch));
     }
     else
     {
@@ -1125,7 +1120,7 @@ std::string Path::URLDecode(std::string_view str)
     }
   }
 
-  return std::string(str);
+  return ret;
 }
 
 std::string Path::CreateFileURL(std::string_view path)
@@ -1611,42 +1606,50 @@ bool FileSystem::EnsureDirectoryExists(const char* path, bool recursive, Error* 
   return FileSystem::CreateDirectory(path, recursive, error);
 }
 
-bool FileSystem::RecursiveDeleteDirectory(const char* path)
+bool FileSystem::RecursiveDeleteDirectory(const char* path, Error* error)
 {
   FindResultsArray results;
   if (FindFiles(path, "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_FOLDERS | FILESYSTEM_FIND_HIDDEN_FILES, &results))
   {
     for (const FILESYSTEM_FIND_DATA& fd : results)
     {
-      if (fd.Attributes & FILESYSTEM_FILE_ATTRIBUTE_DIRECTORY)
+      // don't recurse into symlinked directories, just remove the link itself
+      if ((fd.Attributes & (FILESYSTEM_FILE_ATTRIBUTE_DIRECTORY | FILESYSTEM_FILE_ATTRIBUTE_LINK)) ==
+          FILESYSTEM_FILE_ATTRIBUTE_DIRECTORY)
       {
-        if (!RecursiveDeleteDirectory(fd.FileName.c_str()))
+        if (!RecursiveDeleteDirectory(fd.FileName.c_str(), error))
           return false;
       }
       else
       {
-        if (!DeleteFile(fd.FileName.c_str()))
+        if (!DeleteFile(fd.FileName.c_str(), error))
+        {
+          Error::AddPrefixFmt(error, "Failed to delete {}: ", fd.FileName);
           return false;
+        }
       }
     }
   }
 
-  return DeleteDirectory(path);
+  return DeleteDirectory(path, error);
 }
 
-bool FileSystem::CopyFilePath(const char* source, const char* destination, bool replace)
+bool FileSystem::CopyFilePath(const char* source, const char* destination, bool replace, Error* error)
 {
 #ifndef _WIN32
   // TODO: There's technically a race here between checking and opening the file..
   // But fopen doesn't specify any way to say "don't create if it exists"...
   if (!replace && FileExists(destination))
+  {
+    Error::SetStringView(error, "File already exists.");
     return false;
+  }
 
-  auto in_fp = OpenManagedCFile(source, "rb");
+  auto in_fp = OpenManagedCFile(source, "rb", error);
   if (!in_fp)
     return false;
 
-  auto out_fp = OpenManagedCFile(destination, "wb");
+  auto out_fp = OpenManagedCFile(destination, "wb", error);
   if (!out_fp)
     return false;
 
@@ -1657,6 +1660,7 @@ bool FileSystem::CopyFilePath(const char* source, const char* destination, bool 
     if ((bytes_in == 0 && !std::feof(in_fp.get())) ||
         (bytes_in > 0 && std::fwrite(buf, 1, bytes_in, out_fp.get()) != bytes_in))
     {
+      Error::SetErrno(error, "fread() or fwrite() failed: ", errno);
       out_fp.reset();
       DeleteFile(destination);
       return false;
@@ -1665,6 +1669,7 @@ bool FileSystem::CopyFilePath(const char* source, const char* destination, bool 
 
   if (std::fflush(out_fp.get()) != 0)
   {
+    Error::SetErrno(error, "fflush() failed: ", errno);
     out_fp.reset();
     DeleteFile(destination);
     return false;
@@ -1672,7 +1677,11 @@ bool FileSystem::CopyFilePath(const char* source, const char* destination, bool 
 
   return true;
 #else
-  return CopyFileW(GetWin32Path(source).c_str(), GetWin32Path(destination).c_str(), !replace);
+  if (CopyFileW(GetWin32Path(source).c_str(), GetWin32Path(destination).c_str(), !replace))
+    return true;
+
+  Error::SetWin32(error, "CopyFileW() failed(): ", GetLastError());
+  return false;
 #endif
 }
 
@@ -2156,17 +2165,32 @@ bool FileSystem::CreateDirectory(const char* Path, bool Recursive, Error* error)
 bool FileSystem::DeleteFile(const char* path, Error* error)
 {
   const std::wstring wpath = GetWin32Path(path);
+
+  // Need to handle both links/junctions and files as per unix.
   const DWORD fileAttributes = GetFileAttributesW(wpath.c_str());
-  if (fileAttributes == INVALID_FILE_ATTRIBUTES || fileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+  if (fileAttributes == INVALID_FILE_ATTRIBUTES ||
+      ((fileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == FILE_ATTRIBUTE_DIRECTORY))
   {
     Error::SetStringView(error, "File does not exist.");
     return false;
   }
 
-  if (!DeleteFileW(wpath.c_str()))
+  // if it's a junction/symlink, we need to use RemoveDirectory() instead
+  if (fileAttributes & FILE_ATTRIBUTE_DIRECTORY)
   {
-    Error::SetWin32(error, "DeleteFileW() failed: ", GetLastError());
-    return false;
+    if (!RemoveDirectoryW(wpath.c_str()))
+    {
+      Error::SetWin32(error, "RemoveDirectoryW() failed: ", GetLastError());
+      return false;
+    }
+  }
+  else
+  {
+    if (!DeleteFileW(wpath.c_str()))
+    {
+      Error::SetWin32(error, "DeleteFileW() failed: ", GetLastError());
+      return false;
+    }
   }
 
   return true;
@@ -2186,10 +2210,23 @@ bool FileSystem::RenamePath(const char* old_path, const char* new_path, Error* e
   return true;
 }
 
-bool FileSystem::DeleteDirectory(const char* path)
+bool FileSystem::DeleteDirectory(const char* path, Error* error)
 {
   const std::wstring wpath = GetWin32Path(path);
-  return RemoveDirectoryW(wpath.c_str());
+  const DWORD fileAttributes = GetFileAttributesW(wpath.c_str());
+  if (fileAttributes == INVALID_FILE_ATTRIBUTES || !(fileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+  {
+    Error::SetStringView(error, "File does not exist.");
+    return false;
+  }
+
+  if (!RemoveDirectoryW(wpath.c_str()))
+  {
+    Error::SetWin32(error, "RemoveDirectoryW() failed: ", GetLastError());
+    return false;
+  }
+
+  return true;
 }
 
 std::string FileSystem::GetProgramPath()
@@ -2273,10 +2310,10 @@ bool FileSystem::SetPathCompression(const char* path, bool enable)
 
 #elif !defined(__ANDROID__)
 
-static u32 TranslateStatAttributes(struct stat& st)
+static u32 TranslateStatAttributes(struct stat& st, struct stat& st_link)
 {
   return (S_ISDIR(st.st_mode) ? FILESYSTEM_FILE_ATTRIBUTE_DIRECTORY : 0) |
-         (S_ISLNK(st.st_mode) ? FILESYSTEM_FILE_ATTRIBUTE_LINK : 0);
+         (S_ISLNK(st_link.st_mode) ? FILESYSTEM_FILE_ATTRIBUTE_LINK : 0);
 }
 
 static u32 RecursiveFindFiles(const char* OriginPath, const char* ParentPath, const char* Path, const char* Pattern,
@@ -2330,12 +2367,12 @@ static u32 RecursiveFindFiles(const char* OriginPath, const char* ParentPath, co
     else
       full_path = fmt::format("{}/{}", OriginPath, pDirEnt->d_name);
 
-    struct stat sDir;
-    if (stat(full_path.c_str(), &sDir) < 0)
+    struct stat sDir, sDirLink;
+    if (stat(full_path.c_str(), &sDir) < 0 || lstat(full_path.c_str(), &sDirLink) < 0)
       continue;
 
     FILESYSTEM_FIND_DATA outData;
-    outData.Attributes = TranslateStatAttributes(sDir);
+    outData.Attributes = TranslateStatAttributes(sDir, sDirLink);
 
     if (S_ISDIR(sDir.st_mode))
     {
@@ -2478,18 +2515,18 @@ bool FileSystem::StatFile(std::FILE* fp, struct stat* st, Error* error)
 bool FileSystem::StatFile(const char* path, FILESYSTEM_STAT_DATA* sd, Error* error)
 {
   // stat file
-  struct stat sysStatData;
-  if (stat(path, &sysStatData) < 0)
+  struct stat ssd, ssd_link;
+  if (stat(path, &ssd) < 0 || lstat(path, &ssd_link) < 0)
   {
     Error::SetErrno(error, "stat() failed: ", errno);
     return false;
   }
 
   // parse attributes
-  sd->CreationTime = sysStatData.st_ctime;
-  sd->ModificationTime = sysStatData.st_mtime;
-  sd->Attributes = TranslateStatAttributes(sysStatData);
-  sd->Size = S_ISREG(sysStatData.st_mode) ? sysStatData.st_size : 0;
+  sd->CreationTime = ssd.st_ctime;
+  sd->ModificationTime = ssd.st_mtime;
+  sd->Attributes = TranslateStatAttributes(ssd, ssd_link);
+  sd->Size = S_ISREG(ssd.st_mode) ? ssd.st_size : 0;
 
   // ok
   return true;
@@ -2505,18 +2542,18 @@ bool FileSystem::StatFile(std::FILE* fp, FILESYSTEM_STAT_DATA* sd, Error* error)
   }
 
   // stat file
-  struct stat sysStatData;
-  if (fstat(fd, &sysStatData) != 0)
+  struct stat ssd;
+  if (fstat(fd, &ssd) != 0)
   {
     Error::SetErrno(error, "stat() failed: ", errno);
     return false;
   }
 
   // parse attributes
-  sd->CreationTime = sysStatData.st_ctime;
-  sd->ModificationTime = sysStatData.st_mtime;
-  sd->Attributes = TranslateStatAttributes(sysStatData);
-  sd->Size = S_ISREG(sysStatData.st_mode) ? sysStatData.st_size : 0;
+  sd->CreationTime = ssd.st_ctime;
+  sd->ModificationTime = ssd.st_mtime;
+  sd->Attributes = TranslateStatAttributes(ssd, ssd);
+  sd->Size = S_ISREG(ssd.st_mode) ? ssd.st_size : 0;
 
   return true;
 }
@@ -2655,8 +2692,8 @@ bool FileSystem::CreateDirectory(const char* path, bool recursive, Error* error)
 
 bool FileSystem::DeleteFile(const char* path, Error* error)
 {
-  struct stat sysStatData;
-  if (stat(path, &sysStatData) != 0 || S_ISDIR(sysStatData.st_mode))
+  struct stat sd;
+  if (lstat(path, &sd) != 0 || (S_ISDIR(sd.st_mode) && !S_ISLNK(sd.st_mode)))
   {
     Error::SetStringView(error, "File does not exist.");
     return false;
@@ -2675,21 +2712,38 @@ bool FileSystem::RenamePath(const char* old_path, const char* new_path, Error* e
 {
   if (rename(old_path, new_path) != 0)
   {
-    const int err = errno;
-    Error::SetErrno(error, "rename() failed: ", err);
+    Error::SetErrno(error, "rename() failed: ", errno);
     return false;
   }
 
   return true;
 }
 
-bool FileSystem::DeleteDirectory(const char* path)
+bool FileSystem::DeleteDirectory(const char* path, Error* error)
 {
-  struct stat sysStatData;
-  if (stat(path, &sysStatData) != 0 || !S_ISDIR(sysStatData.st_mode))
+  struct stat sd;
+  if (stat(path, &sd) != 0 || !S_ISDIR(sd.st_mode))
     return false;
 
-  return (rmdir(path) == 0);
+  // if it's a symlink, use unlink() instead
+  if (S_ISLNK(sd.st_mode))
+  {
+    if (unlink(path) != 0)
+    {
+      Error::SetErrno(error, "unlink() failed: ", errno);
+      return false;
+    }
+  }
+  else
+  {
+    if (rmdir(path) != 0)
+    {
+      Error::SetErrno(error, "rmdir() failed: ", errno);
+      return false;
+    }
+  }
+
+  return true;
 }
 
 std::string FileSystem::GetProgramPath()

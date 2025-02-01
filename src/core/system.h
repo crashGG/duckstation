@@ -31,10 +31,6 @@ class GPUTexture;
 class INISettingsInterface;
 class MediaCapture;
 
-namespace BIOS {
-struct ImageInfo;
-} // namespace BIOS
-
 namespace GameDatabase {
 struct Entry;
 }
@@ -144,7 +140,9 @@ std::string GetExecutableNameForImage(CDImage* cdi, bool strip_subdirectories);
 bool ReadExecutableFromImage(CDImage* cdi, std::string* out_executable_name, std::vector<u8>* out_executable_data);
 
 std::string GetGameHashId(GameHash hash);
-bool GetGameDetailsFromImage(CDImage* cdi, std::string* out_id, GameHash* out_hash);
+bool GetGameDetailsFromImage(CDImage* cdi, std::string* out_id = nullptr, GameHash* out_hash = nullptr,
+                             std::string* out_executable_name = nullptr,
+                             std::vector<u8>* out_executable_data = nullptr);
 GameHash GetGameHashFromFile(const char* path);
 GameHash GetGameHashFromBuffer(const std::string_view filename, const std::span<const u8> data);
 DiscRegion GetRegionForSerial(const std::string_view serial);
@@ -165,7 +163,6 @@ std::unique_ptr<INISettingsInterface> GetGameSettingsInterface(const GameDatabas
 std::string GetInputProfilePath(std::string_view name);
 
 State GetState();
-void SetState(State new_state);
 bool IsRunning();
 bool IsPaused();
 bool IsShutdown();
@@ -173,6 +170,7 @@ bool IsValid();
 bool IsValidOrInitializing();
 bool IsExecuting();
 bool IsReplayingGPUDump();
+size_t GetGPUDumpFrameCount();
 
 bool IsStartupCancelled();
 void CancelPendingStartup();
@@ -225,12 +223,11 @@ const std::string& GetExeOverride();
 const GameDatabase::Entry* GetGameDatabaseEntry();
 GameHash GetGameHash();
 bool IsRunningUnknownGame();
+bool IsUsingPS2BIOS();
 BootMode GetBootMode();
 
 /// Returns the time elapsed in the current play session.
 u64 GetSessionPlayedTime();
-
-const BIOS::ImageInfo* GetBIOSImageInfo();
 
 void FormatLatencyStats(SmallStringBase& str);
 
@@ -260,10 +257,17 @@ bool BootSystem(SystemBootParameters parameters, Error* error);
 void PauseSystem(bool paused);
 void ResetSystem();
 
+/// Returns the maximum size of a save state, considering the current configuration.
+size_t GetMaxSaveStateSize();
+
 /// Loads state from the specified path.
-bool LoadState(const char* path, Error* error, bool save_undo_state);
+bool LoadState(const char* path, Error* error, bool save_undo_state, bool force_update_display);
 bool SaveState(std::string path, Error* error, bool backup_existing_save, bool ignore_memcard_busy);
 bool SaveResumeState(Error* error);
+
+/// State data access, use with care as the media path is not updated.
+bool LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Error* error, bool update_display);
+bool SaveStateDataToBuffer(std::span<u8> data, size_t* data_size, Error* error);
 
 /// Runs the VM until the CPU execution is canceled.
 void Execute();
@@ -354,6 +358,9 @@ std::string GetCheatFileName();
 /// Powers off the system, optionally saving the resume state.
 void ShutdownSystem(bool save_resume_state);
 
+/// Waits for all asynchronous state saves to complete.
+void FlushSaveStates();
+
 /// Returns true if an undo load state exists.
 bool CanUndoLoadState();
 
@@ -380,13 +387,13 @@ std::string GetGameMemoryCardPath(std::string_view serial, std::string_view path
                                   MemoryCardType* out_type = nullptr);
 
 /// Returns intended output volume considering fast forwarding.
-s32 GetAudioOutputVolume();
+u8 GetAudioOutputVolume();
 void UpdateVolume();
 
 /// Saves a screenshot to the specified file. If no file name is provided, one will be generated automatically.
-bool SaveScreenshot(const char* path = nullptr, DisplayScreenshotMode mode = g_settings.display_screenshot_mode,
+void SaveScreenshot(const char* path = nullptr, DisplayScreenshotMode mode = g_settings.display_screenshot_mode,
                     DisplayScreenshotFormat format = g_settings.display_screenshot_format,
-                    u8 quality = g_settings.display_screenshot_quality, bool compress_on_thread = true);
+                    u8 quality = g_settings.display_screenshot_quality);
 
 /// Starts/stops GPU dump/trace recording.
 bool StartRecordingGPUDump(const char* path = nullptr, u32 num_frames = 1);
@@ -400,7 +407,6 @@ MediaCapture* GetMediaCapture();
 
 /// Media capture (video and/or audio). If no path is provided, one will be generated automatically.
 bool StartMediaCapture(std::string path = {});
-bool StartMediaCapture(std::string path, bool capture_video, bool capture_audio);
 void StopMediaCapture();
 
 /// Toggle Widescreen Hack and Aspect Ratio
@@ -413,18 +419,18 @@ void ToggleSoftwareRendering();
 /// If the scale is set to 0, the internal resolution will be used, otherwise it is treated as a multiplier to 1x.
 void RequestDisplaySize(float scale = 0.0f);
 
-/// Renders the display.
-bool PresentDisplay(bool explicit_present, u64 present_time);
-void InvalidateDisplay();
-
 //////////////////////////////////////////////////////////////////////////
 // Memory Save States (Rewind and Runahead)
 //////////////////////////////////////////////////////////////////////////
 void CalculateRewindMemoryUsage(u32 num_saves, u32 resolution_scale, u64* ram_usage, u64* vram_usage);
-void ClearMemorySaveStates();
+void ClearMemorySaveStates(bool reallocate_resources, bool recycle_textures);
 void SetRunaheadReplayFlag();
 
-/// Shared socket multiplexer, used by PINE/GDB/etc.
+/// Asynchronous work tasks, complete on worker thread.
+void QueueAsyncTask(std::function<void()> function);
+void WaitForAllAsyncTasks();
+
+/// Shared socket multiplexer.
 SocketMultiplexer* GetSocketMultiplexer();
 void ReleaseSocketMultiplexer();
 

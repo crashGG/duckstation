@@ -1,12 +1,12 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "cdrom.h"
 #include "cdrom_async_reader.h"
 #include "cdrom_subq_replacement.h"
 #include "dma.h"
+#include "fullscreen_ui.h"
 #include "host.h"
-#include "host_interface_progress_callback.h"
 #include "interrupt_controller.h"
 #include "settings.h"
 #include "spu.h"
@@ -70,6 +70,7 @@ enum : u32
   CDDA_REPORT_START_DELAY = 60, // 60 frames
   MINIMUM_INTERRUPT_DELAY = 1000,
   INTERRUPT_DELAY_CYCLES = 500,
+  MISSED_INT1_DELAY_CYCLES = 5000, // See CheckForSectorBufferReadComplete().
 };
 
 static constexpr u8 INTERRUPT_REGISTER_MASK = 0x1F;
@@ -310,6 +311,7 @@ static void SendAsyncErrorResponse(u8 stat_bits = STAT_ERROR, u8 reason = 0x80);
 static void UpdateStatusRegister();
 static void UpdateInterruptRequest();
 static bool HasPendingDiscEvent();
+static bool CanUseReadSpeedup();
 
 static TickCount GetAckDelayForCommand(Command command);
 static TickCount GetTicksForSpinUp();
@@ -999,7 +1001,7 @@ bool CDROM::PrecacheMedia()
     return false;
   }
 
-  HostInterfaceProgressCallback callback;
+  LoadingScreenProgressCallback callback;
   if (!s_reader.Precache(&callback))
   {
     Host::AddOSDMessage(TRANSLATE_STR("OSDMessage", "Precaching CD image failed, it may be unreliable."),
@@ -1468,6 +1470,12 @@ bool CDROM::HasPendingDiscEvent()
   return (s_state.drive_event.IsActive() && s_state.drive_event.GetTicksUntilNextExecution() <= 0);
 }
 
+bool CDROM::CanUseReadSpeedup()
+{
+  // Only use read speedup in 2X mode and when we're not playing/filtering XA.
+  return (!s_state.mode.cdda && !s_state.mode.xa_enable && s_state.mode.double_speed);
+}
+
 TickCount CDROM::GetAckDelayForCommand(Command command)
 {
   if (command == Command::Init)
@@ -1502,7 +1510,7 @@ TickCount CDROM::GetTicksForRead()
 {
   const TickCount tps = System::GetTicksPerSecond();
 
-  if (g_settings.cdrom_read_speedup > 1 && !s_state.mode.cdda && !s_state.mode.xa_enable && s_state.mode.double_speed)
+  if (g_settings.cdrom_read_speedup > 1 && CanUseReadSpeedup())
     return tps / (150 * g_settings.cdrom_read_speedup);
 
   return s_state.mode.double_speed ? (tps / 150) : (tps / 75);
@@ -1560,7 +1568,7 @@ u32 CDROM::GetSectorsPerTrack(CDImage::LBA lba)
 TickCount CDROM::GetTicksForSeek(CDImage::LBA new_lba, bool ignore_speed_change)
 {
   if (g_settings.cdrom_seek_speedup == 0)
-    return System::ScaleTicksToOverclock(MIN_SEEK_TICKS);
+    return System::ScaleTicksToOverclock(g_settings.cdrom_max_speedup_cycles);
 
   u32 ticks = 0;
 
@@ -1657,6 +1665,9 @@ TickCount CDROM::GetTicksForPause()
 {
   if (!IsReadingOrPlaying())
     return 7000;
+
+  if (g_settings.cdrom_read_speedup == 0 && CanUseReadSpeedup())
+    return System::ScaleTicksToOverclock(g_settings.cdrom_max_speedup_cycles);
 
   const u32 sectors_per_track = GetSectorsPerTrack(s_state.current_lba);
   const TickCount ticks_per_read = GetTicksForRead();
@@ -3810,7 +3821,7 @@ ALWAYS_INLINE_RELEASE void CDROM::ProcessCDDASector(const u8* raw_sector, const 
         }
 
         const u8 channel = subq.absolute_second_bcd & 1u;
-        const s16 peak_volume = std::min<s16>(GetPeakVolume(raw_sector, channel), 32767);
+        const s16 peak_volume = GetPeakVolume(raw_sector, channel);
         const u16 peak_value = (ZeroExtend16(channel) << 15) | peak_volume;
 
         s_state.async_response_fifo.Push(Truncate8(peak_value));      // peak low
@@ -3883,6 +3894,18 @@ void CDROM::CheckForSectorBufferReadComplete()
   s_state.request_register.BFRD = (s_state.request_register.BFRD && sb.position < sb.size);
   s_state.status.DRQSTS = s_state.request_register.BFRD;
 
+  // Maximum/immediate read speedup. Wait for the data portion of the sector to be read.
+  if (s_state.drive_state == DriveState::Reading &&
+      sb.position >=
+        (s_state.mode.read_raw_sector ? (MODE2_HEADER_SIZE + DATA_SECTOR_OUTPUT_SIZE) : DATA_SECTOR_OUTPUT_SIZE) &&
+      CanUseReadSpeedup() && g_settings.cdrom_read_speedup == 0)
+  {
+    const TickCount remaining_time = s_state.drive_event.GetTicksUntilNextExecution();
+    const TickCount instant_ticks = System::ScaleTicksToOverclock(g_settings.cdrom_max_speedup_cycles);
+    if (remaining_time > instant_ticks)
+      s_state.drive_event.Schedule(instant_ticks);
+  }
+
   // Buffer complete?
   if (sb.position >= sb.size)
   {
@@ -3896,12 +3919,13 @@ void CDROM::CheckForSectorBufferReadComplete()
   // Otherwise, if games read the header then data out as two separate transfers (which is typical), they'll
   // get the header for one sector, and the header for the next in the second transfer.
   SectorBuffer& next_sb = s_state.sector_buffers[s_state.current_write_sector_buffer];
-  if (next_sb.position == 0 && next_sb.size > 0 && !HasPendingAsyncInterrupt())
+  if (next_sb.position == 0 && next_sb.size > 0 && !HasPendingAsyncInterrupt() && IsReading())
   {
     DEV_LOG("Sending additional INT1 for missed sector in buffer {}", s_state.current_write_sector_buffer);
     s_state.async_response_fifo.Push(s_state.secondary_status.bits);
     s_state.pending_async_interrupt = static_cast<u8>(Interrupt::DataReady);
-    s_state.async_interrupt_event.Schedule(INTERRUPT_DELAY_CYCLES);
+    s_state.async_interrupt_event.Schedule(
+      std::min<TickCount>(s_state.drive_event.GetTicksUntilNextExecution(), MISSED_INT1_DELAY_CYCLES));
   }
 }
 

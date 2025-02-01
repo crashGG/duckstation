@@ -87,8 +87,10 @@ void InputBindingWidget::updateText()
     // fix up accelerators, and if it's too long, ellipsise it
     if (binding_text.contains('&'))
       binding_text = binding_text.replace(QStringLiteral("&"), QStringLiteral("&&"));
-    if (binding_text.length() > 35)
-      binding_text = binding_text.left(35).append(QStringLiteral("..."));
+
+    const int max_length = (width() < 300) ? 35 : 60;
+    if (binding_text.length() > max_length)
+      binding_text = binding_text.left(max_length).append(QStringLiteral("..."));
     setText(binding_text);
     setToolTip(QStringLiteral("%1\n\n%2\n%3").arg(binding_text).arg(tr(help_text)).arg(tr(help_clear_text)));
   }
@@ -446,7 +448,7 @@ void InputVibrationBindingWidget::onClicked()
   const QString full_key(
     QStringLiteral("%1/%2").arg(QString::fromStdString(m_section_name)).arg(QString::fromStdString(m_key_name)));
   const QString current(QString::fromStdString(m_binding));
-  QStringList input_options(m_dialog->getVibrationMotors());
+  QStringList input_options = g_emu_thread->getInputDeviceListModel()->getVibrationMotorList();
   if (!current.isEmpty() && input_options.indexOf(current) < 0)
   {
     input_options.append(current);

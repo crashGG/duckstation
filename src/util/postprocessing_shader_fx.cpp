@@ -7,6 +7,7 @@
 #include "shadergen.h"
 
 // TODO: Remove me
+#include "core/gpu_thread.h"
 #include "core/host.h"
 #include "core/settings.h"
 
@@ -72,7 +73,7 @@ static std::tuple<std::unique_ptr<reshadefx::codegen>, GPUShaderLanguage> Create
   }
 
   // Should have a GPU device and be on the GPU thread.
-  Assert(g_gpu_device);
+  Assert(GPUThread::IsOnThread() && g_gpu_device);
 
   const bool debug_info = g_gpu_device->IsDebugDevice();
   const RenderAPI rapi = g_gpu_device->GetRenderAPI();
@@ -1257,7 +1258,7 @@ bool PostProcessing::ReShadeFXShader::CreatePasses(GPUTexture::Format backbuffer
 
         DEV_LOG("Pass {} Texture {} => {}", pi.name, tb.texture_name, sampler.texture_id);
 
-        sampler.sampler = GetSampler(MapSampler(sb));
+        sampler.sampler = g_gpu_device->GetSampler(MapSampler(sb));
         if (!sampler.sampler)
         {
           Error::SetString(error, "Failed to create sampler.");
@@ -1302,7 +1303,7 @@ GPUTexture* PostProcessing::ReShadeFXShader::GetTextureByID(TextureID id, GPUTex
     }
     else if (id == INPUT_DEPTH_TEXTURE)
     {
-      return input_depth ? input_depth : GetDummyTexture();
+      return input_depth ? input_depth : g_gpu_device->GetEmptyTexture();
     }
     else if (id == OUTPUT_COLOR_TEXTURE)
     {
@@ -1468,14 +1469,18 @@ bool PostProcessing::ReShadeFXShader::ResizeOutput(GPUTexture::Format format, u3
 GPUDevice::PresentResult PostProcessing::ReShadeFXShader::Apply(GPUTexture* input_color, GPUTexture* input_depth,
                                                                 GPUTexture* final_target, GSVector4i final_rect,
                                                                 s32 orig_width, s32 orig_height, s32 native_width,
-                                                                s32 native_height, u32 target_width, u32 target_height)
+                                                                s32 native_height, u32 target_width, u32 target_height,
+                                                                float time)
 {
-  GL_PUSH_FMT("PostProcessingShaderFX {}", m_name);
+  GL_SCOPE_FMT("PostProcessingShaderFX {}", m_name);
 
   m_frame_count++;
 
   // Reshade always draws at full size.
   g_gpu_device->SetViewportAndScissor(GSVector4i(0, 0, target_width, target_height));
+
+  // Reshade timer variable is in milliseconds.
+  time *= 1000.0f;
 
   if (m_uniforms_size > 0)
   {
@@ -1508,8 +1513,7 @@ GPUDevice::PresentResult PostProcessing::ReShadeFXShader::Apply(GPUTexture* inpu
 
         case SourceOptionType::Timer:
         {
-          const float value = static_cast<float>(PostProcessing::GetTimer().GetTimeMilliseconds());
-          std::memcpy(dst, &value, sizeof(value));
+          std::memcpy(dst, &time, sizeof(time));
         }
         break;
 
@@ -1760,10 +1764,7 @@ GPUDevice::PresentResult PostProcessing::ReShadeFXShader::Apply(GPUTexture* inpu
       // Special case: drawing to final buffer.
       const GPUDevice::PresentResult pres = g_gpu_device->BeginPresent(g_gpu_device->GetMainSwapChain());
       if (pres != GPUDevice::PresentResult::OK)
-      {
-        GL_POP();
         return pres;
-      }
     }
     else
     {
@@ -1816,7 +1817,6 @@ GPUDevice::PresentResult PostProcessing::ReShadeFXShader::Apply(GPUTexture* inpu
   for (u32 i = 0; i < GPUDevice::MAX_TEXTURE_SAMPLERS; i++)
     g_gpu_device->SetTextureSampler(i, nullptr, nullptr);
 
-  GL_POP();
   m_frame_timer.Reset();
   return GPUDevice::PresentResult::OK;
 }

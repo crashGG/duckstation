@@ -45,9 +45,7 @@ private Q_SLOTS:
   void refreshDirectoryList();
   void resizeDirectoryListColumns();
 
-  void onInputDevicesEnumerated(const std::vector<std::pair<std::string, std::string>>& devices);
-  void onInputDeviceConnected(const std::string& identifier, const std::string& device_name);
-  void onInputDeviceDisconnected(const std::string& identifier);
+  void doMultipleDeviceAutomaticBinding(u32 port, QLabel* update_label);
 
 protected:
   void resizeEvent(QResizeEvent* event);
@@ -76,12 +74,11 @@ private:
 
   void addPathToTable(const std::string& path, bool recursive);
 
+  QString findCurrentDeviceForPort(u32 port) const;
   void openAutomaticMappingMenu(u32 port, QLabel* update_label);
   void doDeviceAutomaticBinding(u32 port, QLabel* update_label, const QString& device);
 
   Ui::SetupWizardDialog m_ui;
 
   std::array<QLabel*, Page_Count> m_page_labels;
-
-  std::vector<std::pair<std::string, std::string>> m_device_list;
 };

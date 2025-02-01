@@ -17,6 +17,7 @@
 #include "common/file_system.h"
 #include "common/log.h"
 #include "common/path.h"
+#include "common/settings_interface.h"
 #include "common/small_string.h"
 #include "common/string_util.h"
 #include "common/zip_helpers.h"
@@ -520,6 +521,7 @@ Cheats::CodeInfoList Cheats::GetCodeInfoList(const std::string_view serial, std:
                     });
 
   if (sort_by_name)
+  {
     std::sort(ret.begin(), ret.end(), [](const CodeInfo& lhs, const CodeInfo& rhs) {
       // ungrouped cheats go together first
       if (const int lhs_group = static_cast<int>(lhs.name.find('\\') != std::string::npos),
@@ -529,8 +531,21 @@ Cheats::CodeInfoList Cheats::GetCodeInfoList(const std::string_view serial, std:
         return (lhs_group < rhs_group);
       }
 
+      // sort special characters first
+      static constexpr auto is_special = [](char ch) {
+        return !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                 (ch >= 0x0A && ch <= 0x0D));
+      };
+      if (const int lhs_is_special = static_cast<int>(!lhs.name.empty() && is_special(lhs.name.front())),
+          rhs_is_special = static_cast<int>(!rhs.name.empty() && is_special(rhs.name.front()));
+          lhs_is_special != rhs_is_special)
+      {
+        return (lhs_is_special > rhs_is_special);
+      }
+
       return lhs.name < rhs.name;
     });
+  }
 
   return ret;
 }
@@ -572,6 +587,8 @@ std::string Cheats::FormatCodeForFile(const CodeInfo& code)
   fmt::memory_buffer buf;
   auto appender = std::back_inserter(buf);
   fmt::format_to(appender, "[{}]\n", code.name);
+  if (!code.author.empty())
+    fmt::format_to(appender, "Author = {}\n", code.author);
   if (!code.description.empty())
     fmt::format_to(appender, "Description = {}\n", code.description);
   fmt::format_to(appender, "Type = {}\n", GetTypeName(code.type));
@@ -586,7 +603,14 @@ std::string Cheats::FormatCodeForFile(const CodeInfo& code)
     fmt::format_to(appender, "OptionRange = {}:{}\n", code.option_range_start, code.option_range_end);
   }
 
-  fmt::format_to(appender, "{}\n\n", code.body, code.body.ends_with('\n') ? "\n" : "");
+  // remove trailing whitespace
+  std::string_view code_body = code.body;
+  while (!code_body.empty() && StringUtil::IsWhitespace(code_body.back()))
+    code_body = code_body.substr(0, code_body.length() - 1);
+  if (!code_body.empty())
+    buf.append(code_body);
+
+  buf.push_back('\n');
   return std::string(buf.begin(), buf.end());
 }
 
@@ -633,8 +657,10 @@ bool Cheats::UpdateCodeInFile(const char* path, const std::string_view name, con
   {
     const std::string code_body = FormatCodeForFile(*code);
     file_contents.reserve(file_contents.length() + 1 + code_body.length());
-    if (!file_contents.empty() && file_contents.back() != '\n')
-      file_contents.push_back('\n');
+    while (!file_contents.empty() && StringUtil::IsWhitespace(file_contents.back()))
+      file_contents.pop_back();
+    if (!file_contents.empty())
+      file_contents.append("\n\n");
     file_contents.append(code_body);
   }
 
@@ -689,8 +715,10 @@ bool Cheats::SaveCodesToFile(const char* path, const CodeInfoList& codes, Error*
     {
       const std::string code_body = FormatCodeForFile(code);
       file_contents.reserve(file_contents.length() + 1 + code_body.length());
-      if (!file_contents.empty() && file_contents.back() != '\n')
-        file_contents.push_back('\n');
+      while (!file_contents.empty() && StringUtil::IsWhitespace(file_contents.back()))
+        file_contents.pop_back();
+      if (!file_contents.empty())
+        file_contents.append("\n\n");
       file_contents.append(code_body);
     }
   }
@@ -1507,14 +1535,8 @@ bool Cheats::ExportCodesToFile(std::string path, const CodeInfoList& codes, Erro
 
   for (const CodeInfo& code : codes)
   {
-    std::string code_body = FormatCodeForFile(code);
-
-    // ensure there's at least two newlines of space between each code
-    const size_t newline_len = code_body.ends_with("\n\n") ? 0 : (code_body.ends_with("\n") ? 1 : 2);
-    for (size_t i = 0; i < newline_len; i++)
-      code_body.push_back('\n');
-
-    if (std::fwrite(code_body.data(), code_body.length(), 1, fp.get()) != 1)
+    const std::string code_body = FormatCodeForFile(code);
+    if (std::fwrite(code_body.data(), code_body.length(), 1, fp.get()) != 1 || std::fputc('\n', fp.get()) == EOF)
     {
       Error::SetErrno(error, "fwrite() failed: ", errno);
       FileSystem::DiscardAtomicRenamedFile(fp);
@@ -2110,7 +2132,7 @@ std::unique_ptr<Cheats::GamesharkCheatCode> Cheats::GamesharkCheatCode::Parse(Me
     std::optional<u32> second;
     if (next.find('?') != std::string_view::npos)
     {
-      u8 option_bitpos, option_bitcount;
+      u8 option_bitpos = 0, option_bitcount = 0;
       second = ParseHexOptionMask(next, &option_bitpos, &option_bitcount);
       if (second.has_value())
       {
@@ -2797,6 +2819,7 @@ void Cheats::GamesharkCheatCode::Apply() const
         const u8 cht_reg_no2 = Truncate8((inst.address & 0xFF00u) >> 8);
         const u8 cht_reg_no3 = Truncate8(inst.value32 & 0xFFu);
         const u8 sub_type = Truncate8((inst.address & 0xFF0000u) >> 16);
+        const u16 cht_offset = Truncate16((inst.value32 & 0xFFFF0000u) >> 16);
 
         switch (sub_type)
         {
@@ -2825,6 +2848,23 @@ void Cheats::GamesharkCheatCode::Apply() const
             // cht_register[cht_reg_no1]
             cht_register[cht_reg_no1] = DoMemoryRead<u8>(cht_register[cht_reg_no2] + poke_value);
             break;
+          case 0x07: // Write the u8 poke_value to a specific index of a single array in a series of consecutive arrays
+            // This cheat type requires a separate cheat to set up 4 consecutive cht_arrays before this will work
+            // cht_register[cht_reg_no1] = the base address of the first element of the first array
+            // cht_register[cht_reg_no1+1] = the array size (basically the address diff between the start of each array)
+            // cht_register[cht_reg_no1+2] = the index of which array in the series to poke (this must be greater than
+            // 0) cht_register[cht_reg_no1+3] must == 0xD0D0 to ensure it only pokes when the above cht_regs have been
+            // set
+            //                                     (safety valve)
+            // cht_offset = the index of the individual array to change (so must be 0 to cht_register[cht_reg_no1+1])
+            if ((cht_reg_no1 <= (std::size(cht_register) - 4)) && cht_register[cht_reg_no1 + 3] == 0xD0D0 &&
+                cht_register[cht_reg_no1 + 2] > 0 && cht_register[cht_reg_no1 + 1] >= cht_offset)
+            {
+              DoMemoryWrite<u8>((cht_register[cht_reg_no1] - cht_register[cht_reg_no1 + 1]) +
+                                  (cht_register[cht_reg_no1 + 1] * cht_register[cht_reg_no1 + 2]) + cht_offset,
+                                Truncate8(poke_value & 0xFFu));
+            }
+            break;
 
           case 0x40: // Write the u16 from cht_register[cht_reg_no1] to address
             DoMemoryWrite<u16>(inst.value32, Truncate16(cht_register[cht_reg_no1] & 0xFFFFu));
@@ -2852,6 +2892,23 @@ void Cheats::GamesharkCheatCode::Apply() const
             // cht_register[cht_reg_no1]
             cht_register[cht_reg_no1] = DoMemoryRead<u16>(cht_register[cht_reg_no2] + poke_value);
             break;
+          case 0x47: // Write the u16 poke_value to a specific index of a single array in a series of consecutive arrays
+            // This cheat type requires a separate cheat to set up 4 consecutive cht_arrays before this will work
+            // cht_register[cht_reg_no1] = the base address of the first element of the first array
+            // cht_register[cht_reg_no1+1] = the array size (basically the address diff between the start of each array)
+            // cht_register[cht_reg_no1+2] = the index of which array in the series to poke (this must be greater than
+            // 0) cht_register[cht_reg_no1+3] must == 0xD0D0 to ensure it only pokes when the above cht_regs have been
+            // set
+            //                                     (safety valve)
+            // cht_offset = the index of the individual array to change (so must be 0 to cht_register[cht_reg_no1+1])
+            if ((cht_reg_no1 <= (std::size(cht_register) - 4)) && cht_register[cht_reg_no1 + 3] == 0xD0D0 &&
+                cht_register[cht_reg_no1 + 2] > 0 && cht_register[cht_reg_no1 + 1] >= cht_offset)
+            {
+              DoMemoryWrite<u16>((cht_register[cht_reg_no1] - cht_register[cht_reg_no1 + 1]) +
+                                   (cht_register[cht_reg_no1 + 1] * cht_register[cht_reg_no1 + 2]) + cht_offset,
+                                 Truncate16(poke_value & 0xFFFFu));
+            }
+            break;
 
           case 0x80: // Write the u32 from cht_register[cht_reg_no1] to address
             DoMemoryWrite<u32>(inst.value32, cht_register[cht_reg_no1]);
@@ -2877,6 +2934,7 @@ void Cheats::GamesharkCheatCode::Apply() const
             // cht_register[cht_reg_no1]
             cht_register[cht_reg_no1] = DoMemoryRead<u32>(cht_register[cht_reg_no2] + poke_value);
             break;
+            // Do not use 0x87 as it's not possible to duplicate 0x07, 0x47 for a 32 bit write as not enough characters
 
           case 0xC0: // Reg3 = Reg2 + Reg1
             cht_register[cht_reg_no3] = cht_register[cht_reg_no2] + cht_register[cht_reg_no1];

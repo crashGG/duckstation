@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #pragma once
@@ -11,7 +11,9 @@
 #include "common/lru_cache.h"
 
 #include <QtCore/QAbstractTableModel>
+#include <QtGui/QImage>
 #include <QtGui/QPixmap>
+
 #include <algorithm>
 #include <array>
 #include <optional>
@@ -37,6 +39,7 @@ public:
     Column_FileSize,
     Column_UncompressedSize,
     Column_Region,
+    Column_Achievements,
     Column_Compatibility,
     Column_Cover,
 
@@ -54,7 +57,10 @@ public:
   QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
   QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
 
-  ALWAYS_INLINE const QString& getColumnDisplayName(int column) { return m_column_display_names[column]; }
+  ALWAYS_INLINE const QString& getColumnDisplayName(int column) const { return m_column_display_names[column]; }
+  ALWAYS_INLINE const QPixmap& getNoAchievementsPixmap() const { return m_no_achievements_pixmap; }
+  ALWAYS_INLINE const QPixmap& getHasAchievementsPixmap() const { return m_has_achievements_pixmap; }
+  ALWAYS_INLINE const QPixmap& getMasteredAchievementsPixmap() const { return m_mastered_achievements_pixmap; }
 
   bool hasTakenGameList() const;
   void takeGameList();
@@ -85,23 +91,11 @@ public:
 Q_SIGNALS:
   void coverScaleChanged();
 
+private Q_SLOTS:
+  void coverLoaded(const std::string& path, const QPixmap& pixmap);
+  void rowsChanged(const QList<int>& rows);
+
 private:
-  /// The purpose of this cache is to stop us trying to constantly extract memory card icons, when we know a game
-  /// doesn't have any saves yet. It caches the serial:memcard_timestamp pair, and only tries extraction when the
-  /// timestamp of the memory card has changed.
-#pragma pack(push, 1)
-  struct MemcardTimestampCacheEntry
-  {
-    enum : u32
-    {
-      MAX_SERIAL_LENGTH = 32,
-    };
-
-    char serial[MAX_SERIAL_LENGTH];
-    s64 memcard_timestamp;
-  };
-#pragma pack(pop)
-
   QVariant data(const QModelIndex& index, int role, const GameList::Entry* ge) const;
 
   void loadCommonImages();
@@ -126,12 +120,46 @@ private:
   std::array<QPixmap, static_cast<int>(GameList::EntryType::Count)> m_type_pixmaps;
   std::array<QPixmap, static_cast<int>(GameDatabase::CompatibilityRating::Count)> m_compatibility_pixmaps;
 
-  QPixmap m_placeholder_pixmap;
+  QImage m_placeholder_image;
   QPixmap m_loading_pixmap;
+
+  QPixmap m_no_achievements_pixmap;
+  QPixmap m_has_achievements_pixmap;
+  QPixmap m_mastered_achievements_pixmap;
 
   mutable PreferUnorderedStringMap<QPixmap> m_flag_pixmap_cache;
 
   mutable LRUCache<std::string, QPixmap> m_cover_pixmap_cache;
 
   mutable LRUCache<std::string, QPixmap> m_memcard_pixmap_cache;
+};
+
+class GameListCoverLoader : public QObject
+{
+  Q_OBJECT
+
+public:
+  GameListCoverLoader(const GameList::Entry* ge, const QImage& placeholder_image, int width, int height, float scale);
+  ~GameListCoverLoader();
+
+public:
+  void loadOrGenerateCover();
+
+Q_SIGNALS:
+  void coverLoaded(const std::string& path, const QPixmap& pixmap);
+
+private:
+  void createPlaceholderImage();
+  void resizeAndPadImage();
+
+  std::string m_path;
+  std::string m_serial;
+  std::string m_title;
+  const QImage& m_placeholder_image;
+  int m_width;
+  int m_height;
+  float m_scale;
+  float m_dpr;
+
+  QImage m_image;
 };

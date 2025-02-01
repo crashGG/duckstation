@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "graphicssettingswidget.h"
@@ -142,6 +142,10 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
   SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_ui.gpuWireframeMode, "GPU", "WireframeMode",
                                                Settings::ParseGPUWireframeMode, Settings::GetGPUWireframeModeName,
                                                Settings::DEFAULT_GPU_WIREFRAME_MODE);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gpuThread, "GPU", "UseThread", true);
+  SettingWidgetBinder::BindWidgetToIntSetting(sif, m_ui.maxQueuedFrames, "GPU", "MaxQueuedFrames",
+                                              Settings::DEFAULT_GPU_MAX_QUEUED_FRAMES);
+  connect(m_ui.gpuThread, &QCheckBox::checkStateChanged, this, &GraphicsSettingsWidget::onGPUThreadChanged);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.scaledDithering, "GPU", "ScaledDithering", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.useSoftwareRendererForReadbacks, "GPU",
                                                "UseSoftwareRendererForReadbacks", false);
@@ -164,6 +168,8 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.pgxpCPU, "GPU", "PGXPCPU", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.pgxpVertexCache, "GPU", "PGXPVertexCache", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.pgxpDisableOn2DPolygons, "GPU", "PGXPDisableOn2DPolygons",
+                                               false);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.pgxpTransparentDepthTest, "GPU", "PGXPTransparentDepthTest",
                                                false);
 
   connect(m_ui.pgxpTextureCorrection, &QCheckBox::checkStateChanged, this,
@@ -244,13 +250,13 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
   // Texture Replacements Tab
 
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableTextureCache, "GPU", "EnableTextureCache", false);
-  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.useOldMDECRoutines, "Hacks", "UseOldMDECRoutines", false);
-
-  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableTextureReplacements, "TextureReplacements",
-                                               "EnableTextureReplacements", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.preloadTextureReplacements, "TextureReplacements",
                                                "PreloadTextures", false);
 
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableTextureReplacements, "TextureReplacements",
+                                               "EnableTextureReplacements", false);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.alwaysTrackUploads, "TextureReplacements",
+                                               "AlwaysTrackUploads", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableTextureDumping, "TextureReplacements", "DumpTextures",
                                                false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.dumpReplacedTextures, "TextureReplacements",
@@ -259,6 +265,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
                                                "EnableVRAMWriteReplacements", false);
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.vramWriteDumping, "TextureReplacements", "DumpVRAMWrites",
                                                false);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.useOldMDECRoutines, "Hacks", "UseOldMDECRoutines", false);
 
   if (!m_dialog->isPerGameSettings())
   {
@@ -284,15 +291,15 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
   connect(m_ui.enableTextureReplacements, &QCheckBox::checkStateChanged, this,
           &GraphicsSettingsWidget::onEnableAnyTextureReplacementsChanged);
   connect(m_ui.enableTextureDumping, &QCheckBox::checkStateChanged, this,
-          &GraphicsSettingsWidget::onEnableTextureDumpingChanged);
+          &GraphicsSettingsWidget::onEnableAnyTextureDumpingChanged);
   connect(m_ui.vramWriteReplacement, &QCheckBox::checkStateChanged, this,
           &GraphicsSettingsWidget::onEnableAnyTextureReplacementsChanged);
+  connect(m_ui.vramWriteDumping, &QCheckBox::checkStateChanged, this,
+          &GraphicsSettingsWidget::onEnableAnyTextureDumpingChanged);
   connect(m_ui.textureReplacementOptions, &QPushButton::clicked, this,
           &GraphicsSettingsWidget::onTextureReplacementOptionsClicked);
 
   // Debugging Tab
-
-  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gpuThread, "GPU", "UseThread", true);
 
   SettingWidgetBinder::BindWidgetToEnumSetting(
     sif, m_ui.gpuDumpCompressionMode, "GPU", "DumpCompressionMode", &Settings::ParseGPUDumpCompressionMode,
@@ -325,6 +332,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
   onMediaCaptureVideoEnabledChanged();
   onEnableTextureCacheChanged();
   onEnableAnyTextureReplacementsChanged();
+  onGPUThreadChanged();
   onShowDebugSettingsChanged(QtHost::ShouldShowDebugOptions());
 
   // Rendering Tab
@@ -446,6 +454,12 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
     m_ui.msaaMode, tr("Multi-Sampling"), tr("Disabled"),
     tr("Uses multi-sampled anti-aliasing when rendering 3D polygons. Can improve visuals with a lower performance "
        "requirement compared to upscaling, <strong>but often introduces rendering errors.</strong>"));
+  dialog->registerWidgetHelp(m_ui.gpuWireframeMode, tr("Wireframe Mode"), tr("Disabled"),
+                             tr("Draws a wireframe outline of the triangles rendered by the console's GPU, either as a "
+                                "replacement or an overlay."));
+  dialog->registerWidgetHelp(m_ui.gpuThread, tr("Threaded Rendering"), tr("Checked"),
+                             tr("Uses a second thread for drawing graphics. Provides a significant speed improvement "
+                                "particularly with the software renderer, and is safe to use."));
   dialog->registerWidgetHelp(
     m_ui.scaledDithering, tr("Scaled Dithering"), tr("Checked"),
     tr("Scales the dither pattern to the resolution scale of the emulated GPU. This makes the dither pattern much less "
@@ -497,6 +511,10 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
                              tr("Uses native resolution coordinates for 2D polygons, instead of precise coordinates. "
                                 "Can fix misaligned UI in some games, but otherwise should be left disabled. The game "
                                 "database will enable this automatically when needed."));
+  dialog->registerWidgetHelp(m_ui.pgxpTransparentDepthTest, tr("Depth Test Transparent Polygons"), tr("Unchecked"),
+                             tr("Enables depth testing for semi-transparent polygons. Usually these include shadows, "
+                                "and tend to clip through the ground when depth testing is enabled. Depth writes for "
+                                "semi-transparent polygons are disabled regardless of this setting.."));
 
   // OSD Tab
 
@@ -583,16 +601,20 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
        "separate two pairs from each other.</b><br>For example: \"compression_level = 4 : joint_stereo = 1\""));
 
   // Texture Replacements Tab
-  dialog->registerWidgetHelp(m_ui.enableTextureCache, tr("Enable Texture Cache"), tr("Unchecked"),
-                             tr("Enables caching of guest textures, required for texture replacement."));
-  dialog->registerWidgetHelp(m_ui.useOldMDECRoutines, tr("Use Old MDEC Routines"), tr("Unchecked"),
-                             tr("Enables the older, less accurate MDEC decoding routines. May be required for old "
-                                "replacement backgrounds to match/load."));
+  dialog->registerWidgetHelp(
+    m_ui.enableTextureCache, tr("Enable Texture Cache"), tr("Unchecked"),
+    tr("Enables caching of guest textures, required for texture replacement. <strong>The texture cache is currently "
+       "experimental, and may cause rendering errors in some games.</strong>"));
+  dialog->registerWidgetHelp(m_ui.preloadTextureReplacements, tr("Preload Texture Replacements"), tr("Unchecked"),
+                             tr("Loads all replacement texture to RAM, reducing stuttering at runtime."));
 
   dialog->registerWidgetHelp(m_ui.enableTextureReplacements, tr("Enable Texture Replacements"), tr("Unchecked"),
                              tr("Enables loading of replacement textures. Not compatible with all games."));
-  dialog->registerWidgetHelp(m_ui.preloadTextureReplacements, tr("Preload Texture Replacements"), tr("Unchecked"),
-                             tr("Loads all replacement texture to RAM, reducing stuttering at runtime."));
+  dialog->registerWidgetHelp(
+    m_ui.alwaysTrackUploads, tr("Always Track Uploads"), tr("Unchecked"),
+    tr("Forces texture upload tracking to be enabled regardless of whether it is needed. Reduces performance, but "
+       "allows toggling replacements on and off. <strong>Not required for replacements to load, </strong>normally "
+       "tracking is automatically enabled when needed."));
   dialog->registerWidgetHelp(
     m_ui.enableTextureDumping, tr("Enable Texture Dumping"), tr("Unchecked"),
     tr("Enables dumping of textures to image files, which can be replaced. Not compatible with all games."));
@@ -603,15 +625,11 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
                              tr("Enables the replacement of background textures in supported games."));
   dialog->registerWidgetHelp(m_ui.vramWriteDumping, tr("Enable VRAM Write Dumping"), tr("Unchecked"),
                              tr("Writes backgrounds that can be replaced to the dump directory."));
+  dialog->registerWidgetHelp(m_ui.useOldMDECRoutines, tr("Use Old MDEC Routines"), tr("Unchecked"),
+                             tr("Enables the older, less accurate MDEC decoding routines. May be required for old "
+                                "replacement backgrounds to match/load."));
 
   // Debugging Tab
-
-  dialog->registerWidgetHelp(m_ui.gpuWireframeMode, tr("Wireframe Mode"), tr("Disabled"),
-                             tr("Draws a wireframe outline of the triangles rendered by the console's GPU, either as a "
-                                "replacement or an overlay."));
-  dialog->registerWidgetHelp(m_ui.gpuThread, tr("Threaded Rendering"), tr("Checked"),
-                             tr("Uses a second thread for drawing graphics. Currently only available for the software "
-                                "renderer, but can provide a significant speed improvement, and is safe to use."));
 
   dialog->registerWidgetHelp(
     m_ui.useDebugDevice, tr("Use Debug Device"), tr("Unchecked"),
@@ -819,8 +837,6 @@ void GraphicsSettingsWidget::updateRendererDependentOptions()
   m_ui.blitSwapChain->setEnabled(render_api == RenderAPI::D3D11);
 #endif
 
-  m_ui.gpuThread->setEnabled(!is_hardware);
-
   m_ui.exclusiveFullscreenLabel->setEnabled(render_api == RenderAPI::D3D11 || render_api == RenderAPI::D3D12 ||
                                             render_api == RenderAPI::Vulkan);
   m_ui.exclusiveFullscreenControl->setEnabled(render_api == RenderAPI::Vulkan);
@@ -855,9 +871,20 @@ void GraphicsSettingsWidget::populateGPUAdaptersAndResolutions(RenderAPI render_
         current_adapter = &adapter;
     }
 
-    // default adapter
-    if (!m_adapters.empty() && current_adapter_name.empty())
-      current_adapter = &m_adapters.front();
+    if (!m_adapters.empty())
+    {
+      if (current_adapter_name.empty())
+      {
+        // default adapter
+        current_adapter = &m_adapters.front();
+      }
+      else if (!current_adapter)
+      {
+        // if the adapter is not available, ensure it's in the list anyway, otherwise select the default
+        const QString qadaptername = QString::fromStdString(current_adapter_name);
+        m_ui.adapter->addItem(qadaptername, QVariant(qadaptername));
+      }
+    }
 
     // disable it if we don't have a choice
     m_ui.adapter->setEnabled(!m_adapters.empty());
@@ -871,17 +898,30 @@ void GraphicsSettingsWidget::populateGPUAdaptersAndResolutions(RenderAPI render_
     m_ui.fullscreenMode->clear();
 
     m_ui.fullscreenMode->addItem(tr("Borderless Fullscreen"), QVariant(QString()));
+
+    const std::string current_fullscreen_mode = m_dialog->getEffectiveStringValue("GPU", "FullscreenMode", "");
+    bool current_fullscreen_mode_found = false;
     if (current_adapter)
     {
       for (const GPUDevice::ExclusiveFullscreenMode& mode : current_adapter->fullscreen_modes)
       {
-        const QString qmodename = QtUtils::StringViewToQString(mode.ToString());
+        const TinyString mode_str = mode.ToString();
+        current_fullscreen_mode_found = current_fullscreen_mode_found || (current_fullscreen_mode == mode_str.view());
+
+        const QString qmodename = QtUtils::StringViewToQString(mode_str);
         m_ui.fullscreenMode->addItem(qmodename, QVariant(qmodename));
       }
     }
 
+    // if the current mode is not valid (e.g. adapter change), ensure it's in the list so the user isn't confused
+    if (!current_fullscreen_mode_found)
+    {
+      const QString qmodename = QtUtils::StringViewToQString(current_fullscreen_mode);
+      m_ui.fullscreenMode->addItem(qmodename, QVariant(qmodename));
+    }
+
     // disable it if we don't have a choice
-    m_ui.fullscreenMode->setEnabled(current_adapter && !current_adapter->fullscreen_modes.empty());
+    m_ui.fullscreenMode->setEnabled(m_ui.fullscreenMode->count() > 1);
     SettingWidgetBinder::BindWidgetToStringSetting(sif, m_ui.fullscreenMode, "GPU", "FullscreenMode");
   }
 
@@ -984,6 +1024,8 @@ void GraphicsSettingsWidget::updatePGXPSettingsEnabled()
   m_ui.pgxpGeometryToleranceLabel->setEnabled(enabled);
   m_ui.pgxpDepthClearThreshold->setEnabled(depth_enabled);
   m_ui.pgxpDepthClearThresholdLabel->setEnabled(depth_enabled);
+  m_ui.pgxpDisableOn2DPolygons->setEnabled(enabled);
+  m_ui.pgxpTransparentDepthTest->setEnabled(depth_enabled);
 }
 
 void GraphicsSettingsWidget::onAspectRatioChanged()
@@ -1160,16 +1202,20 @@ void GraphicsSettingsWidget::onEnableTextureCacheChanged()
   const bool tc_enabled = m_dialog->getEffectiveBoolValue("GPU", "EnableTextureCache", false);
   m_ui.enableTextureReplacements->setEnabled(tc_enabled);
   m_ui.enableTextureDumping->setEnabled(tc_enabled);
-  onEnableTextureDumpingChanged();
+  m_ui.alwaysTrackUploads->setEnabled(tc_enabled);
+  onEnableAnyTextureDumpingChanged();
   onEnableAnyTextureReplacementsChanged();
 }
 
-void GraphicsSettingsWidget::onEnableTextureDumpingChanged()
+void GraphicsSettingsWidget::onEnableAnyTextureDumpingChanged()
 {
   const bool tc_enabled = m_dialog->getEffectiveBoolValue("GPU", "EnableTextureCache", false);
   const bool dumping_enabled =
-    tc_enabled && m_dialog->getEffectiveBoolValue("TextureReplacements", "DumpTextures", false);
-  m_ui.dumpReplacedTextures->setEnabled(dumping_enabled);
+    (tc_enabled && m_dialog->getEffectiveBoolValue("TextureReplacements", "DumpTextures", false));
+  const bool background_dumping_enabled =
+    m_dialog->getEffectiveBoolValue("TextureReplacements", "DumpVRAMWrites", false);
+  const bool any_dumping_enabled = (dumping_enabled || background_dumping_enabled);
+  m_ui.dumpReplacedTextures->setEnabled(any_dumping_enabled);
 }
 
 void GraphicsSettingsWidget::onEnableAnyTextureReplacementsChanged()
@@ -1179,6 +1225,13 @@ void GraphicsSettingsWidget::onEnableAnyTextureReplacementsChanged()
      (m_dialog->getEffectiveBoolValue("GPU", "EnableTextureCache", false) &&
       m_dialog->getEffectiveBoolValue("TextureReplacements", "EnableTextureReplacements", false)));
   m_ui.preloadTextureReplacements->setEnabled(any_replacements_enabled);
+}
+
+void GraphicsSettingsWidget::onGPUThreadChanged()
+{
+  const bool enabled = m_dialog->getEffectiveBoolValue("GPU", "UseThread", true);
+  m_ui.maxQueuedFrames->setEnabled(enabled);
+  m_ui.maxQueuedFramesLabel->setEnabled(enabled);
 }
 
 void GraphicsSettingsWidget::onTextureReplacementOptionsClicked()

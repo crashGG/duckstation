@@ -13,37 +13,73 @@
 
 class SmallStringBase;
 
-struct Settings;
+struct GPUSettings;
 
 namespace FullscreenUI {
 bool Initialize();
 bool IsInitialized();
 bool HasActiveWindow();
-void CheckForConfigChanges(const Settings& old_settings);
-void OnSystemStarted();
-void OnSystemPaused();
+void CheckForConfigChanges(const GPUSettings& old_settings);
+void OnSystemStarting();
 void OnSystemResumed();
 void OnSystemDestroyed();
-void OnRunningGameChanged();
+void OnRunningGameChanged(const std::string& path, const std::string& serial, const std::string& title);
 
 #ifndef __ANDROID__
 void OpenPauseMenu();
 void OpenCheatsMenu();
+void OpenDiscChangeMenu();
 void OpenAchievementsWindow();
-bool IsAchievementsWindowOpen();
 void OpenLeaderboardsWindow();
-bool IsLeaderboardsWindowOpen();
 void ReturnToMainWindow();
 void ReturnToPreviousWindow();
 void SetStandardSelectionFooterText(bool back_instead_of_cancel);
+void UpdateRunIdleState();
 #endif
 
-void Shutdown();
+void Shutdown(bool clear_state);
 void Render();
 void InvalidateCoverCache();
 void TimeToPrintableString(SmallStringBase* str, time_t t);
 
+float GetBackgroundAlpha();
+
+void OpenLoadingScreen(std::string_view image, std::string_view message, s32 progress_min = -1, s32 progress_max = -1,
+                       s32 progress_value = -1);
+void UpdateLoadingScreen(std::string_view image, std::string_view message, s32 progress_min = -1, s32 progress_max = -1,
+                         s32 progress_value = -1);
+void CloseLoadingScreen();
+
 } // namespace FullscreenUI
+
+class LoadingScreenProgressCallback final : public ProgressCallback
+{
+public:
+  LoadingScreenProgressCallback();
+  ~LoadingScreenProgressCallback() override;
+
+  ALWAYS_INLINE void SetOpenDelay(float delay) { m_open_delay = delay; }
+
+  void PushState() override;
+  void PopState() override;
+
+  void SetCancellable(bool cancellable) override;
+  void SetTitle(const std::string_view title) override;
+  void SetStatusText(const std::string_view text) override;
+  void SetProgressRange(u32 range) override;
+  void SetProgressValue(u32 value) override;
+
+  void ModalError(const std::string_view message) override;
+  bool ModalConfirmation(const std::string_view message) override;
+
+private:
+  void Redraw(bool force);
+
+  u64 m_open_time = 0;
+  float m_open_delay = 1.0f;
+  s32 m_last_progress_percent = -1;
+  bool m_on_gpu_thread = false;
+};
 
 // Host UI triggers from Big Picture mode.
 namespace Host {

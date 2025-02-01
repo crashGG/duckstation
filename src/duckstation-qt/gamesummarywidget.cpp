@@ -195,7 +195,7 @@ void GameSummaryWidget::populateUi(const std::string& path, const std::string& s
         {
           if (!controllers.isEmpty())
             controllers.append(", ");
-          controllers.append(Controller::GetControllerInfo(static_cast<ControllerType>(i))->GetDisplayName());
+          controllers.append(Controller::GetControllerInfo(static_cast<ControllerType>(i)).GetDisplayName());
         }
       }
     }
@@ -492,6 +492,7 @@ void GameSummaryWidget::onComputeHashClicked()
   QtModalProgressCallback progress_callback(this);
   progress_callback.SetCancellable(true);
   progress_callback.SetProgressRange(image->GetTrackCount());
+  progress_callback.MakeVisible();
 
   std::vector<CDImageHasher::Hash> track_hashes;
   track_hashes.reserve(image->GetTrackCount());

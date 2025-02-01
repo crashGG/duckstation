@@ -52,10 +52,6 @@ static constexpr u32 RECOMPILE_FRAMES_FOR_INTERPRETER_FALLBACK = 15;
 static constexpr u32 INVALIDATE_COUNT_FOR_MANUAL_PROTECTION = 4;
 static constexpr u32 INVALIDATE_FRAMES_FOR_MANUAL_PROTECTION = 60;
 
-static CodeLUT DecodeCodeLUTPointer(u32 slot, CodeLUT ptr);
-static CodeLUT EncodeCodeLUTPointer(u32 slot, CodeLUT ptr);
-static CodeLUT OffsetCodeLUTPointer(CodeLUT fake_ptr, u32 pc);
-
 static void AllocateLUTs();
 static void DeallocateLUTs();
 static void ResetCodeLUT();
@@ -65,10 +61,11 @@ static void ClearBlocks();
 
 static Block* LookupBlock(u32 pc);
 static Block* CreateBlock(u32 pc, const BlockInstructionList& instructions, const BlockMetadata& metadata);
+static bool HasBlockLUT(u32 pc);
 static bool IsBlockCodeCurrent(const Block* block);
 static bool RevalidateBlock(Block* block);
-PageProtectionMode GetProtectionModeForPC(u32 pc);
-PageProtectionMode GetProtectionModeForBlock(const Block* block);
+static PageProtectionMode GetProtectionModeForPC(u32 pc);
+static PageProtectionMode GetProtectionModeForBlock(const Block* block);
 static bool ReadBlockInstructions(u32 start_pc, BlockInstructionList* instructions, BlockMetadata* metadata);
 static void FillBlockRegInfo(Block* block);
 static void CopyRegInfo(InstructionInfo* dst, const InstructionInfo* src);
@@ -277,31 +274,6 @@ static constexpr u32 GetLUTSlotCount(bool include_unreachable)
 }
 } // namespace CPU::CodeCache
 
-CPU::CodeCache::CodeLUT CPU::CodeCache::DecodeCodeLUTPointer(u32 slot, CodeLUT ptr)
-{
-  if constexpr (sizeof(void*) == 8)
-    return reinterpret_cast<CodeLUT>(reinterpret_cast<u8*>(ptr) + (static_cast<u64>(slot) << 17));
-  else
-    return reinterpret_cast<CodeLUT>(reinterpret_cast<u8*>(ptr) + (slot << 16));
-}
-
-CPU::CodeCache::CodeLUT CPU::CodeCache::EncodeCodeLUTPointer(u32 slot, CodeLUT ptr)
-{
-  if constexpr (sizeof(void*) == 8)
-    return reinterpret_cast<CodeLUT>(reinterpret_cast<u8*>(ptr) - (static_cast<u64>(slot) << 17));
-  else
-    return reinterpret_cast<CodeLUT>(reinterpret_cast<u8*>(ptr) - (slot << 16));
-}
-
-CPU::CodeCache::CodeLUT CPU::CodeCache::OffsetCodeLUTPointer(CodeLUT fake_ptr, u32 pc)
-{
-  u8* fake_byte_ptr = reinterpret_cast<u8*>(fake_ptr);
-  if constexpr (sizeof(void*) == 8)
-    return reinterpret_cast<const void**>(fake_byte_ptr + (static_cast<u64>(pc) << 1));
-  else
-    return reinterpret_cast<const void**>(fake_byte_ptr + pc);
-}
-
 void CPU::CodeCache::AllocateLUTs()
 {
   constexpr u32 num_code_slots = GetLUTSlotCount(true);
@@ -323,9 +295,11 @@ void CPU::CodeCache::AllocateLUTs()
   // Mark everything as unreachable to begin with.
   for (u32 i = 0; i < LUT_TABLE_COUNT; i++)
   {
-    g_code_lut[i] = EncodeCodeLUTPointer(i, code_table_ptr);
+    g_code_lut[i] = code_table_ptr;
     s_block_lut[i] = nullptr;
   }
+
+  // Exclude unreachable.
   code_table_ptr += LUT_TABLE_SIZE;
 
   // Allocate ranges.
@@ -337,7 +311,7 @@ void CPU::CodeCache::AllocateLUTs()
     {
       const u32 slot = start_slot + i;
 
-      g_code_lut[slot] = EncodeCodeLUTPointer(slot, code_table_ptr);
+      g_code_lut[slot] = code_table_ptr;
       code_table_ptr += LUT_TABLE_SIZE;
 
       s_block_lut[slot] = block_table_ptr;
@@ -357,15 +331,13 @@ void CPU::CodeCache::DeallocateLUTs()
 
 void CPU::CodeCache::ResetCodeLUT()
 {
-  if (!s_lut_code_pointers)
-    return;
-
   // Make the unreachable table jump to the invalid code callback.
   MemsetPtrs(s_lut_code_pointers.get(), g_interpret_block, LUT_TABLE_COUNT);
 
   for (u32 i = 0; i < LUT_TABLE_COUNT; i++)
   {
-    CodeLUT ptr = DecodeCodeLUTPointer(i, g_code_lut[i]);
+    // Don't overwrite anything bound to unreachable.
+    CodeLUT ptr = g_code_lut[i];
     if (ptr == s_lut_code_pointers.get())
       continue;
 
@@ -375,18 +347,10 @@ void CPU::CodeCache::ResetCodeLUT()
 
 void CPU::CodeCache::SetCodeLUT(u32 pc, const void* function)
 {
-  if (!s_lut_code_pointers)
-    return;
-
   const u32 table = pc >> LUT_TABLE_SHIFT;
-  CodeLUT encoded_ptr = g_code_lut[table];
-
-#ifdef _DEBUG
-  const CodeLUT table_ptr = DecodeCodeLUTPointer(table, encoded_ptr);
-  DebugAssert(table_ptr != nullptr && table_ptr != s_lut_code_pointers.get());
-#endif
-
-  *OffsetCodeLUTPointer(encoded_ptr, pc) = function;
+  const u32 idx = (pc & 0xFFFF) >> 2;
+  DebugAssert(g_code_lut[table] != s_lut_code_pointers.get());
+  g_code_lut[table][idx] = function;
 }
 
 CPU::CodeCache::Block* CPU::CodeCache::LookupBlock(u32 pc)
@@ -397,6 +361,12 @@ CPU::CodeCache::Block* CPU::CodeCache::LookupBlock(u32 pc)
 
   const u32 idx = (pc & 0xFFFF) >> 2;
   return s_block_lut[table][idx];
+}
+
+bool CPU::CodeCache::HasBlockLUT(u32 pc)
+{
+  const u32 table = pc >> LUT_TABLE_SHIFT;
+  return (s_block_lut[table] != nullptr);
 }
 
 CPU::CodeCache::Block* CPU::CodeCache::CreateBlock(u32 pc, const BlockInstructionList& instructions,
@@ -948,7 +918,6 @@ bool CPU::CodeCache::ReadBlockInstructions(u32 start_pc, BlockInstructionList* i
     InstructionInfo info;
     std::memset(&info, 0, sizeof(info));
 
-    info.pc = pc;
     info.is_branch_delay_slot = is_branch_delay_slot;
     info.is_load_delay_slot = is_load_delay_slot;
     info.is_branch_instruction = IsBranchInstruction(instruction);
@@ -985,18 +954,18 @@ bool CPU::CodeCache::ReadBlockInstructions(u32 start_pc, BlockInstructionList* i
       const BlockInstructionInfoPair& prev = instructions->back();
       if (!prev.second.is_unconditional_branch_instruction || !prev.second.is_direct_branch_instruction)
       {
-        WARNING_LOG("Conditional or indirect branch delay slot at {:08X}, skipping block", info.pc);
+        WARNING_LOG("Conditional or indirect branch delay slot at {:08X}, skipping block", pc);
         return false;
       }
       if (!IsDirectBranchInstruction(instruction))
       {
-        WARNING_LOG("Indirect branch in delay slot at {:08X}, skipping block", info.pc);
+        WARNING_LOG("Indirect branch in delay slot at {:08X}, skipping block", pc);
         return false;
       }
 
       // we _could_ fetch the delay slot from the first branch's target, but it's probably in a different
       // page, and that's an invalidation nightmare. so just fallback to the int, this is very rare anyway.
-      WARNING_LOG("Direct branch in delay slot at {:08X}, skipping block", info.pc);
+      WARNING_LOG("Direct branch in delay slot at {:08X}, skipping block", pc);
       return false;
     }
 
@@ -1029,14 +998,16 @@ bool CPU::CodeCache::ReadBlockInstructions(u32 start_pc, BlockInstructionList* i
 
 #if defined(_DEBUG) || defined(_DEVEL)
   SmallString disasm;
+  u32 disasm_pc = start_pc;
   DEBUG_LOG("Block at 0x{:08X}", start_pc);
   DEBUG_LOG(" Uncached fetch ticks: {}", metadata->uncached_fetch_ticks);
   DEBUG_LOG(" ICache line count: {}", metadata->icache_line_count);
   for (const auto& cbi : *instructions)
   {
-    CPU::DisassembleInstruction(&disasm, cbi.second.pc, cbi.first.bits);
+    CPU::DisassembleInstruction(&disasm, disasm_pc, cbi.first.bits);
     DEBUG_LOG("[{} {} 0x{:08X}] {:08X} {}", cbi.second.is_branch_delay_slot ? "BD" : "  ",
-              cbi.second.is_load_delay_slot ? "LD" : "  ", cbi.second.pc, cbi.first.bits, disasm);
+              cbi.second.is_load_delay_slot ? "LD" : "  ", disasm_pc, cbi.first.bits, disasm);
+    disasm_pc += sizeof(Instruction);
   }
 #endif
 
@@ -1408,7 +1379,7 @@ const void* CPU::CodeCache::CreateBlockLink(Block* block, void* code, u32 newpc)
     }
     else
     {
-      dst = g_compile_or_revalidate_block;
+      dst = HasBlockLUT(newpc) ? g_compile_or_revalidate_block : g_interpret_block;
     }
 
     BlockLinkMap::iterator iter = s_block_links.emplace(newpc, code);
@@ -1461,6 +1432,25 @@ void CPU::CodeCache::UnlinkBlockExits(Block* block)
 
 void CPU::CodeCache::ResetCodeBuffer()
 {
+  if (s_code_used > 0 || s_far_code_used > 0)
+  {
+    MemMap::BeginCodeWrite();
+
+    if (s_code_used > 0)
+    {
+      std::memset(s_code_ptr, 0, s_code_used);
+      MemMap::FlushInstructionCache(s_code_ptr, s_code_used);
+    }
+
+    if (s_far_code_used > 0)
+    {
+      std::memset(s_far_code_ptr, 0, s_far_code_used);
+      MemMap::FlushInstructionCache(s_far_code_ptr, s_far_code_used);
+    }
+
+    MemMap::EndCodeWrite();
+  }
+
   s_code_ptr = static_cast<u8*>(s_code_buffer_ptr);
   s_free_code_ptr = s_code_ptr;
   s_code_size = RECOMPILER_CODE_CACHE_SIZE - RECOMPILER_FAR_CODE_CACHE_SIZE;
@@ -1473,13 +1463,6 @@ void CPU::CodeCache::ResetCodeBuffer()
   s_far_code_ptr = (far_code_size > 0) ? (static_cast<u8*>(s_code_ptr) + s_code_size) : nullptr;
   s_free_far_code_ptr = s_far_code_ptr;
   s_far_code_used = 0;
-
-  MemMap::BeginCodeWrite();
-
-  std::memset(s_code_ptr, 0, RECOMPILER_CODE_CACHE_SIZE);
-  MemMap::FlushInstructionCache(s_code_ptr, RECOMPILER_CODE_CACHE_SIZE);
-
-  MemMap::EndCodeWrite();
 }
 
 u8* CPU::CodeCache::GetFreeCodePointer()
@@ -1528,18 +1511,15 @@ void CPU::CodeCache::CommitFarCode(u32 length)
 
 void CPU::CodeCache::AlignCode(u32 alignment)
 {
-#if defined(CPU_ARCH_X64)
-  constexpr u8 padding_value = 0xcc; // int3
-#else
-  constexpr u8 padding_value = 0x00;
-#endif
-
   DebugAssert(Common::IsPow2(alignment));
   const u32 num_padding_bytes =
     std::min(static_cast<u32>(Common::AlignUpPow2(reinterpret_cast<uintptr_t>(s_free_code_ptr), alignment) -
                               reinterpret_cast<uintptr_t>(s_free_code_ptr)),
              GetFreeCodeSpace());
-  std::memset(s_free_code_ptr, padding_value, num_padding_bytes);
+
+  if (num_padding_bytes > 0)
+    EmitAlignmentPadding(s_free_code_ptr, num_padding_bytes);
+
   s_free_code_ptr += num_padding_bytes;
   s_code_used += num_padding_bytes;
 }
@@ -1692,9 +1672,10 @@ PageFaultHandler::HandlerResult CPU::CodeCache::HandleFastmemException(void* exc
 
     // if we're writing to ram, let it go through a few times, and use manual block protection to sort it out
     // TODO: path for manual protection to return back to read-only pages
-    if (is_write && !g_state.cop0_regs.sr.Isc && GetSegmentForAddress(guest_address) != CPU::Segment::KSEG2 &&
+    if (!g_state.cop0_regs.sr.Isc && GetSegmentForAddress(guest_address) != CPU::Segment::KSEG2 &&
         AddressInRAM(guest_address))
     {
+      DebugAssert(is_write);
       DEV_LOG("Ignoring fault due to RAM write @ 0x{:08X}", guest_address);
       InvalidateBlocksWithPageIndex(Bus::GetRAMCodePageIndex(guest_address));
       return PageFaultHandler::HandlerResult::ContinueExecution;
@@ -1707,15 +1688,12 @@ PageFaultHandler::HandlerResult CPU::CodeCache::HandleFastmemException(void* exc
     guest_address = std::numeric_limits<PhysicalMemoryAddress>::max();
   }
 
-  DEV_LOG("Page fault handler invoked at PC={} Address={} {}, fastmem offset {:08X}", exception_pc, fault_address,
-          is_write ? "(write)" : "(read)", guest_address);
-
   auto iter = s_fastmem_backpatch_info.find(exception_pc);
   if (iter == s_fastmem_backpatch_info.end())
-  {
-    ERROR_LOG("No backpatch info found for {}", exception_pc);
     return PageFaultHandler::HandlerResult::ExecuteNextHandler;
-  }
+
+  DEV_LOG("Page fault handler invoked at PC={} Address={} {}, fastmem offset {:08X}", exception_pc, fault_address,
+          is_write ? "(write)" : "(read)", guest_address);
 
   LoadstoreBackpatchInfo& info = iter->second;
   DEV_LOG("Backpatching {} at {}[{}] (pc {:08X} addr {:08X}): Bitmask {:08X} Addr {} Data {} Size {} Signed {:02X}",
