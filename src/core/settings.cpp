@@ -224,8 +224,8 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
       .value_or(DEFAULT_GPU_TEXTURE_FILTER);
   gpu_sprite_texture_filter =
     ParseTextureFilterName(
-      si.GetStringValue("GPU", "SpriteTextureFilter", GetTextureFilterName(gpu_texture_filter)).c_str())
-      .value_or(gpu_texture_filter);
+      si.GetStringValue("GPU", "SpriteTextureFilter", GetTextureFilterName(DEFAULT_GPU_TEXTURE_FILTER)).c_str())
+      .value_or(DEFAULT_GPU_TEXTURE_FILTER);
   gpu_line_detect_mode =
     ParseLineDetectModeName(
       si.GetStringValue("GPU", "LineDetectMode", GetLineDetectModeName(DEFAULT_GPU_LINE_DETECT_MODE)).c_str())
@@ -333,7 +333,6 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
   display_show_status_indicators = si.GetBoolValue("Display", "ShowStatusIndicators", true);
   display_show_inputs = si.GetBoolValue("Display", "ShowInputs", false);
   display_show_enhancements = si.GetBoolValue("Display", "ShowEnhancements", false);
-  display_stretch_vertically = si.GetBoolValue("Display", "StretchVertically", false);
   display_auto_resize_window = si.GetBoolValue("Display", "AutoResizeWindow", false);
   display_osd_scale = si.GetFloatValue("Display", "OSDScale", DEFAULT_OSD_SCALE);
   display_osd_margin = si.GetFloatValue("Display", "OSDMargin", ImGuiManager::DEFAULT_SCREEN_MARGIN);
@@ -644,7 +643,6 @@ void Settings::Save(SettingsInterface& si, bool ignore_base) const
     si.SetFloatValue("Display", "OSDMargin", display_osd_margin);
   }
 
-  si.SetBoolValue("Display", "StretchVertically", display_stretch_vertically);
   si.SetBoolValue("Display", "AutoResizeWindow", display_auto_resize_window);
 
   si.SetIntValue("CDROM", "ReadaheadSectors", cdrom_readahead_sectors);
@@ -1104,7 +1102,8 @@ void Settings::FixIncompatibleSettings(const SettingsInterface& si, bool display
 
 bool Settings::AreGPUDeviceSettingsChanged(const Settings& old_settings) const
 {
-  return (gpu_adapter != old_settings.gpu_adapter || gpu_use_debug_device != old_settings.gpu_use_debug_device ||
+  return (gpu_adapter != old_settings.gpu_adapter || gpu_use_thread != old_settings.gpu_use_thread ||
+          gpu_use_debug_device != old_settings.gpu_use_debug_device ||
           gpu_disable_shader_cache != old_settings.gpu_disable_shader_cache ||
           gpu_disable_dual_source_blend != old_settings.gpu_disable_dual_source_blend ||
           gpu_disable_framebuffer_fetch != old_settings.gpu_disable_framebuffer_fetch ||

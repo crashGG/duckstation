@@ -170,7 +170,6 @@ static void ClearRunningGame();
 static void DestroySystem();
 
 static void RecreateGPU(GPURenderer new_renderer);
-static void SetGPUThreadEnabled(bool enabled);
 static std::string GetScreenshotPath(const char* extension);
 static bool StartMediaCapture(std::string path, bool capture_video, bool capture_audio, u32 video_width,
                               u32 video_height);
@@ -1204,27 +1203,6 @@ void System::RecreateGPU(GPURenderer renderer)
     GPUThread::PresentCurrentFrame();
 }
 
-void System::SetGPUThreadEnabled(bool enabled)
-{
-  // can be called without valid system
-  if (!IsValid())
-  {
-    GPUThread::Internal::SetThreadEnabled(g_settings.gpu_use_thread);
-    return;
-  }
-
-  FreeMemoryStateStorage(false, true, false);
-  StopMediaCapture();
-
-  GPUThread::Internal::SetThreadEnabled(g_settings.gpu_use_thread);
-
-  ClearMemorySaveStates(true, false);
-
-  g_gpu.UpdateDisplay(false);
-  if (IsPaused())
-    GPUThread::PresentCurrentFrame();
-}
-
 void System::LoadSettings(bool display_osd_messages)
 {
   std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
@@ -1680,7 +1658,7 @@ bool System::BootSystem(SystemBootParameters parameters, Error* error)
 
   // Load CD image up and detect region.
   std::unique_ptr<CDImage> disc;
-  ConsoleRegion console_region = ConsoleRegion::Auto;
+  ConsoleRegion auto_console_region = ConsoleRegion::NTSC_U;
   DiscRegion disc_region = DiscRegion::NonPS1;
   BootMode boot_mode = BootMode::FullBoot;
   std::string exe_override;
@@ -1708,14 +1686,10 @@ bool System::BootSystem(SystemBootParameters parameters, Error* error)
 
     if (boot_mode == BootMode::BootEXE || boot_mode == BootMode::BootPSF)
     {
-      if (console_region == ConsoleRegion::Auto)
-      {
-        const DiscRegion file_region =
-          ((boot_mode == BootMode::BootEXE) ? GetRegionForExe(parameters.filename.c_str()) :
-                                              GetRegionForPsf(parameters.filename.c_str()));
-        INFO_LOG("EXE/PSF Region: {}", Settings::GetDiscRegionDisplayName(file_region));
-        console_region = GetConsoleRegionForDiscRegion(file_region);
-      }
+      const DiscRegion file_region = ((boot_mode == BootMode::BootEXE) ? GetRegionForExe(parameters.filename.c_str()) :
+                                                                         GetRegionForPsf(parameters.filename.c_str()));
+      INFO_LOG("EXE/PSF Region: {}", Settings::GetDiscRegionDisplayName(file_region));
+      auto_console_region = GetConsoleRegionForDiscRegion(file_region);
     }
     else if (boot_mode != BootMode::ReplayGPUDump)
     {
@@ -1728,32 +1702,12 @@ bool System::BootSystem(SystemBootParameters parameters, Error* error)
       }
 
       disc_region = GameList::GetCustomRegionForPath(parameters.filename).value_or(GetRegionForImage(disc.get()));
-      if (console_region == ConsoleRegion::Auto)
-      {
-        if (disc_region != DiscRegion::Other)
-        {
-          console_region = GetConsoleRegionForDiscRegion(disc_region);
-          INFO_LOG("Auto-detected console {} region for '{}' (region {})",
-                   Settings::GetConsoleRegionName(console_region), parameters.filename,
-                   Settings::GetDiscRegionName(disc_region));
-        }
-        else
-        {
-          console_region = ConsoleRegion::NTSC_U;
-          WARNING_LOG("Could not determine console region for disc region {}. Defaulting to {}.",
-                      Settings::GetDiscRegionName(disc_region), Settings::GetConsoleRegionName(console_region));
-        }
-      }
+      auto_console_region = GetConsoleRegionForDiscRegion(disc_region);
+      INFO_LOG("Auto-detected console {} region for '{}' (region {})",
+               Settings::GetConsoleRegionName(auto_console_region), parameters.filename,
+               Settings::GetDiscRegionName(disc_region));
     }
   }
-  else
-  {
-    // Default to NTSC for BIOS boot.
-    if (console_region == ConsoleRegion::Auto)
-      console_region = ConsoleRegion::NTSC_U;
-  }
-
-  INFO_LOG("Console Region: {}", Settings::GetConsoleRegionDisplayName(console_region));
 
   // Switch subimage.
   if (disc && parameters.media_playlist_index != 0 && !disc->SwitchSubImage(parameters.media_playlist_index, error))
@@ -1766,7 +1720,7 @@ bool System::BootSystem(SystemBootParameters parameters, Error* error)
   // Can't early cancel without destroying past this point.
   Assert(s_state.state == State::Shutdown);
   s_state.state = State::Starting;
-  s_state.region = console_region;
+  s_state.region = auto_console_region;
   s_state.startup_cancelled.store(false, std::memory_order_relaxed);
   s_state.gpu_dump_player = std::move(gpu_dump);
   std::atomic_thread_fence(std::memory_order_release);
@@ -1775,6 +1729,10 @@ bool System::BootSystem(SystemBootParameters parameters, Error* error)
 
   // Update running game, this will apply settings as well.
   UpdateRunningGame(disc ? disc->GetPath() : parameters.filename, disc.get(), true);
+
+  // Determine console region. Has to be done here, because gamesettings can override it.
+  s_state.region = (g_settings.region == ConsoleRegion::Auto) ? auto_console_region : g_settings.region;
+  INFO_LOG("Console Region: {}", Settings::GetConsoleRegionDisplayName(s_state.region));
 
   // Get boot EXE override.
   if (!parameters.override_exe.empty())
@@ -4501,7 +4459,6 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
              g_settings.display_scaling != old_settings.display_scaling ||
              g_settings.display_alignment != old_settings.display_alignment ||
              g_settings.display_rotation != old_settings.display_rotation ||
-             g_settings.display_stretch_vertically != old_settings.display_stretch_vertically ||
              g_settings.display_deinterlacing_mode != old_settings.display_deinterlacing_mode ||
              g_settings.display_osd_scale != old_settings.display_osd_scale ||
              g_settings.display_osd_margin != old_settings.display_osd_margin ||
@@ -4518,7 +4475,7 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
              g_settings.runahead_frames != old_settings.runahead_frames ||
              g_settings.texture_replacements != old_settings.texture_replacements)
     {
-      GPUThread::UpdateSettings(true, false);
+      GPUThread::UpdateSettings(true, false, false);
 
       // NOTE: Must come after the GPU thread settings update, otherwise it allocs the wrong size textures.
       const bool use_existing_textures = (g_settings.gpu_resolution_scale == old_settings.gpu_resolution_scale);
@@ -4545,13 +4502,29 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
              g_settings.display_screenshot_format != old_settings.display_screenshot_format ||
              g_settings.display_screenshot_quality != old_settings.display_screenshot_quality)
     {
-      // don't need to represent when paused
-      GPUThread::UpdateSettings(true, device_settings_changed);
+      if (device_settings_changed)
+      {
+        // device changes are super icky, we need to purge and recreate any rewind states
+        FreeMemoryStateStorage(false, true, false);
+        StopMediaCapture();
+        GPUThread::UpdateSettings(true, true, g_settings.gpu_use_thread != old_settings.gpu_use_thread);
+        ClearMemorySaveStates(true, false);
+
+        // and display the current frame on the new device
+        g_gpu.UpdateDisplay(false);
+        if (IsPaused())
+          GPUThread::PresentCurrentFrame();
+      }
+      else
+      {
+        // don't need to represent here, because the OSD isn't visible while paused anyway
+        GPUThread::UpdateSettings(true, false, false);
+      }
     }
     else
     {
       // still need to update debug windows
-      GPUThread::UpdateSettings(false, false);
+      GPUThread::UpdateSettings(false, false, false);
     }
 
     if (g_settings.gpu_widescreen_hack != old_settings.gpu_widescreen_hack ||
@@ -4661,7 +4634,7 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
     {
       // handle device setting updates as well
       if (g_settings.gpu_renderer != old_settings.gpu_renderer || g_settings.AreGPUDeviceSettingsChanged(old_settings))
-        GPUThread::UpdateSettings(false, true);
+        GPUThread::UpdateSettings(false, true, g_settings.gpu_use_thread != old_settings.gpu_use_thread);
 
       if (g_settings.display_vsync != old_settings.display_vsync ||
           g_settings.display_disable_mailbox_presentation != old_settings.display_disable_mailbox_presentation)
@@ -4696,15 +4669,8 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
     }
   }
 
-  if (g_settings.gpu_use_thread != old_settings.gpu_use_thread) [[unlikely]]
-  {
-    SetGPUThreadEnabled(g_settings.gpu_use_thread);
-  }
-  else if (g_settings.gpu_use_thread && g_settings.gpu_max_queued_frames != old_settings.gpu_max_queued_frames)
-    [[unlikely]]
-  {
+  if (g_settings.gpu_use_thread && g_settings.gpu_max_queued_frames != old_settings.gpu_max_queued_frames) [[unlikely]]
     GPUThread::SyncGPUThread(false);
-  }
 }
 
 void System::SetTaintsFromSettings()
