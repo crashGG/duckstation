@@ -34,6 +34,7 @@ APPDIRNAME=DuckStation.AppDir
 STRIP=strip
 
 declare -a MANUAL_LIBS=(
+	"libz.so.1"
 	"libavcodec.so.61"
 	"libavformat.so.61"
 	"libavutil.so.59"
@@ -184,15 +185,6 @@ cp -a "$BUILDDIR/bin/translations" "$OUTDIR/usr/bin"
 echo "Generating AppStream metainfo..."
 mkdir -p "$OUTDIR/usr/share/metainfo"
 "$SCRIPTDIR/../generate-metainfo.sh" "$OUTDIR/usr/share/metainfo"
-
-# Copy in AppRun hooks.
-echo "Copying AppRun hooks..."
-mkdir -p "$OUTDIR/apprun-hooks"
-for hookpath in "$SCRIPTDIR/apprun-hooks"/*; do
-	hookname=$(basename "$hookpath")
-	cp -v "$hookpath" "$OUTDIR/apprun-hooks/$hookname"
-	sed -i -e 's/exec /source "$this_dir"\/apprun-hooks\/"'"$hookname"'"\nexec /' "$OUTDIR/AppRun"
-done
 
 echo "Generating AppImage..."
 rm -f "$NAME.AppImage"

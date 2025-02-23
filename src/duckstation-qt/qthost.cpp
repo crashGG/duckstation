@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "qthost.h"
@@ -173,6 +173,34 @@ bool QtHost::PerformEarlyHardwareChecks()
 
 bool QtHost::EarlyProcessStartup()
 {
+#if !defined(_WIN32) && !defined(__APPLE__)
+  // On Wayland, turning any window into a native window causes DPI scaling to break, as well as window
+  // updates, creating a complete mess of a window. Setting this attribute isn't ideal, since you'd think
+  // that setting WA_DontCreateNativeAncestors on the widget would be sufficient, but apparently not.
+  // TODO: Re-evaluate this on Qt 6.9.
+  if (QtHost::IsRunningOnWayland())
+    QGuiApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings, true);
+
+  // We also need to manually set the path to the .desktop file, because Wayland's stupidity doesn't allow
+  // applications to set window icons, because GNOME circlejerkers think their iconless windows are superior.
+  // Even the Qt side of this is weird, thankfully we can give it an absolute path, just without the extension.
+  // To make matters even worse, setting the full path here doesn't work for Flatpaks... or anything outside of
+  // KDE. Setting the application name alone does for flatpak. What a clusterfuck of a platform for basic tasks
+  // that operating systems have done for decades.
+  if (getenv("container"))
+  {
+    // Flatpak.
+    QGuiApplication::setDesktopFileName(QStringLiteral("org.duckstation.DuckStation"));
+  }
+  else if (const char* current_desktop = getenv("XDG_CURRENT_DESKTOP");
+           current_desktop && std::strstr(current_desktop, "KDE"))
+  {
+    // AppImage or local build.
+    QGuiApplication::setDesktopFileName(
+      QString::fromStdString(Path::Combine(EmuFolders::Resources, "org.duckstation.DuckStation")));
+  }
+#endif
+
   // Config-based RAIntegration switch must happen before the main window is displayed.
 #ifdef ENABLE_RAINTEGRATION
   if (!Achievements::IsUsingRAIntegration() && Host::GetBaseBoolSettingValue("Cheevos", "UseRAIntegration", false))
@@ -196,6 +224,16 @@ bool QtHost::InBatchMode()
 bool QtHost::InNoGUIMode()
 {
   return s_nogui_mode;
+}
+
+bool QtHost::IsRunningOnWayland()
+{
+#if defined(_WIN32) || defined(__APPLE__)
+  return false;
+#else
+  const QString platform_name = QGuiApplication::platformName();
+  return (platform_name == QStringLiteral("wayland"));
+#endif
 }
 
 QString QtHost::GetAppNameAndVersion()
@@ -591,7 +629,7 @@ void EmuThread::checkForSettingsChanges(const Settings& old_settings)
   // don't mess with fullscreen while locked
   if (!QtHost::IsSystemLocked())
   {
-    const bool render_to_main = shouldRenderToMain();
+    const bool render_to_main = QtHost::CanRenderToMainWindow();
     if (m_is_rendering_to_main != render_to_main && !m_is_fullscreen)
     {
       m_is_rendering_to_main = render_to_main;
@@ -656,9 +694,9 @@ void QtHost::MigrateSettings()
   }
 }
 
-bool EmuThread::shouldRenderToMain() const
+bool QtHost::CanRenderToMainWindow()
 {
-  return !Host::GetBoolSettingValue("Main", "RenderToSeparateWindow", false) && !QtHost::InNoGUIMode();
+  return !Host::GetBoolSettingValue("Main", "RenderToSeparateWindow", false) && !InNoGUIMode();
 }
 
 void Host::RequestResizeHostDisplay(s32 new_window_width, s32 new_window_height)
@@ -741,7 +779,7 @@ void EmuThread::startFullscreenUI()
   // we want settings loaded so we choose the correct renderer
   // this also sorts out input sources.
   System::LoadSettings(false);
-  m_is_rendering_to_main = shouldRenderToMain();
+  m_is_rendering_to_main = QtHost::CanRenderToMainWindow();
 
   // borrow the game start fullscreen flag
   const bool start_fullscreen =
@@ -796,7 +834,7 @@ void EmuThread::bootSystem(std::shared_ptr<SystemBootParameters> params)
   if (System::IsValidOrInitializing())
     return;
 
-  m_is_rendering_to_main = shouldRenderToMain();
+  m_is_rendering_to_main = QtHost::CanRenderToMainWindow();
 
   Error error;
   if (!System::BootSystem(std::move(*params), &error))
@@ -928,7 +966,7 @@ void EmuThread::setFullscreen(bool fullscreen, bool allow_render_to_main)
     return;
 
   m_is_fullscreen = fullscreen;
-  m_is_rendering_to_main = allow_render_to_main && shouldRenderToMain();
+  m_is_rendering_to_main = allow_render_to_main && QtHost::CanRenderToMainWindow();
   GPUThread::UpdateDisplayWindow(fullscreen);
 }
 
@@ -984,10 +1022,10 @@ std::optional<WindowInfo> EmuThread::acquireRenderWindow(RenderAPI render_api, b
 
   const bool window_fullscreen = m_is_fullscreen && !exclusive_fullscreen;
   const bool render_to_main = !fullscreen && m_is_rendering_to_main;
-  const bool use_main_window_pos = shouldRenderToMain();
+  const bool use_main_window_pos = QtHost::CanRenderToMainWindow();
 
-  return emit onAcquireRenderWindowRequested(render_api, window_fullscreen, render_to_main, m_is_surfaceless,
-                                             use_main_window_pos, error);
+  return emit onAcquireRenderWindowRequested(render_api, window_fullscreen, exclusive_fullscreen, render_to_main,
+                                             m_is_surfaceless, use_main_window_pos, error);
 }
 
 void EmuThread::releaseRenderWindow()
@@ -2596,11 +2634,12 @@ void QtHost::HookSignals()
   std::signal(SIGINT, SignalHandler);
   std::signal(SIGTERM, SignalHandler);
 
-#ifdef __linux__
+#ifndef _WIN32
   // Ignore SIGCHLD by default on Linux, since we kick off aplay asynchronously.
   struct sigaction sa_chld = {};
   sigemptyset(&sa_chld.sa_mask);
-  sa_chld.sa_flags = SA_SIGINFO | SA_RESTART | SA_NOCLDSTOP | SA_NOCLDWAIT;
+  sa_chld.sa_handler = SIG_IGN;
+  sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP | SA_NOCLDWAIT;
   sigaction(SIGCHLD, &sa_chld, nullptr);
 #endif
 }
@@ -2918,9 +2957,6 @@ int main(int argc, char* argv[])
   if (!QtHost::ParseCommandLineParametersAndInitializeConfig(app, autoboot))
     return EXIT_FAILURE;
 
-  if (!AutoUpdaterDialog::warnAboutUnofficialBuild())
-    return EXIT_FAILURE;
-
   if (!QtHost::EarlyProcessStartup())
     return EXIT_FAILURE;
 
@@ -2930,6 +2966,9 @@ int main(int argc, char* argv[])
 
   // Set theme before creating any windows.
   QtHost::UpdateApplicationTheme();
+
+  // Build warning.
+  AutoUpdaterDialog::warnAboutUnofficialBuild();
 
   // Start logging early.
   LogWindow::updateSettings();

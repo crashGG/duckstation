@@ -726,40 +726,7 @@ void GPU_HW::CheckSettings()
 
 u32 GPU_HW::CalculateResolutionScale() const
 {
-  u32 scale;
-  if (g_gpu_settings.gpu_resolution_scale != 0)
-  {
-    scale = g_gpu_settings.gpu_resolution_scale;
-  }
-  else
-  {
-    // Auto scaling.
-    if (m_presenter.GetDisplayWidth() == 0 || m_presenter.GetDisplayHeight() == 0 ||
-        m_presenter.GetDisplayVRAMWidth() == 0 || m_presenter.GetDisplayVRAMHeight() == 0 ||
-        !m_presenter.HasDisplayTexture() || !g_gpu_device->HasMainSwapChain())
-    {
-      // When the system is starting and all borders crop is enabled, the registers are zero, and
-      // display_height therefore is also zero. Keep the existing resolution until it updates.
-      scale = m_resolution_scale;
-    }
-    else
-    {
-      GSVector4i display_rect, draw_rect;
-      m_presenter.CalculateDrawRect(g_gpu_device->GetMainSwapChain()->GetWidth(),
-                                    g_gpu_device->GetMainSwapChain()->GetHeight(), true, true, &display_rect,
-                                    &draw_rect);
-
-      // We use the draw rect to determine scaling. This way we match the resolution as best we can, regardless of the
-      // anamorphic aspect ratio.
-      const s32 draw_width = draw_rect.width();
-      const s32 draw_height = draw_rect.height();
-      scale = static_cast<u32>(
-        std::ceil(std::max(static_cast<float>(draw_width) / static_cast<float>(m_presenter.GetDisplayVRAMWidth()),
-                           static_cast<float>(draw_height) / static_cast<float>(m_presenter.GetDisplayVRAMHeight()))));
-      VERBOSE_LOG("Draw Size = {}x{}, VRAM Size = {}x{}, Preferred Scale = {}", draw_width, draw_height,
-                  m_presenter.GetDisplayVRAMWidth(), m_presenter.GetDisplayVRAMHeight(), scale);
-    }
-  }
+  u32 scale = g_gpu_settings.gpu_resolution_scale;
 
   if (g_gpu_settings.gpu_downsample_mode == GPUDownsampleMode::Adaptive && scale > 1 && !Common::IsPow2(scale))
   {
@@ -780,14 +747,6 @@ u32 GPU_HW::CalculateResolutionScale() const
   }
 
   return std::clamp<u32>(scale, 1, GetMaxResolutionScale());
-}
-
-bool GPU_HW::UpdateResolutionScale(Error* error)
-{
-  if (CalculateResolutionScale() == m_resolution_scale)
-    return true;
-
-  return UpdateSettings(g_gpu_settings, error);
 }
 
 GPUDownsampleMode GPU_HW::GetDownsampleMode(u32 resolution_scale) const
@@ -3463,11 +3422,12 @@ void GPU_HW::CopyVRAM(u32 src_x, u32 src_y, u32 dst_x, u32 dst_y, u32 width, u32
   const GSVector4i dst_bounds = GetVRAMTransferBounds(dst_x, dst_y, width, height);
   const bool intersect_with_draw = m_vram_dirty_draw_rect.rintersects(src_bounds);
   const bool intersect_with_write = m_vram_dirty_write_rect.rintersects(src_bounds);
+  const bool overlaps_with_self = src_bounds.rintersects(dst_bounds);
   const bool use_shader =
     (set_mask || check_mask || ((src_x % VRAM_WIDTH) + width) > VRAM_WIDTH ||
      ((src_y % VRAM_HEIGHT) + height) > VRAM_HEIGHT || ((dst_x % VRAM_WIDTH) + width) > VRAM_WIDTH ||
      ((dst_y % VRAM_HEIGHT) + height) > VRAM_HEIGHT) ||
-    (!intersect_with_draw && !intersect_with_write);
+    (!intersect_with_draw && !intersect_with_write && !overlaps_with_self);
 
   // If we're copying a region that hasn't been drawn to, and we're using the TC, we can do it in local memory.
   if (m_use_texture_cache && !GPUTextureCache::IsRectDrawn(src_bounds))
@@ -3535,7 +3495,6 @@ void GPU_HW::CopyVRAM(u32 src_x, u32 src_y, u32 dst_x, u32 dst_y, u32 width, u32
   }
 
   GPUTexture* src_tex = m_vram_texture.get();
-  const bool overlaps_with_self = src_bounds.rintersects(dst_bounds);
   if (!g_gpu_device->GetFeatures().texture_copy_to_self || overlaps_with_self)
   {
     src_tex = m_vram_read_texture.get();

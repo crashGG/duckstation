@@ -59,7 +59,7 @@ fi
 %build
 
 if [ ! -d "${PWD}/deps" ]; then
-  scripts/deps/build-dependencies-linux.sh -system-freetype -system-harfbuzz -system-libjpeg -system-libpng -system-libwebp -system-libzip -system-zstd -system-qt "${PWD}/deps"
+  scripts/deps/build-dependencies-linux.sh -system-freetype -system-harfbuzz -system-libjpeg -system-libpng -system-libwebp -system-libzip -system-zlib -system-zstd -system-qt "${PWD}/deps"
 fi
 
 rm -fr build
@@ -77,7 +77,8 @@ ninja -C build %{?_smp_mflags}
 %install
 rm -fr %{buildroot}
 ninja -C build install
-install -Dm755 scripts/packaging/duckstation-qt %{buildroot}/usr/bin/duckstation-qt
+mkdir -p %{buildroot}/usr/bin
+ln -s /opt/duckstation/duckstation-qt %{buildroot}/usr/bin/duckstation-qt
 install -Dm644 scripts/packaging/org.duckstation.DuckStation.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/org.duckstation.DuckStation.png
 install -Dm644 scripts/packaging/org.duckstation.DuckStation.desktop %{buildroot}/usr/share/applications/org.duckstation.DuckStation.desktop
 

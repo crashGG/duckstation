@@ -121,6 +121,7 @@ static constexpr float PRE_FRAME_SLEEP_UPDATE_INTERVAL = 1.0f;
 static constexpr const char FALLBACK_EXE_NAME[] = "PSX.EXE";
 static constexpr u32 MAX_SKIPPED_DUPLICATE_FRAME_COUNT = 2; // 20fps minimum
 static constexpr u32 MAX_SKIPPED_TIMEOUT_FRAME_COUNT = 1;   // 30fps minimum
+static constexpr u8 MEMORY_CARD_FAST_FORWARD_FRAMES = 30;
 
 namespace {
 
@@ -263,6 +264,7 @@ struct ALIGN_TO_CACHE_LINE StateVars
   bool turbo_enabled = false;
 
   bool runahead_replay_pending = false;
+  u8 memory_card_fast_forward_frames = 0;
 
   u32 skipped_frame_count = 0;
   u32 last_presented_internal_frame_number = 0;
@@ -1217,6 +1219,10 @@ void System::LoadSettings(bool display_osd_messages)
     (g_settings.disable_all_enhancements ||
      Host::Internal::GetBaseSettingsLayer()->GetBoolValue("Main", "DisableAllEnhancements", false));
 
+  // Fix up automatic resolution scale, yuck.
+  if (g_settings.gpu_automatic_resolution_scale && IsValid())
+    g_settings.gpu_resolution_scale = g_gpu.CalculateAutomaticResolutionScale();
+
   Settings::UpdateLogConfig(si);
   Host::LoadSettings(si, lock);
   InputManager::ReloadSources(controller_si, lock);
@@ -1932,6 +1938,7 @@ bool System::Initialize(std::unique_ptr<CDImage> disc, DiscRegion disc_region, b
   PCDrv::Initialize();
 
   UpdateGTEAspectRatio();
+  UpdateAutomaticResolutionScale();
   UpdateThrottlePeriod();
   UpdateMemorySaveStateSettings();
 
@@ -2139,6 +2146,14 @@ void System::FrameDone()
 
   Timer::Value current_time = Timer::GetCurrentValue();
   GTE::UpdateFreecam(current_time);
+
+  // memory card fast forward
+  if (s_state.memory_card_fast_forward_frames > 0)
+  {
+    s_state.memory_card_fast_forward_frames--;
+    if (s_state.memory_card_fast_forward_frames == 0)
+      UpdateSpeedLimiterState();
+  }
 
   // Frame step after runahead, otherwise the pause takes precedence and the replay never happens.
   if (s_state.frame_step_request)
@@ -2582,7 +2597,7 @@ void System::ClearMemorySaveStates(bool reallocate_resources, bool recycle_textu
   }
 
   // immediately save a rewind state next frame
-  s_state.rewind_save_counter = (s_state.rewind_save_frequency > 0) ? 0 : -1;
+  s_state.rewind_save_counter = (s_state.rewind_save_frequency >= 0) ? 0 : -1;
 }
 
 void System::FreeMemoryStateStorage(bool release_memory, bool release_textures, bool recycle_textures)
@@ -3523,7 +3538,7 @@ void System::UpdateSpeedLimiterState()
 {
   DebugAssert(IsValid());
 
-  s_state.target_speed = IsFastForwardingBoot() ?
+  s_state.target_speed = (IsFastForwardingBoot() || s_state.memory_card_fast_forward_frames > 0) ?
                            0.0f :
                            (s_state.turbo_enabled ? g_settings.turbo_speed :
                                                     (s_state.fast_forward_enabled ? g_settings.fast_forward_speed :
@@ -3931,6 +3946,15 @@ bool System::IsSavingMemoryCards()
   return false;
 }
 
+void System::OnMemoryCardAccessed()
+{
+  if (!g_settings.memory_card_fast_forward_access)
+    return;
+
+  if (std::exchange(s_state.memory_card_fast_forward_frames, MEMORY_CARD_FAST_FORWARD_FRAMES) == 0)
+    UpdateSpeedLimiterState();
+}
+
 void System::SwapMemoryCards()
 {
   if (!IsValid())
@@ -4201,8 +4225,8 @@ void System::UpdateRunningGame(const std::string& path, CDImage* image, bool boo
 
   UpdateRichPresence(booting);
 
-  FullscreenUI::OnRunningGameChanged(s_state.running_game_path, s_state.running_game_serial,
-                                     s_state.running_game_title);
+  FullscreenUI::OnRunningGameChanged(s_state.running_game_path, s_state.running_game_serial, s_state.running_game_title,
+                                     s_state.running_game_hash);
 
   Host::OnGameChanged(s_state.running_game_path, s_state.running_game_serial, s_state.running_game_title,
                       s_state.running_game_hash);
@@ -4489,7 +4513,8 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
 
       // NOTE: Must come after the GPU thread settings update, otherwise it allocs the wrong size textures.
       const bool use_existing_textures = (g_settings.gpu_resolution_scale == old_settings.gpu_resolution_scale);
-      ClearMemorySaveStates(true, use_existing_textures);
+      FreeMemoryStateStorage(false, true, use_existing_textures);
+      ClearMemorySaveStates(true, true);
 
       if (IsPaused())
       {
@@ -5804,6 +5829,7 @@ void System::DisplayWindowResized()
     return;
 
   UpdateGTEAspectRatio();
+  UpdateAutomaticResolutionScale();
 }
 
 void System::UpdateGTEAspectRatio()
@@ -5845,6 +5871,28 @@ void System::UpdateGTEAspectRatio()
   }
 
   GTE::SetAspectRatio(gte_ar, custom_num, custom_denom);
+}
+
+void System::UpdateAutomaticResolutionScale()
+{
+  if (!IsValidOrInitializing() || !g_settings.gpu_automatic_resolution_scale)
+    return;
+
+  const u32 new_scale = g_gpu.CalculateAutomaticResolutionScale();
+  if (g_settings.gpu_resolution_scale == new_scale)
+    return;
+
+  g_settings.gpu_resolution_scale = Truncate8(new_scale);
+  GPUThread::UpdateSettings(true, false, false);
+  FreeMemoryStateStorage(false, true, false);
+  ClearMemorySaveStates(true, false);
+
+  if (IsPaused())
+  {
+    // resolution change needs display updated
+    g_gpu.UpdateDisplay(false);
+    GPUThread::PresentCurrentFrame();
+  }
 }
 
 bool System::ChangeGPUDump(std::string new_path)

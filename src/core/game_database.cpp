@@ -40,7 +40,7 @@ namespace GameDatabase {
 enum : u32
 {
   GAME_DATABASE_CACHE_SIGNATURE = 0x45434C48,
-  GAME_DATABASE_CACHE_VERSION = 19,
+  GAME_DATABASE_CACHE_VERSION = 21,
 };
 
 static const Entry* GetEntryForId(std::string_view code);
@@ -95,13 +95,10 @@ static constexpr const std::array<const char*, static_cast<size_t>(Trait::MaxCou
   "DisablePGXPTextureCorrection",
   "DisablePGXPColorCorrection",
   "DisablePGXPDepthBuffer",
-  "DisablePGXPPreserveProjFP",
   "DisablePGXPOn2DPolygons",
   "ForcePGXPVertexCache",
   "ForcePGXPCPUMode",
-  "ForceRecompilerMemoryExceptions",
   "ForceRecompilerICache",
-  "ForceRecompilerLUTFastmem",
   "ForceCDROMSubQSkew",
   "IsLibCryptProtected",
 }};
@@ -127,13 +124,10 @@ static constexpr const std::array<const char*, static_cast<size_t>(Trait::MaxCou
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Disable PGXP Texture Correction", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Disable PGXP Color Correction", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Disable PGXP Depth Buffer", "GameDatabase::Trait"),
-  TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Disable PGXP Preserve Projection Floating Point", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Disable PGXP on 2D Polygons", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Force PGXP Vertex Cache", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Force PGXP CPU Mode", "GameDatabase::Trait"),
-  TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Force Recompiler Memory Exceptions", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Force Recompiler ICache", "GameDatabase::Trait"),
-  TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Force Recompiler LUT Fastmem", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Force CD-ROM SubQ Skew", "GameDatabase::Trait"),
   TRANSLATE_DISAMBIG_NOOP("GameDatabase", "Is LibCrypt Protected", "GameDatabase::Trait"),
 }};
@@ -620,14 +614,6 @@ void GameDatabase::Entry::ApplySettings(Settings& settings, bool display_osd_mes
     settings.gpu_pgxp_color_correction = false;
   }
 
-  if (HasTrait(Trait::DisablePGXPPreserveProjFP))
-  {
-    if (display_osd_messages && settings.gpu_pgxp_enable && settings.gpu_pgxp_preserve_proj_fp)
-      APPEND_MESSAGE(TRANSLATE_SV("GameDatabase", "PGXP preserve projection precision disabled."));
-
-    settings.gpu_pgxp_preserve_proj_fp = false;
-  }
-
   if (HasTrait(Trait::ForcePGXPVertexCache))
   {
     if (display_osd_messages && settings.gpu_pgxp_enable && !settings.gpu_pgxp_vertex_cache)
@@ -686,22 +672,24 @@ void GameDatabase::Entry::ApplySettings(Settings& settings, bool display_osd_mes
     g_settings.gpu_pgxp_disable_2d = true;
   }
 
-  if (HasTrait(Trait::ForceRecompilerMemoryExceptions))
+  if (gpu_pgxp_preserve_proj_fp.has_value())
   {
-    WARNING_LOG("Memory exceptions for recompiler forced by compatibility settings.");
-    settings.cpu_recompiler_memory_exceptions = true;
+    if (display_osd_messages)
+    {
+      INFO_LOG("GameDB: GPU preserve projection precision set to {}.",
+               gpu_pgxp_preserve_proj_fp.value() ? "true" : "false");
+
+      if (settings.gpu_pgxp_enable && settings.gpu_pgxp_preserve_proj_fp && !gpu_pgxp_preserve_proj_fp.value())
+        APPEND_MESSAGE(TRANSLATE_SV("GameDatabase", "PGXP preserve projection precision disabled."));
+    }
+
+    settings.gpu_pgxp_preserve_proj_fp = gpu_pgxp_preserve_proj_fp.value();
   }
 
   if (HasTrait(Trait::ForceRecompilerICache))
   {
     WARNING_LOG("ICache for recompiler forced by compatibility settings.");
     settings.cpu_recompiler_icache = true;
-  }
-
-  if (settings.cpu_fastmem_mode == CPUFastmemMode::MMap && HasTrait(Trait::ForceRecompilerLUTFastmem))
-  {
-    WARNING_LOG("LUT fastmem for recompiler forced by compatibility settings.");
-    settings.cpu_fastmem_mode = CPUFastmemMode::LUT;
   }
 
   if (HasTrait(Trait::ForceCDROMSubQSkew))
@@ -971,7 +959,8 @@ bool GameDatabase::LoadFromCache()
         !reader.ReadOptionalT(&entry.display_deinterlacing_mode) || !reader.ReadOptionalT(&entry.dma_max_slice_ticks) ||
         !reader.ReadOptionalT(&entry.dma_halt_ticks) || !reader.ReadOptionalT(&entry.gpu_fifo_size) ||
         !reader.ReadOptionalT(&entry.gpu_max_run_ahead) || !reader.ReadOptionalT(&entry.gpu_pgxp_tolerance) ||
-        !reader.ReadOptionalT(&entry.gpu_pgxp_depth_threshold) || !reader.ReadOptionalT(&entry.gpu_line_detect_mode) ||
+        !reader.ReadOptionalT(&entry.gpu_pgxp_depth_threshold) ||
+        !reader.ReadOptionalT(&entry.gpu_pgxp_preserve_proj_fp) || !reader.ReadOptionalT(&entry.gpu_line_detect_mode) ||
         !reader.ReadSizePrefixedString(&entry.disc_set_name) || !reader.ReadU32(&num_disc_set_serials))
     {
       DEV_LOG("Cache entry is corrupted.");
@@ -1090,6 +1079,7 @@ bool GameDatabase::SaveToCache()
     writer.WriteOptionalT(entry.gpu_max_run_ahead);
     writer.WriteOptionalT(entry.gpu_pgxp_tolerance);
     writer.WriteOptionalT(entry.gpu_pgxp_depth_threshold);
+    writer.WriteOptionalT(entry.gpu_pgxp_preserve_proj_fp);
     writer.WriteOptionalT(entry.gpu_line_detect_mode);
 
     writer.WriteSizePrefixedString(entry.disc_set_name);
@@ -1351,6 +1341,7 @@ bool GameDatabase::ParseYamlEntry(Entry* entry, const ryml::ConstNodeRef& value)
     entry->gpu_max_run_ahead = GetOptionalTFromObject<u32>(settings, "gpuMaxRunAhead");
     entry->gpu_pgxp_tolerance = GetOptionalTFromObject<float>(settings, "gpuPGXPTolerance");
     entry->gpu_pgxp_depth_threshold = GetOptionalTFromObject<float>(settings, "gpuPGXPDepthThreshold");
+    entry->gpu_pgxp_preserve_proj_fp = GetOptionalTFromObject<bool>(settings, "gpuPGXPPreserveProjFP");
     entry->gpu_line_detect_mode =
       ParseOptionalTFromObject<GPULineDetectMode>(settings, "gpuLineDetectMode", &Settings::ParseLineDetectModeName);
   }

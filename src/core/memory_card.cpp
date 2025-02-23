@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "memory_card.h"
 #include "host.h"
-#include "system.h"
+#include "system_private.h"
 
 #include "util/imgui_manager.h"
 #include "util/state_wrapper.h"
@@ -143,6 +143,7 @@ bool MemoryCard::Transfer(const u8 data_in, u8* data_out)
       {
         DEV_LOG("Reading memory card sector {}", m_address);
         m_checksum = Truncate8(m_address >> 8) ^ Truncate8(m_address) ^ bits;
+        System::OnMemoryCardAccessed();
       }
       else
       {
@@ -178,6 +179,7 @@ bool MemoryCard::Transfer(const u8 data_in, u8* data_out)
         INFO_LOG("Writing memory card sector {}", m_address);
         m_checksum = Truncate8(m_address >> 8) ^ Truncate8(m_address) ^ data_in;
         m_FLAG.no_write_yet = false;
+        System::OnMemoryCardAccessed();
       }
       else
       {
@@ -293,27 +295,27 @@ std::unique_ptr<MemoryCard> MemoryCard::Create()
   return mc;
 }
 
-std::unique_ptr<MemoryCard> MemoryCard::Open(std::string_view filename)
+std::unique_ptr<MemoryCard> MemoryCard::Open(std::string_view path)
 {
   std::unique_ptr<MemoryCard> mc = std::make_unique<MemoryCard>();
-  mc->m_filename = filename;
+  mc->m_path = path;
 
   Error error;
-  if (!FileSystem::FileExists(mc->m_filename.c_str())) [[unlikely]]
+  if (!FileSystem::FileExists(mc->m_path.c_str())) [[unlikely]]
   {
     mc->Format();
     mc->m_changed = false;
   }
-  else if (!MemoryCardImage::LoadFromFile(&mc->m_data, mc->m_filename.c_str(), &error)) [[unlikely]]
+  else if (!MemoryCardImage::LoadFromFile(&mc->m_data, mc->m_path.c_str(), &error)) [[unlikely]]
   {
     Host::AddIconOSDMessage(
-      fmt::format("memory_card_{}", filename), ICON_FA_SD_CARD,
+      fmt::format("memory_card_{}", path), ICON_FA_SD_CARD,
       fmt::format(TRANSLATE_FS("MemoryCard", "{} could not be read:\n{}\nThe memory card will NOT be saved.\nYou must "
                                              "delete the memory card manually if you want to save."),
-                  Path::GetFileName(filename), error.GetDescription()),
+                  Path::GetFileName(path), error.GetDescription()),
       Host::OSD_CRITICAL_ERROR_DURATION);
     mc->Format();
-    mc->m_filename = {};
+    mc->m_path = {};
     mc->m_changed = false;
   }
 
@@ -335,21 +337,21 @@ bool MemoryCard::SaveIfChanged(bool display_osd_message)
 
   m_changed = false;
 
-  if (m_filename.empty())
+  if (m_path.empty())
     return false;
 
   std::string osd_key;
   std::string display_name;
   if (display_osd_message)
   {
-    osd_key = fmt::format("memory_card_save_{}", m_filename);
-    display_name = FileSystem::GetDisplayNameFromPath(m_filename);
+    osd_key = fmt::format("memory_card_save_{}", m_path);
+    display_name = FileSystem::GetDisplayNameFromPath(m_path);
   }
 
-  INFO_LOG("Saving memory card to {}...", Path::GetFileTitle(m_filename));
+  INFO_LOG("Saving memory card to {}...", Path::GetFileTitle(m_path));
 
   Error error;
-  if (!MemoryCardImage::SaveToFile(m_data, m_filename.c_str(), &error))
+  if (!MemoryCardImage::SaveToFile(m_data, m_path.c_str(), &error))
   {
     if (display_osd_message)
     {
@@ -376,7 +378,7 @@ bool MemoryCard::SaveIfChanged(bool display_osd_message)
 void MemoryCard::QueueFileSave()
 {
   // skip if the event is already pending, or we don't have a backing file
-  if (m_save_event.IsActive() || m_filename.empty())
+  if (m_save_event.IsActive() || m_path.empty())
     return;
 
   // save in one second, that should be long enough for everything to finish writing
