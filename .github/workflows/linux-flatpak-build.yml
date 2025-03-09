@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        setup: [{arch: "x86_64", runner: "ubuntu-22.04"}, {arch: "aarch64", runner: "ubuntu-24.04-arm"}]
+        setup: [{arch: "x86_64", runner: "ubuntu-22.04"}]
 
     runs-on: ${{ matrix.setup.runner }}
     container:
