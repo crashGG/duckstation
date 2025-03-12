@@ -116,6 +116,15 @@ ALWAYS_INLINE static u32 ModAlpha(u32 col32, float a)
   return (col32 & ~IM_COL32_A_MASK) | (static_cast<u32>(a * 255.0f) << IM_COL32_A_SHIFT);
 }
 
+// lighter in light themes
+ALWAYS_INLINE static ImVec4 DarkerColor(const ImVec4& v, float f = 0.8f)
+{
+  // light theme
+  f = (UIStyle.PrimaryTextColor.x < UIStyle.PrimaryColor.x) ? (1.0f / f) : f;
+  return ImVec4(std::max(v.x, 1.0f / 255.0f) * f, std::max(v.y, 1.0f / 255.0f) * f, std::max(v.z, 1.0f / 255.0f) * f,
+                v.w);
+}
+
 ALWAYS_INLINE static ImVec4 MulAlpha(const ImVec4& v, float a)
 {
   return ImVec4(v.x, v.y, v.z, v.w * a);
@@ -234,6 +243,10 @@ void RenderShadowedTextClipped(ImFont* font, const ImVec2& pos_min, const ImVec2
                                const char* text_end, const ImVec2* text_size_if_known = nullptr,
                                const ImVec2& align = ImVec2(0, 0), float wrap_width = 0.0f,
                                const ImRect* clip_rect = nullptr);
+void RenderShadowedTextClipped(ImDrawList* draw_list, ImFont* font, const ImVec2& pos_min, const ImVec2& pos_max,
+                               u32 color, const char* text, const char* text_end,
+                               const ImVec2* text_size_if_known = nullptr, const ImVec2& align = ImVec2(0, 0),
+                               float wrap_width = 0.0f, const ImRect* clip_rect = nullptr);
 void MenuHeading(const char* title, bool draw_line = true);
 bool MenuHeadingButton(const char* title, const char* value = nullptr, bool enabled = true, bool draw_line = true);
 bool ActiveButton(const char* title, bool is_active, bool enabled = true,
@@ -298,9 +311,6 @@ ALWAYS_INLINE static bool EnumChoiceButton(const char* title, const char* summar
     return false;
   }
 }
-
-void DrawShadowedText(ImDrawList* dl, ImFont* font, const ImVec2& pos, u32 col, const char* text,
-                      const char* text_end = nullptr, float wrap_width = 0.0f);
 
 void BeginNavBar(float x_padding = LAYOUT_MENU_BUTTON_X_PADDING, float y_padding = LAYOUT_MENU_BUTTON_Y_PADDING);
 void EndNavBar();
