@@ -28,12 +28,12 @@ enum class EntryType : u8
   PSExe,
   Playlist,
   PSF,
-  Count
+  MaxCount
 };
 
 struct Entry
 {
-  EntryType type = EntryType::Disc;
+  EntryType type = EntryType::MaxCount;
   DiscRegion region = DiscRegion::Other;
 
   s8 disc_set_index = -1;
@@ -69,6 +69,7 @@ struct Entry
 
   TinyString GetReleaseDateString() const;
 
+  ALWAYS_INLINE bool IsValid() const { return (type < EntryType::MaxCount); }
   ALWAYS_INLINE bool IsDisc() const { return (type == EntryType::Disc); }
   ALWAYS_INLINE bool IsDiscSet() const { return (type == EntryType::DiscSet); }
   ALWAYS_INLINE bool HasCustomLanguage() const { return (custom_language != GameDatabase::Language::MaxCount); }

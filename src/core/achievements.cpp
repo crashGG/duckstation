@@ -90,7 +90,7 @@ static constexpr float LEADERBOARD_STARTED_NOTIFICATION_TIME = 3.0f;
 static constexpr float LEADERBOARD_FAILED_NOTIFICATION_TIME = 3.0f;
 
 static constexpr float INDICATOR_FADE_IN_TIME = 0.1f;
-static constexpr float INDICATOR_FADE_OUT_TIME = 0.5f;
+static constexpr float INDICATOR_FADE_OUT_TIME = 0.3f;
 
 // Some API calls are really slow. Set a longer timeout.
 static constexpr float SERVER_CALL_TIMEOUT = 60.0f;
@@ -155,6 +155,7 @@ static void BeginChangeDisc();
 static void UpdateGameSummary(bool update_progress_database, bool force_update_progress_database);
 static std::string GetLocalImagePath(const std::string_view image_name, int type);
 static void DownloadImage(std::string url, std::string cache_path);
+static const std::string& GetCachedAchievementBadgePath(const rc_client_achievement_t* achievement, int state);
 static void UpdateGlyphRanges();
 
 static TinyString DecryptLoginToken(std::string_view encrypted_token, std::string_view username);
@@ -266,7 +267,10 @@ struct State
   rc_client_async_handle_t* load_game_request = nullptr;
 
   rc_client_achievement_list_t* achievement_list = nullptr;
-  std::vector<std::pair<const void*, std::string>> achievement_badge_paths;
+  std::vector<std::tuple<const void*, int, std::string>> achievement_badge_paths;
+
+  const rc_client_achievement_t* most_recent_unlock = nullptr;
+  const rc_client_achievement_t* achievement_nearest_completion = nullptr;
 
   rc_client_leaderboard_list_t* leaderboard_list = nullptr;
   const rc_client_leaderboard_t* open_leaderboard = nullptr;
@@ -1030,6 +1034,49 @@ void Achievements::UpdateGameSummary(bool update_progress_database, bool force_u
 
   if (update_progress_database)
     UpdateProgressDatabase(force_update_progress_database);
+}
+
+void Achievements::UpdateRecentUnlockAndAlmostThere()
+{
+  const auto lock = GetLock();
+  if (!HasActiveGame())
+    return;
+
+  s_state.most_recent_unlock = nullptr;
+  s_state.achievement_nearest_completion = nullptr;
+
+  rc_client_achievement_list_t* const achievements = rc_client_create_achievement_list(
+    s_state.client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+  if (!achievements)
+    return;
+
+  for (u32 i = 0; i < achievements->num_buckets; i++)
+  {
+    const rc_client_achievement_bucket_t& bucket = achievements->buckets[i];
+    for (u32 j = 0; j < bucket.num_achievements; j++)
+    {
+      const rc_client_achievement_t* achievement = bucket.achievements[j];
+
+      if (achievement->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED)
+      {
+        if (!s_state.most_recent_unlock || achievement->unlock_time > s_state.most_recent_unlock->unlock_time)
+          s_state.most_recent_unlock = achievement;
+      }
+      else
+      {
+        // find the achievement with the greatest normalized progress, but skip anything below 80%,
+        // matching the rc_client definition of "almost there"
+        const float percent_cutoff = 80.0f;
+        if (achievement->measured_percent >= percent_cutoff &&
+            (!s_state.achievement_nearest_completion ||
+             achievement->measured_percent > s_state.achievement_nearest_completion->measured_percent))
+        {
+          s_state.achievement_nearest_completion = achievement;
+        }
+      }
+    }
+  }
+  rc_client_destroy_achievement_list(achievements);
 }
 
 void Achievements::UpdateRichPresence(std::unique_lock<std::recursive_mutex>& lock)
@@ -1973,6 +2020,18 @@ std::string Achievements::GetAchievementBadgePath(const rc_client_achievement_t*
   return path;
 }
 
+const std::string& Achievements::GetCachedAchievementBadgePath(const rc_client_achievement_t* achievement, int state)
+{
+  for (const auto& [l_cheevo, l_state, l_path] : s_state.achievement_badge_paths)
+  {
+    if (l_cheevo == achievement && l_state == state)
+      return l_path;
+  }
+
+  std::string path = GetAchievementBadgePath(achievement, state);
+  return std::get<2>(s_state.achievement_badge_paths.emplace_back(achievement, state, std::move(path)));
+}
+
 std::string Achievements::GetLeaderboardUserBadgePath(const rc_client_leaderboard_entry_t* entry)
 {
   // TODO: maybe we should just cache these in memory...
@@ -2314,6 +2373,9 @@ void Achievements::ClearUIState()
     rc_client_destroy_achievement_list(s_state.achievement_list);
     s_state.achievement_list = nullptr;
   }
+
+  s_state.most_recent_unlock = nullptr;
+  s_state.achievement_nearest_completion = nullptr;
 }
 
 template<typename T>
@@ -2340,6 +2402,8 @@ static float IndicatorOpacity(float delta_time, T& i)
 void Achievements::DrawGameOverlays()
 {
   using ImGuiFullscreen::LayoutScale;
+  using ImGuiFullscreen::ModAlpha;
+  using ImGuiFullscreen::RenderShadowedTextClipped;
   using ImGuiFullscreen::UIStyle;
 
   if (!HasActiveGame() || !g_settings.achievements_overlays)
@@ -2347,10 +2411,13 @@ void Achievements::DrawGameOverlays()
 
   const auto lock = GetLock();
 
+  constexpr float bg_opacity = 0.8f;
+
   const float margin =
     std::max(ImCeil(ImGuiManager::GetScreenMargin() * ImGuiManager::GetGlobalScale()), LayoutScale(10.0f));
   const float spacing = LayoutScale(10.0f);
   const float padding = LayoutScale(10.0f);
+  const float rounding = LayoutScale(10.0f);
   const ImVec2 image_size =
     LayoutScale(ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT);
   const ImGuiIO& io = ImGui::GetIO();
@@ -2366,13 +2433,12 @@ void Achievements::DrawGameOverlays()
     {
       AchievementChallengeIndicator& indicator = *it;
       const float opacity = IndicatorOpacity(io.DeltaTime, indicator);
-      const u32 col = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, opacity));
 
       GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(indicator.badge_path);
       if (badge)
       {
         dl->AddImage(badge, current_position, current_position + image_size, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-                     col);
+                     ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, opacity)));
         current_position.x -= x_advance;
       }
 
@@ -2394,7 +2460,6 @@ void Achievements::DrawGameOverlays()
   {
     AchievementProgressIndicator& indicator = s_state.active_progress_indicator.value();
     const float opacity = IndicatorOpacity(io.DeltaTime, indicator);
-    const u32 col = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, opacity));
 
     const char* text_start = s_state.active_progress_indicator->achievement->measured_progress;
     const char* text_end = text_start + std::strlen(text_start);
@@ -2404,23 +2469,24 @@ void Achievements::DrawGameOverlays()
     const ImVec2 box_min = ImVec2(position.x - image_size.x - text_size.x - spacing - padding * 2.0f,
                                   position.y - image_size.y - padding * 2.0f);
     const ImVec2 box_max = position;
-    const float box_rounding = LayoutScale(1.0f);
 
-    dl->AddRectFilled(box_min, box_max, ImGui::GetColorU32(ImVec4(0.13f, 0.13f, 0.13f, opacity * 0.5f)), box_rounding);
-    dl->AddRect(box_min, box_max, ImGui::GetColorU32(ImVec4(0.8f, 0.8f, 0.8f, opacity)), box_rounding);
+    dl->AddRectFilled(box_min, box_max,
+                      ImGui::GetColorU32(ModAlpha(UIStyle.ToastBackgroundColor, opacity * bg_opacity)), rounding);
 
     GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(indicator.badge_path);
     if (badge)
     {
       const ImVec2 badge_pos = box_min + ImVec2(padding, padding);
-      dl->AddImage(badge, badge_pos, badge_pos + image_size, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), col);
+      dl->AddImage(badge, badge_pos, badge_pos + image_size, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                   ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, opacity)));
     }
 
     const ImVec2 text_pos =
       box_min + ImVec2(padding + image_size.x + spacing, (box_max.y - box_min.y - text_size.y) * 0.5f);
-    const ImVec4 text_clip_rect(text_pos.x, text_pos.y, box_max.x, box_max.y);
-    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, col, text_start, text_end, 0.0f,
-                &text_clip_rect);
+    const ImRect text_clip_rect(text_pos, box_max);
+    RenderShadowedTextClipped(dl, UIStyle.MediumFont, text_pos, box_max,
+                              ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity)), text_start, text_end,
+                              &text_size, ImVec2(0.0f, 0.0f), 0.0f, &text_clip_rect);
 
     if (!indicator.active && opacity <= 0.01f)
     {
@@ -2445,25 +2511,22 @@ void Achievements::DrawGameOverlays()
       const ImVec2 size = ImGuiFullscreen::UIStyle.MediumFont->CalcTextSizeA(
         ImGuiFullscreen::UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, width_string.c_str(), width_string.end_ptr());
 
-      const ImVec2 box_min = ImVec2(position.x - size.x - padding * 2.0f, position.y - size.y - padding * 2.0f);
-      const ImVec2 box_max = position;
-      const float box_rounding = LayoutScale(1.0f);
-      dl->AddRectFilled(box_min, box_max, ImGui::GetColorU32(ImVec4(0.13f, 0.13f, 0.13f, opacity * 0.5f)),
-                        box_rounding);
-      dl->AddRect(box_min, box_max, ImGui::GetColorU32(ImVec4(0.8f, 0.8f, 0.8f, opacity)), box_rounding);
+      const ImRect box(ImVec2(position.x - size.x - padding * 2.0f, position.y - size.y - padding * 2.0f), position);
+      dl->AddRectFilled(box.Min, box.Max,
+                        ImGui::GetColorU32(ModAlpha(UIStyle.ToastBackgroundColor, opacity * bg_opacity)), rounding);
 
-      const u32 text_col = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, opacity));
+      const u32 text_col = ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity));
       const ImVec2 text_size = ImGuiFullscreen::UIStyle.MediumFont->CalcTextSizeA(
         ImGuiFullscreen::UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, indicator.text.c_str(),
         indicator.text.c_str() + indicator.text.length());
-      const ImVec2 text_pos = ImVec2(box_max.x - padding - text_size.x, box_min.y + padding);
-      const ImVec4 text_clip_rect(box_min.x, box_min.y, box_max.x, box_max.y);
-      dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_col, indicator.text.c_str(),
-                  indicator.text.c_str() + indicator.text.length(), 0.0f, &text_clip_rect);
+      const ImVec2 text_pos = ImVec2(box.Max.x - padding - text_size.x, box.Min.y + padding);
+      RenderShadowedTextClipped(dl, UIStyle.MediumFont, text_pos, box.Max, text_col, indicator.text.c_str(),
+                                indicator.text.c_str() + indicator.text.length(), &text_size, ImVec2(0.0f, 0.0f), 0.0f,
+                                &box);
 
-      const ImVec2 icon_pos = ImVec2(box_min.x + padding, box_min.y + padding);
-      dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, icon_pos, text_col, ICON_FA_STOPWATCH, nullptr,
-                  0.0f, &text_clip_rect);
+      const ImVec2 icon_pos = ImVec2(box.Min.x + padding, box.Min.y + padding);
+      RenderShadowedTextClipped(dl, UIStyle.MediumFont, icon_pos, box.Max, text_col, ICON_FA_STOPWATCH, nullptr,
+                                nullptr, ImVec2(0.0f, 0.0f), 0.0f, &box);
 
       if (!indicator.active && opacity <= 0.01f)
       {
@@ -2475,7 +2538,7 @@ void Achievements::DrawGameOverlays()
         ++it;
       }
 
-      position.x = box_min.x - padding;
+      position.x = box.Min.x - padding;
     }
 
     // Uncomment if there are any other overlays above this one.
@@ -2485,83 +2548,177 @@ void Achievements::DrawGameOverlays()
 
 #ifndef __ANDROID__
 
-void Achievements::DrawPauseMenuOverlays()
+void Achievements::DrawPauseMenuOverlays(float start_pos_y)
 {
+  using ImGuiFullscreen::DarkerColor;
   using ImGuiFullscreen::LayoutScale;
+  using ImGuiFullscreen::ModAlpha;
   using ImGuiFullscreen::UIStyle;
 
-  if (!HasActiveGame())
+  if (!HasActiveGame() || !HasAchievements())
     return;
 
   const auto lock = GetLock();
 
-  if (s_state.active_challenge_indicators.empty() && !s_state.active_progress_indicator.has_value())
-    return;
+  const ImVec2& display_size = ImGui::GetIO().DisplaySize;
+  const float box_margin = LayoutScale(20.0f);
+  const float box_width = LayoutScale(450.0f);
+  const float box_padding = LayoutScale(15.0f);
+  const float box_content_width = box_width - box_padding - box_padding;
+  const float box_rounding = LayoutScale(20.0f);
+  const u32 box_background_color = ImGui::GetColorU32(ModAlpha(UIStyle.BackgroundColor, 0.8f));
+  const ImU32 title_text_color = ImGui::GetColorU32(UIStyle.BackgroundTextColor) | IM_COL32_A_MASK;
+  const ImU32 text_color = ImGui::GetColorU32(DarkerColor(UIStyle.BackgroundTextColor)) | IM_COL32_A_MASK;
+  const float paragraph_spacing = LayoutScale(10.0f);
+  const float text_spacing = LayoutScale(2.0f);
 
-  const ImGuiIO& io = ImGui::GetIO();
-  ImFont* font = UIStyle.MediumFont;
+  const float progress_height = LayoutScale(20.0f);
+  const float progress_rounding = LayoutScale(5.0f);
+  const float badge_size = LayoutScale(40.0f);
+  const float badge_text_width = box_content_width - badge_size - text_spacing - text_spacing;
 
-  const ImVec2 image_size(LayoutScale(ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY,
-                                      ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY));
-  const float start_y =
-    LayoutScale(10.0f + 4.0f + 4.0f) + UIStyle.LargeFont->FontSize + (UIStyle.MediumFont->FontSize * 2.0f);
-  const float margin = LayoutScale(10.0f);
-  const float spacing = LayoutScale(10.0f);
-  const float padding = LayoutScale(10.0f);
+  ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-  const float max_text_width = ImGuiFullscreen::LayoutScale(300.0f);
-  const float row_width = max_text_width + padding + padding + image_size.x + spacing;
-  const float title_height = padding + font->FontSize + padding;
+  const auto get_achievement_height = [&badge_size, &badge_text_width,
+                                       &text_spacing](const rc_client_achievement_t* achievement, bool show_measured) {
+    const ImVec2 description_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX,
+                                                                      badge_text_width, achievement->description);
+    const float text_height = UIStyle.MediumFont->FontSize + text_spacing + description_size.y;
+    return std::max(text_height, badge_size);
+  };
+
+  float box_height =
+    box_padding + box_padding + UIStyle.MediumFont->FontSize + paragraph_spacing + progress_height + paragraph_spacing;
+  if (s_state.most_recent_unlock)
+  {
+    box_height += UIStyle.MediumFont->FontSize + paragraph_spacing +
+                  get_achievement_height(s_state.most_recent_unlock, false) +
+                  (s_state.achievement_nearest_completion ? (paragraph_spacing + paragraph_spacing) : 0.0f);
+  }
+  if (s_state.achievement_nearest_completion)
+  {
+    box_height += UIStyle.MediumFont->FontSize + paragraph_spacing +
+                  get_achievement_height(s_state.achievement_nearest_completion, true);
+  }
+
+  ImVec2 box_min = ImVec2(display_size.x - box_width - box_margin, start_pos_y + box_margin);
+  ImVec2 box_max = ImVec2(box_min.x + box_width, box_min.y + box_height);
+  ImVec2 text_pos = ImVec2(box_min.x + box_padding, box_min.y + box_padding);
+  ImVec2 text_size;
+
+  dl->AddRectFilled(box_min, box_max, box_background_color, box_rounding);
+
+  const auto draw_achievement_with_summary = [&box_max, &badge_text_width, &dl, &title_text_color, &text_color,
+                                              &text_spacing, &text_pos, &badge_size](
+                                               const rc_client_achievement_t* achievement, bool show_measured) {
+    const ImVec2 image_max = ImVec2(text_pos.x + badge_size, text_pos.y + badge_size);
+    ImVec2 badge_text_pos = ImVec2(image_max.x + text_spacing + text_spacing, text_pos.y);
+    const ImVec4 clip_rect = ImVec4(badge_text_pos.x, badge_text_pos.y, badge_text_pos.x + badge_text_width, box_max.y);
+    const ImVec2 description_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX,
+                                                                      badge_text_width, achievement->description);
+
+    GPUTexture* badge_tex = ImGuiFullscreen::GetCachedTextureAsync(
+      GetCachedAchievementBadgePath(achievement, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED));
+    dl->AddImage(badge_tex, text_pos, image_max);
+
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, badge_text_pos, title_text_color, achievement->title,
+                nullptr, 0.0f, &clip_rect);
+    badge_text_pos.y += UIStyle.MediumFont->FontSize + text_spacing;
+
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, badge_text_pos, text_color, achievement->description,
+                nullptr, badge_text_width, &clip_rect);
+    badge_text_pos.y += description_size.y;
+
+    text_pos.y = badge_text_pos.y;
+  };
+
+  TinyString buffer;
+
+  // title
+  {
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color,
+                TRANSLATE_DISAMBIG("Achievements", "Achievements Unlocked", "Pause Menu"));
+    const float unlocked_fraction = static_cast<float>(s_state.game_summary.num_unlocked_achievements) /
+                                    static_cast<float>(s_state.game_summary.num_core_achievements);
+    buffer.format("{}%", static_cast<u32>(std::ceil(unlocked_fraction * 100.0f)));
+    text_size =
+      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, buffer.c_str(), buffer.end_ptr());
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize,
+                ImVec2(text_pos.x + (box_content_width - text_size.x), text_pos.y), text_color, buffer.c_str(),
+                buffer.end_ptr());
+    text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
+
+    const ImRect progress_bb(text_pos, text_pos + ImVec2(box_content_width, progress_height));
+    const u32 progress_color = ImGui::GetColorU32(DarkerColor(UIStyle.SecondaryColor));
+    dl->AddRectFilled(progress_bb.Min, progress_bb.Max, ImGui::GetColorU32(UIStyle.PrimaryDarkColor),
+                      progress_rounding);
+    dl->AddRectFilled(progress_bb.Min,
+                      ImVec2(progress_bb.Min.x + unlocked_fraction * progress_bb.GetWidth(), progress_bb.Max.y),
+                      progress_color, progress_rounding);
+
+    buffer.format("{}/{}", s_state.game_summary.num_unlocked_achievements, s_state.game_summary.num_core_achievements);
+    text_size =
+      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, buffer.c_str(), buffer.end_ptr());
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize,
+                ImVec2(progress_bb.Min.x + ((progress_bb.Max.x - progress_bb.Min.x) / 2.0f) - (text_size.x / 2.0f),
+                       progress_bb.Min.y + ((progress_bb.Max.y - progress_bb.Min.y) / 2.0f) - (text_size.y / 2.0f)),
+                text_color, buffer.c_str(), buffer.end_ptr());
+    text_pos.y += progress_height + paragraph_spacing;
+  }
+
+  if (s_state.most_recent_unlock)
+  {
+    buffer.format(ICON_FA_LOCK_OPEN " {}", TRANSLATE_DISAMBIG_SV("Achievements", "Most Recent", "Pause Menu"));
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, buffer.c_str(),
+                buffer.end_ptr());
+    text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
+
+    draw_achievement_with_summary(s_state.most_recent_unlock, false);
+
+    // extra spacing if we have two
+    text_pos.y += s_state.achievement_nearest_completion ? (paragraph_spacing + paragraph_spacing) : 0.0f;
+  }
+
+  if (s_state.achievement_nearest_completion)
+  {
+    buffer.format(ICON_FA_LOCK " {}", TRANSLATE_DISAMBIG_SV("Achievements", "Nearest Completion", "Pause Menu"));
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, buffer.c_str(),
+                buffer.end_ptr());
+    text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
+
+    draw_achievement_with_summary(s_state.achievement_nearest_completion, true);
+    text_pos.y += paragraph_spacing;
+  }
+
+  // Challenge indicators
 
   if (!s_state.active_challenge_indicators.empty())
   {
-    const ImVec2 box_min(io.DisplaySize.x - row_width - margin, start_y + margin);
-    const ImVec2 box_max(box_min.x + row_width,
-                         box_min.y + title_height +
-                           (static_cast<float>(s_state.active_challenge_indicators.size()) * (image_size.y + padding)));
+    box_height = box_padding + box_padding + UIStyle.MediumFont->FontSize;
+    for (size_t i = 0; i < s_state.active_challenge_indicators.size(); i++)
+    {
+      const AchievementChallengeIndicator& indicator = s_state.active_challenge_indicators[i];
+      box_height += paragraph_spacing + get_achievement_height(indicator.achievement, false) +
+                    ((i == s_state.active_challenge_indicators.size() - 1) ? paragraph_spacing : 0.0f);
+    }
 
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    dl->AddRectFilled(box_min, box_max, IM_COL32(0x21, 0x21, 0x21, 200), LayoutScale(10.0f));
-    dl->AddText(font, font->FontSize, ImVec2(box_min.x + padding, box_min.y + padding), IM_COL32(255, 255, 255, 255),
-                TRANSLATE("Achievements", "Active Challenge Achievements"));
+    box_min = ImVec2(box_min.x, box_max.y + box_margin);
+    box_max = ImVec2(box_min.x + box_width, box_min.y + box_height);
+    text_pos = ImVec2(box_min.x + box_padding, box_min.y + box_padding);
 
-    const float y_advance = image_size.y + spacing;
-    const float acheivement_name_offset = (image_size.y - font->FontSize) / 2.0f;
-    const float max_non_ellipised_text_width = max_text_width - LayoutScale(10.0f);
-    ImVec2 position(box_min.x + padding, box_min.y + title_height);
+    dl->AddRectFilled(box_min, box_max, box_background_color, box_rounding);
+
+    buffer.format(ICON_FA_STOPWATCH " {}",
+                  TRANSLATE_DISAMBIG_SV("Achievements", "Active Challenge Achievements", "Pause Menu"));
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, buffer.c_str(),
+                buffer.end_ptr());
+    text_pos.y += UIStyle.MediumFont->FontSize;
 
     for (const AchievementChallengeIndicator& indicator : s_state.active_challenge_indicators)
     {
-      GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(indicator.badge_path);
-      if (!badge)
-        continue;
-
-      dl->AddImage(badge, position, position + image_size);
-
-      const char* achievement_title = indicator.achievement->title;
-      const char* achievement_title_end = achievement_title + std::strlen(indicator.achievement->title);
-      const char* remaining_text = nullptr;
-      const ImVec2 text_width(font->CalcTextSizeA(font->FontSize, max_non_ellipised_text_width, 0.0f, achievement_title,
-                                                  achievement_title_end, &remaining_text));
-      const ImVec2 text_position(position.x + image_size.x + spacing, position.y + acheivement_name_offset);
-      const ImVec4 text_bbox(text_position.x, text_position.y, text_position.x + max_text_width,
-                             text_position.y + image_size.y);
-      const u32 text_color = IM_COL32(255, 255, 255, 255);
-
-      if (remaining_text < achievement_title_end)
-      {
-        dl->AddText(font, font->FontSize, text_position, text_color, achievement_title, remaining_text, 0.0f,
-                    &text_bbox);
-        dl->AddText(font, font->FontSize, ImVec2(text_position.x + text_width.x, text_position.y), text_color, "...",
-                    nullptr, 0.0f, &text_bbox);
-      }
-      else
-      {
-        dl->AddText(font, font->FontSize, text_position, text_color, achievement_title, achievement_title_end, 0.0f,
-                    &text_bbox);
-      }
-
-      position.y += y_advance;
+      text_pos.y += paragraph_spacing;
+      draw_achievement_with_summary(indicator.achievement, false);
+      text_pos.y += paragraph_spacing;
     }
   }
 }
@@ -2690,13 +2847,15 @@ void Achievements::DrawAchievementsWindow()
       if (s_state.game_summary.num_core_achievements > 0)
       {
         const float progress_height = LayoutScale(20.0f);
+        const float progress_rounding = LayoutScale(5.0f);
         const ImRect progress_bb(ImVec2(left, top), ImVec2(right, top + progress_height));
         const float fraction = static_cast<float>(s_state.game_summary.num_unlocked_achievements) /
                                static_cast<float>(s_state.game_summary.num_core_achievements);
-        dl->AddRectFilled(progress_bb.Min, progress_bb.Max, ImGui::GetColorU32(UIStyle.PrimaryDarkColor));
+        dl->AddRectFilled(progress_bb.Min, progress_bb.Max, ImGui::GetColorU32(UIStyle.PrimaryDarkColor),
+                          progress_rounding);
         dl->AddRectFilled(progress_bb.Min,
                           ImVec2(progress_bb.Min.x + fraction * progress_bb.GetWidth(), progress_bb.Max.y),
-                          ImGui::GetColorU32(UIStyle.SecondaryColor));
+                          ImGui::GetColorU32(UIStyle.SecondaryColor), progress_rounding);
 
         text.format("{}%", static_cast<int>(std::round(fraction * 100.0f)));
         text_size =
@@ -2769,6 +2928,13 @@ void Achievements::DrawAchievementsWindow()
   }
   ImGuiFullscreen::EndFullscreenWindow();
 
+  ImGuiFullscreen::SetFullscreenStatusText(std::array{
+    std::make_pair(ICON_PF_ACHIEVEMENTS_MISSABLE, TRANSLATE_SV("Achievements", "Missable")),
+    std::make_pair(ICON_PF_ACHIEVEMENTS_PROGRESSION, TRANSLATE_SV("Achievements", "Progression")),
+    std::make_pair(ICON_PF_ACHIEVEMENTS_WIN, TRANSLATE_SV("Achievements", "Win Condition")),
+    std::make_pair(ICON_FA_LOCK, TRANSLATE_SV("Achievements", "Locked")),
+    std::make_pair(ICON_EMOJI_UNLOCKED, TRANSLATE_SV("Achievements", "Unlocked")),
+  });
   ImGuiFullscreen::SetFullscreenFooterText(
     std::array{std::make_pair(ImGuiFullscreen::IsGamepadInputSource() ? ICON_PF_XBOX_DPAD_UP_DOWN :
                                                                         ICON_PF_ARROW_UP ICON_PF_ARROW_DOWN,
@@ -2785,6 +2951,8 @@ void Achievements::DrawAchievementsWindow()
 
 void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
 {
+  using ImGuiFullscreen::DarkerColor;
+  using ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT;
   using ImGuiFullscreen::LayoutScale;
   using ImGuiFullscreen::LayoutUnscale;
   using ImGuiFullscreen::RenderShadowedTextClipped;
@@ -2793,17 +2961,20 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
   static constexpr float alpha = 0.8f;
   static constexpr float progress_height_unscaled = 20.0f;
   static constexpr float progress_spacing_unscaled = 5.0f;
+  static constexpr float progress_rounding_unscaled = 5.0f;
+  static constexpr float spacing_unscaled = 4.0f;
 
-  const float spacing = ImGuiFullscreen::LayoutScale(4.0f);
-  const u32 text_color = ImGui::GetColorU32(ImGuiCol_Text);
+  const float spacing = ImGuiFullscreen::LayoutScale(spacing_unscaled);
+  const u32 text_color = ImGui::GetColorU32(UIStyle.SecondaryTextColor);
+  const u32 summary_color = ImGui::GetColorU32(DarkerColor(UIStyle.SecondaryTextColor));
+  const u32 rarity_color = ImGui::GetColorU32(DarkerColor(DarkerColor(UIStyle.SecondaryTextColor)));
 
   const bool is_unlocked = (cheevo->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
   const std::string_view measured_progress(cheevo->measured_progress);
   const bool is_measured = !is_unlocked && !measured_progress.empty();
-  const float unlock_size = is_unlocked ? (spacing + ImGuiFullscreen::LAYOUT_MEDIUM_FONT_SIZE) : 0.0f;
-  const ImVec2 points_template_size(UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f,
-                                                                      TRANSLATE("Achievements", "XXX points")));
-
+  const float unlock_rarity_height = spacing_unscaled + ImGuiFullscreen::LAYOUT_MEDIUM_FONT_SIZE;
+  const ImVec2 points_template_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f,
+                                                                        TRANSLATE("Achievements", "XXX points"));
   const size_t summary_length = std::strlen(cheevo->description);
   const float summary_wrap_width =
     (ImGui::GetCurrentWindow()->WorkRect.GetWidth() - (ImGui::GetStyle().FramePadding.x * 2.0f) -
@@ -2813,37 +2984,26 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
                                                                    cheevo->description + summary_length));
 
   // Messy, but need to undo LayoutScale in MenuButtonFrame()...
-  const float extra_summary_height = LayoutUnscale(std::max(summary_text_size.y - UIStyle.MediumFont->FontSize, 0.0f));
+  const float extra_summary_height = std::max(LayoutUnscale(summary_text_size.y) - LAYOUT_MENU_BUTTON_HEIGHT, 0.0f);
 
   ImRect bb;
   bool visible, hovered;
   const bool clicked = ImGuiFullscreen::MenuButtonFrame(
     TinyString::from_format("chv_{}", cheevo->id), true,
-    !is_measured ? ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT + extra_summary_height + unlock_size :
-                   ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT + extra_summary_height + progress_height_unscaled +
-                     progress_spacing_unscaled,
+    !is_measured ? (LAYOUT_MENU_BUTTON_HEIGHT + extra_summary_height + unlock_rarity_height) :
+                   (LAYOUT_MENU_BUTTON_HEIGHT + extra_summary_height + unlock_rarity_height + progress_height_unscaled +
+                    progress_spacing_unscaled),
     &visible, &hovered, &bb.Min, &bb.Max, 0, alpha);
   if (!visible)
     return;
 
-  std::string* badge_path;
-  if (const auto badge_it = std::find_if(s_state.achievement_badge_paths.begin(), s_state.achievement_badge_paths.end(),
-                                         [cheevo](const auto& it) { return (it.first == cheevo); });
-      badge_it != s_state.achievement_badge_paths.end())
-  {
-    badge_path = &badge_it->second;
-  }
-  else
-  {
-    std::string new_badge_path = Achievements::GetAchievementBadgePath(cheevo, cheevo->state);
-    badge_path = &s_state.achievement_badge_paths.emplace_back(cheevo, std::move(new_badge_path)).second;
-  }
+  const std::string& badge_path = GetCachedAchievementBadgePath(cheevo, cheevo->state);
 
   const ImVec2 image_size(
     LayoutScale(ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT));
-  if (!badge_path->empty())
+  if (!badge_path.empty())
   {
-    GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(*badge_path);
+    GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(badge_path);
     if (badge)
     {
       ImGui::GetWindowDrawList()->AddImage(badge, bb.Min, bb.Min + image_size, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
@@ -2888,6 +3048,9 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
   const float text_start_x = bb.Min.x + image_size.x + LayoutScale(15.0f);
   const ImRect title_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(points_start, midpoint));
   const ImRect summary_bb(ImVec2(text_start_x, midpoint), ImVec2(points_start, midpoint + summary_text_size.y));
+  const ImRect unlock_rarity_bb(summary_bb.Min.x, summary_bb.Max.y + spacing, summary_bb.Max.x,
+                                summary_bb.Max.y +
+                                  LayoutScale(spacing_unscaled + ImGuiFullscreen::LAYOUT_MEDIUM_FONT_SIZE));
   const ImRect points_bb(ImVec2(points_start, midpoint), bb.Max);
   const ImRect lock_bb(ImVec2(points_template_start + ((points_template_size.x - right_icon_size.x) * 0.5f), bb.Min.y),
                        ImVec2(bb.Max.x, midpoint));
@@ -2896,37 +3059,50 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
                             ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
   RenderShadowedTextClipped(UIStyle.LargeFont, lock_bb.Min, lock_bb.Max, text_color, right_icon_text, nullptr,
                             &right_icon_size, ImVec2(0.0f, 0.0f), 0.0f, &lock_bb);
+  RenderShadowedTextClipped(UIStyle.MediumFont, points_bb.Min, points_bb.Max, summary_color, text.c_str(),
+                            text.end_ptr(), &points_size, ImVec2(0.0f, 0.0f), 0.0f, &points_bb);
 
   if (cheevo->description && summary_length > 0)
   {
-    RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max, text_color, cheevo->description,
+    RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max, summary_color, cheevo->description,
                               cheevo->description + summary_length, &summary_text_size, ImVec2(0.0f, 0.0f),
                               summary_wrap_width, &summary_bb);
   }
-  RenderShadowedTextClipped(UIStyle.MediumFont, points_bb.Min, points_bb.Max, text_color, text.c_str(), text.end_ptr(),
-                            &points_size, ImVec2(0.0f, 0.0f), 0.0f, &points_bb);
+
+  // display hc if hc is active
+  const float rarity_to_display = IsHardcoreModeActive() ? cheevo->rarity_hardcore : cheevo->rarity;
 
   if (is_unlocked)
   {
     TinyString date;
     FullscreenUI::TimeToPrintableString(&date, cheevo->unlock_time);
-    text.format(TRANSLATE_FS("Achievements", "Unlocked: {}"), date);
+    text.format(TRANSLATE_FS("Achievements", "Unlocked: {} | {:.1f}% of players have this achievement"), date,
+                rarity_to_display);
 
-    const ImRect unlock_bb(summary_bb.Min.x, summary_bb.Max.y + spacing, summary_bb.Max.x, bb.Max.y);
-    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_bb.Min, unlock_bb.Max, text_color, text.c_str(),
-                              text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_bb);
+    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_rarity_bb.Min, unlock_rarity_bb.Max, rarity_color,
+                              text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_rarity_bb);
   }
-  else if (is_measured)
+  else
+  {
+    text.format(TRANSLATE_FS("Achievements", "{:.1f}% of players have this achievement"), rarity_to_display);
+    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_rarity_bb.Min, unlock_rarity_bb.Max, rarity_color,
+                              text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_rarity_bb);
+  }
+
+  if (!is_unlocked && is_measured)
   {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float progress_height = LayoutScale(progress_height_unscaled);
     const float progress_spacing = LayoutScale(progress_spacing_unscaled);
-    const float top = midpoint + UIStyle.MediumFont->FontSize + progress_spacing;
-    const ImRect progress_bb(ImVec2(text_start_x, top), ImVec2(bb.Max.x, top + progress_height));
+    const float progress_rounding = LayoutScale(progress_rounding_unscaled);
+    const ImRect progress_bb(summary_bb.Min.x, unlock_rarity_bb.Max.y + progress_spacing,
+                             summary_bb.Max.x - progress_spacing,
+                             unlock_rarity_bb.Max.y + progress_spacing + progress_height);
     const float fraction = cheevo->measured_percent * 0.01f;
-    dl->AddRectFilled(progress_bb.Min, progress_bb.Max, ImGui::GetColorU32(ImGuiFullscreen::UIStyle.PrimaryDarkColor));
+    dl->AddRectFilled(progress_bb.Min, progress_bb.Max, ImGui::GetColorU32(ImGuiFullscreen::UIStyle.PrimaryDarkColor),
+                      progress_rounding);
     dl->AddRectFilled(progress_bb.Min, ImVec2(progress_bb.Min.x + fraction * progress_bb.GetWidth(), progress_bb.Max.y),
-                      ImGui::GetColorU32(ImGuiFullscreen::UIStyle.SecondaryColor));
+                      ImGui::GetColorU32(ImGuiFullscreen::UIStyle.SecondaryColor), progress_rounding);
 
     const ImVec2 text_size =
       UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, measured_progress.data(),

@@ -133,6 +133,8 @@ struct ALIGN_TO_CACHE_LINE UIState
 
   SmallString fullscreen_footer_text;
   SmallString last_fullscreen_footer_text;
+  SmallString left_fullscreen_footer_text;
+  SmallString last_left_fullscreen_footer_text;
   std::vector<std::pair<std::string_view, std::string_view>> fullscreen_footer_icon_mapping;
   float fullscreen_text_change_time;
   float fullscreen_text_alpha;
@@ -242,6 +244,8 @@ void ImGuiFullscreen::Shutdown(bool clear_state)
     s_state.background_progress_dialogs.clear();
     s_state.fullscreen_footer_text.clear();
     s_state.last_fullscreen_footer_text.clear();
+    s_state.left_fullscreen_footer_text.clear();
+    s_state.last_left_fullscreen_footer_text.clear();
     s_state.fullscreen_text_change_time = 0.0f;
     CloseInputDialog();
     CloseMessageDialog();
@@ -370,6 +374,26 @@ std::shared_ptr<GPUTexture> ImGuiFullscreen::LoadTexture(std::string_view path, 
   }
 
   return s_state.placeholder_texture;
+}
+
+GPUTexture* ImGuiFullscreen::FindCachedTexture(std::string_view name)
+{
+  std::shared_ptr<GPUTexture>* tex_ptr = s_state.texture_cache.Lookup(name);
+  return tex_ptr ? tex_ptr->get() : nullptr;
+}
+
+GPUTexture* ImGuiFullscreen::FindCachedTexture(std::string_view name, u32 svg_width, u32 svg_height)
+{
+  // ignore size hints if it's not needed, don't duplicate
+  if (!TextureNeedsSVGDimensions(name))
+    return FindCachedTexture(name);
+
+  svg_width = static_cast<u32>(std::ceil(LayoutScale(static_cast<float>(svg_width))));
+  svg_height = static_cast<u32>(std::ceil(LayoutScale(static_cast<float>(svg_height))));
+
+  const SmallString wh_name = SmallString::from_format("{}#{}x{}", name, svg_width, svg_height);
+  std::shared_ptr<GPUTexture>* tex_ptr = s_state.texture_cache.Lookup(wh_name.view());
+  return tex_ptr ? tex_ptr->get() : nullptr;
 }
 
 GPUTexture* ImGuiFullscreen::GetCachedTexture(std::string_view name)
@@ -561,11 +585,23 @@ ImRect ImGuiFullscreen::CenterImage(const ImVec2& fit_size, const ImVec2& image_
   return ret;
 }
 
+ImRect ImGuiFullscreen::CenterImage(const ImVec2& fit_rect, const GPUTexture* texture)
+{
+  const GSVector2 texture_size = GSVector2(texture->GetSizeVec());
+  return CenterImage(fit_rect, ImVec2(texture_size.x, texture_size.y));
+}
+
 ImRect ImGuiFullscreen::CenterImage(const ImRect& fit_rect, const ImVec2& image_size)
 {
   ImRect ret(CenterImage(fit_rect.Max - fit_rect.Min, image_size));
   ret.Translate(fit_rect.Min);
   return ret;
+}
+
+ImRect ImGuiFullscreen::CenterImage(const ImRect& fit_rect, const GPUTexture* texture)
+{
+  const GSVector2 texture_size = GSVector2(texture->GetSizeVec());
+  return CenterImage(fit_rect, ImVec2(texture_size.x, texture_size.y));
 }
 
 ImRect ImGuiFullscreen::FitImage(const ImVec2& fit_size, const ImVec2& image_size)
@@ -614,6 +650,7 @@ void ImGuiFullscreen::EndLayout()
 
   PopResetLayout();
 
+  s_state.left_fullscreen_footer_text.clear();
   s_state.fullscreen_footer_text.clear();
 
   s_state.rendered_menu_item_border = false;
@@ -648,6 +685,12 @@ bool ImGuiFullscreen::BeginFixedPopupModal(const char* name, bool* p_open)
   {
     PopPopupStyle();
     return false;
+  }
+
+  if (p_open && *p_open && WantsToCloseMenu())
+  {
+    *p_open = false;
+    ImGui::CloseCurrentPopup();
   }
 
   // don't draw unreadable text
@@ -980,6 +1023,16 @@ void ImGuiFullscreen::SetFullscreenFooterText(std::span<const std::pair<const ch
   s_state.fullscreen_text_alpha = background_alpha;
 }
 
+void ImGuiFullscreen::SetFullscreenStatusText(std::string_view text)
+{
+  s_state.left_fullscreen_footer_text = text;
+}
+
+void ImGuiFullscreen::SetFullscreenStatusText(std::span<const std::pair<const char*, std::string_view>> items)
+{
+  CreateFooterTextString(s_state.left_fullscreen_footer_text, items);
+}
+
 void ImGuiFullscreen::SetFullscreenFooterTextIconMapping(std::span<const std::pair<const char*, const char*>> mapping)
 {
   if (mapping.empty())
@@ -998,9 +1051,10 @@ void ImGuiFullscreen::SetFullscreenFooterTextIconMapping(std::span<const std::pa
 void ImGuiFullscreen::DrawFullscreenFooter()
 {
   const ImGuiIO& io = ImGui::GetIO();
-  if (s_state.fullscreen_footer_text.empty())
+  if (s_state.fullscreen_footer_text.empty() && s_state.left_fullscreen_footer_text.empty())
   {
     s_state.last_fullscreen_footer_text.clear();
+    s_state.last_left_fullscreen_footer_text.clear();
     return;
   }
 
@@ -1033,15 +1087,29 @@ void ImGuiFullscreen::DrawFullscreenFooter()
     prev_opacity = s_state.fullscreen_text_change_time * (1.0f / TRANSITION_TIME);
     if (prev_opacity > 0.0f)
     {
-      const ImVec2 text_size =
-        font->CalcTextSizeA(font->FontSize, max_width, 0.0f, s_state.last_fullscreen_footer_text.c_str(),
-                            s_state.last_fullscreen_footer_text.end_ptr());
-      const ImVec2 text_pos =
-        ImVec2(io.DisplaySize.x - padding * 2.0f - text_size.x, io.DisplaySize.y - font->FontSize - padding);
-      dl->AddText(font, font->FontSize, text_pos + shadow_offset, MulAlpha(UIStyle.ShadowColor, prev_opacity),
-                  s_state.last_fullscreen_footer_text.c_str(), s_state.last_fullscreen_footer_text.end_ptr());
-      dl->AddText(font, font->FontSize, text_pos, ModAlpha(text_color, prev_opacity),
-                  s_state.last_fullscreen_footer_text.c_str(), s_state.last_fullscreen_footer_text.end_ptr());
+      if (!s_state.last_fullscreen_footer_text.empty())
+      {
+        const ImVec2 text_size =
+          font->CalcTextSizeA(font->FontSize, max_width, 0.0f, s_state.last_fullscreen_footer_text.c_str(),
+                              s_state.last_fullscreen_footer_text.end_ptr());
+        const ImVec2 text_pos =
+          ImVec2(io.DisplaySize.x - padding * 2.0f - text_size.x, io.DisplaySize.y - font->FontSize - padding);
+        dl->AddText(font, font->FontSize, text_pos + shadow_offset, MulAlpha(UIStyle.ShadowColor, prev_opacity),
+                    s_state.last_fullscreen_footer_text.c_str(), s_state.last_fullscreen_footer_text.end_ptr());
+        dl->AddText(font, font->FontSize, text_pos, ModAlpha(text_color, prev_opacity),
+                    s_state.last_fullscreen_footer_text.c_str(), s_state.last_fullscreen_footer_text.end_ptr());
+      }
+
+      if (!s_state.last_left_fullscreen_footer_text.empty())
+      {
+        const ImVec2 text_pos = ImVec2(padding, io.DisplaySize.y - font->FontSize - padding);
+        dl->AddText(font, font->FontSize, text_pos + shadow_offset, MulAlpha(UIStyle.ShadowColor, prev_opacity),
+                    s_state.last_left_fullscreen_footer_text.c_str(),
+                    s_state.last_left_fullscreen_footer_text.end_ptr());
+        dl->AddText(font, font->FontSize, text_pos, ModAlpha(text_color, prev_opacity),
+                    s_state.last_left_fullscreen_footer_text.c_str(),
+                    s_state.last_left_fullscreen_footer_text.end_ptr());
+      }
     }
   }
   else if (s_state.last_fullscreen_footer_text.empty())
@@ -1051,16 +1119,29 @@ void ImGuiFullscreen::DrawFullscreenFooter()
 
   if (prev_opacity < 1.0f)
   {
-    const ImVec2 text_size =
-      font->CalcTextSizeA(font->FontSize, max_width, 0.0f, s_state.fullscreen_footer_text.c_str(),
-                          s_state.fullscreen_footer_text.end_ptr());
-    const ImVec2 text_pos =
-      ImVec2(io.DisplaySize.x - padding * 2.0f - text_size.x, io.DisplaySize.y - font->FontSize - padding);
-    const float opacity = 1.0f - prev_opacity;
-    dl->AddText(font, font->FontSize, text_pos + shadow_offset, MulAlpha(UIStyle.ShadowColor, opacity),
-                s_state.fullscreen_footer_text.c_str(), s_state.fullscreen_footer_text.end_ptr());
-    dl->AddText(font, font->FontSize, text_pos, ModAlpha(text_color, opacity), s_state.fullscreen_footer_text.c_str(),
-                s_state.fullscreen_footer_text.end_ptr());
+    if (!s_state.fullscreen_footer_text.empty())
+    {
+      const ImVec2 text_size =
+        font->CalcTextSizeA(font->FontSize, max_width, 0.0f, s_state.fullscreen_footer_text.c_str(),
+                            s_state.fullscreen_footer_text.end_ptr());
+      const ImVec2 text_pos =
+        ImVec2(io.DisplaySize.x - padding * 2.0f - text_size.x, io.DisplaySize.y - font->FontSize - padding);
+      const float opacity = 1.0f - prev_opacity;
+      dl->AddText(font, font->FontSize, text_pos + shadow_offset, MulAlpha(UIStyle.ShadowColor, opacity),
+                  s_state.fullscreen_footer_text.c_str(), s_state.fullscreen_footer_text.end_ptr());
+      dl->AddText(font, font->FontSize, text_pos, ModAlpha(text_color, opacity), s_state.fullscreen_footer_text.c_str(),
+                  s_state.fullscreen_footer_text.end_ptr());
+    }
+
+    if (!s_state.left_fullscreen_footer_text.empty())
+    {
+      const ImVec2 text_pos = ImVec2(padding, io.DisplaySize.y - font->FontSize - padding);
+      const float opacity = 1.0f - prev_opacity;
+      dl->AddText(font, font->FontSize, text_pos + shadow_offset, MulAlpha(UIStyle.ShadowColor, opacity),
+                  s_state.left_fullscreen_footer_text.c_str(), s_state.left_fullscreen_footer_text.end_ptr());
+      dl->AddText(font, font->FontSize, text_pos, ModAlpha(text_color, opacity),
+                  s_state.left_fullscreen_footer_text.c_str(), s_state.left_fullscreen_footer_text.end_ptr());
+    }
   }
 
   // for next frame
@@ -1299,9 +1380,9 @@ void ImGuiFullscreen::ResetMenuButtonFrame()
 
 void ImGuiFullscreen::RenderShadowedTextClipped(ImDrawList* draw_list, ImFont* font, const ImVec2& pos_min,
                                                 const ImVec2& pos_max, u32 color, const char* text,
-                                                const char* text_end, const ImVec2* text_size_if_known /* = nullptr */,
-                                                const ImVec2& align /* = ImVec2(0, 0)*/, float wrap_width /* = 0.0f*/,
-                                                const ImRect* clip_rect /* = nullptr */)
+                                                const char* text_end, const ImVec2* text_size_if_known,
+                                                const ImVec2& align, float wrap_width, const ImRect* clip_rect,
+                                                float shadow_offset)
 {
   const char* text_display_end = ImGui::FindRenderedTextEnd(text, text_end);
   const int text_len = (int)(text_display_end - text);
@@ -1328,19 +1409,34 @@ void ImGuiFullscreen::RenderShadowedTextClipped(ImDrawList* draw_list, ImFont* f
     pos.y = ImMax(pos.y, pos.y + (pos_max.y - pos.y - text_size.y) * align.y);
 
   // Render
+  const u32 alpha = (color /*& IM_COL32_A_MASK*/) >> IM_COL32_A_SHIFT;
+  if (alpha == 0)
+    return;
+
+  const u32 shadow_color = MulAlpha(UIStyle.ShadowColor, alpha);
   if (need_clipping)
   {
     ImVec4 fine_clip_rect(clip_min->x, clip_min->y, clip_max->x, clip_max->y);
-    draw_list->AddText(font, font->FontSize, pos + LayoutScale(LAYOUT_SHADOW_OFFSET, LAYOUT_SHADOW_OFFSET),
-                       UIStyle.ShadowColor, text, text_display_end, wrap_width, &fine_clip_rect);
+    draw_list->AddText(font, font->FontSize, ImVec2(pos.x + shadow_offset, pos.y + shadow_offset), shadow_color, text,
+                       text_display_end, wrap_width, &fine_clip_rect);
     draw_list->AddText(font, font->FontSize, pos, color, text, text_display_end, wrap_width, &fine_clip_rect);
   }
   else
   {
-    draw_list->AddText(font, font->FontSize, pos + LayoutScale(LAYOUT_SHADOW_OFFSET, LAYOUT_SHADOW_OFFSET),
-                       UIStyle.ShadowColor, text, text_display_end, wrap_width, nullptr);
+    draw_list->AddText(font, font->FontSize, ImVec2(pos.x + shadow_offset, pos.y + shadow_offset), shadow_color, text,
+                       text_display_end, wrap_width, nullptr);
     draw_list->AddText(font, font->FontSize, pos, color, text, text_display_end, wrap_width, nullptr);
   }
+}
+
+void ImGuiFullscreen::RenderShadowedTextClipped(ImDrawList* draw_list, ImFont* font, const ImVec2& pos_min,
+                                                const ImVec2& pos_max, u32 color, const char* text,
+                                                const char* text_end, const ImVec2* text_size_if_known /* = nullptr */,
+                                                const ImVec2& align /* = ImVec2(0, 0)*/, float wrap_width /* = 0.0f*/,
+                                                const ImRect* clip_rect /* = nullptr */)
+{
+  RenderShadowedTextClipped(draw_list, font, pos_min, pos_max, color, text, text_end, text_size_if_known, align,
+                            wrap_width, clip_rect, LayoutScale(LAYOUT_SHADOW_OFFSET));
 }
 
 void ImGuiFullscreen::RenderShadowedTextClipped(ImFont* font, const ImVec2& pos_min, const ImVec2& pos_max, u32 color,
@@ -2188,7 +2284,7 @@ void ImGuiFullscreen::EndHorizontalMenu()
   EndFullscreenWindow();
 }
 
-bool ImGuiFullscreen::HorizontalMenuItem(GPUTexture* icon, const char* title, const char* description)
+bool ImGuiFullscreen::HorizontalMenuItem(GPUTexture* icon, const char* title, const char* description, u32 color)
 {
   ImGuiWindow* window = ImGui::GetCurrentWindow();
   if (window->SkipItems)
@@ -2223,11 +2319,13 @@ bool ImGuiFullscreen::HorizontalMenuItem(GPUTexture* icon, const char* title, co
   bb.Max -= style.FramePadding;
 
   const float avail_width = bb.Max.x - bb.Min.x;
-  const float icon_size = LayoutScale(150.0f);
+  const float icon_size = LayoutScale(LAYOUT_HORIZONTAL_MENU_ITEM_IMAGE_SIZE);
   const ImVec2 icon_pos = bb.Min + ImVec2((avail_width - icon_size) * 0.5f, 0.0f);
+  const ImRect icon_box = CenterImage(ImRect(icon_pos, icon_pos + ImVec2(icon_size, icon_size)), icon);
 
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddImage(reinterpret_cast<ImTextureID>(icon), icon_pos, icon_pos + ImVec2(icon_size, icon_size));
+  dl->AddImage(reinterpret_cast<ImTextureID>(icon), icon_box.Min, icon_box.Max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+               color);
 
   ImFont* title_font = UIStyle.LargeFont;
   const ImVec2 title_size =
@@ -2801,6 +2899,9 @@ void ImGuiFullscreen::DrawMessageDialog()
 
   if (ImGui::BeginPopupModal(win_id, &is_open, flags))
   {
+    if (WantsToCloseMenu())
+      is_open = false;
+
     ImGui::PushStyleColor(ImGuiCol_Text, UIStyle.BackgroundTextColor);
 
     ResetFocusHere();
@@ -3106,6 +3207,10 @@ void ImGuiFullscreen::DrawLoadingScreen(std::string_view image, std::string_view
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, padding_and_rounding);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padding_and_rounding, padding_and_rounding));
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, frame_rounding);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, DarkerColor(UIStyle.PopupBackgroundColor));
+  ImGui::PushStyleColor(ImGuiCol_Text, UIStyle.BackgroundTextColor);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, UIStyle.BackgroundColor);
+  ImGui::PushStyleColor(ImGuiCol_PlotHistogram, UIStyle.SecondaryColor);
   ImGui::PushFont(ImGuiManager::GetOSDFont());
   ImGui::SetNextWindowSize(ImVec2(width, ((has_progress || is_persistent) ? 85.0f : 55.0f) * scale), ImGuiCond_Always);
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, (io.DisplaySize.y * 0.5f) + (100.0f * scale)),
@@ -3150,6 +3255,7 @@ void ImGuiFullscreen::DrawLoadingScreen(std::string_view image, std::string_view
   }
   ImGui::End();
   ImGui::PopFont();
+  ImGui::PopStyleColor(4);
   ImGui::PopStyleVar(3);
 }
 
@@ -3294,7 +3400,7 @@ void ImGuiFullscreen::DrawNotifications(ImVec2& position, float spacing)
 
     const ImVec2 box_min(position.x, actual_y);
     const ImVec2 box_max(box_min.x + box_width, box_min.y + box_height);
-    const u32 background_color = ImGui::GetColorU32(ModAlpha(UIStyle.ToastBackgroundColor, opacity));
+    const u32 background_color = ImGui::GetColorU32(ModAlpha(UIStyle.ToastBackgroundColor, opacity * 0.95f));
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     dl->AddRectFilled(box_min, box_max, background_color, rounding, ImDrawFlags_RoundCornersAll);
@@ -3315,17 +3421,20 @@ void ImGuiFullscreen::DrawNotifications(ImVec2& position, float spacing)
       }
     }
 
-    const u32 text_col = ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity));
+    const u32 title_col = ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity));
+    const u32 text_col = ImGui::GetColorU32(ModAlpha(DarkerColor(UIStyle.ToastTextColor), opacity));
 
-    const ImVec2 title_min(badge_max.x + horizontal_spacing, box_min.y + vertical_padding);
-    const ImVec2 title_max(title_min.x + title_size.x, title_min.y + title_size.y);
-    dl->AddText(title_font, title_font->FontSize, title_min, text_col, notif.title.c_str(),
-                notif.title.c_str() + notif.title.size(), max_text_width);
+    const ImVec2 title_pos = ImVec2(badge_max.x + horizontal_spacing, box_min.y + vertical_padding);
+    const ImRect title_bb = ImRect(title_pos, title_pos + title_size);
+    RenderShadowedTextClipped(dl, title_font, title_bb.Min, title_bb.Max, title_col, notif.title.c_str(),
+                              notif.title.c_str() + notif.title.size(), &title_size, ImVec2(0.0f, 0.0f), max_text_width,
+                              &title_bb);
 
-    const ImVec2 text_min(badge_max.x + horizontal_spacing, title_max.y + vertical_spacing);
-    const ImVec2 text_max(text_min.x + text_size.x, text_min.y + text_size.y);
-    dl->AddText(text_font, text_font->FontSize, text_min, text_col, notif.text.c_str(),
-                notif.text.c_str() + notif.text.size(), max_text_width);
+    const ImVec2 text_pos = ImVec2(badge_max.x + horizontal_spacing, title_bb.Max.y + vertical_spacing);
+    const ImRect text_bb = ImRect(text_pos, text_pos + text_size);
+    RenderShadowedTextClipped(dl, text_font, text_bb.Min, text_bb.Max, text_col, notif.text.c_str(),
+                              notif.text.c_str() + notif.text.size(), &text_size, ImVec2(0.0f, 0.0f), max_text_width,
+                              &text_bb);
 
     if (clip_box)
       dl->PopClipRect();
@@ -3392,24 +3501,28 @@ void ImGuiFullscreen::DrawToast()
   const ImVec2 box_pos((display_size.x - box_size.x) * 0.5f, (display_size.y - margin - box_size.y));
 
   ImDrawList* dl = ImGui::GetForegroundDrawList();
-  dl->AddRectFilled(box_pos, box_pos + box_size, ImGui::GetColorU32(ModAlpha(UIStyle.ToastBackgroundColor, alpha)),
-                    padding);
+  dl->AddRectFilled(box_pos, box_pos + box_size,
+                    ImGui::GetColorU32(ModAlpha(UIStyle.ToastBackgroundColor, alpha * 0.95f)), padding);
 
   const u32 text_col = ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, alpha));
 
   if (!s_state.toast_title.empty())
   {
     const float offset = (comb_size.x - title_size.x) * 0.5f;
-    dl->AddText(title_font, title_font->FontSize, box_pos + ImVec2(offset + padding, padding), text_col,
-                s_state.toast_title.c_str(), s_state.toast_title.c_str() + s_state.toast_title.length(), max_width);
+    const ImVec2 title_pos = box_pos + ImVec2(offset + padding, padding);
+    const ImRect title_bb = ImRect(title_pos, title_pos + title_size);
+    RenderShadowedTextClipped(dl, title_font, title_bb.Min, title_bb.Max, text_col, s_state.toast_title.c_str(),
+                              s_state.toast_title.c_str() + s_state.toast_title.length(), &title_size,
+                              ImVec2(0.0f, 0.0f), max_width, &title_bb);
   }
   if (!s_state.toast_message.empty())
   {
     const float offset = (comb_size.x - message_size.x) * 0.5f;
-    dl->AddText(message_font, message_font->FontSize,
-                box_pos + ImVec2(offset + padding, padding + spacing + title_size.y), text_col,
-                s_state.toast_message.c_str(), s_state.toast_message.c_str() + s_state.toast_message.length(),
-                max_width);
+    const ImVec2 message_pos = box_pos + ImVec2(offset + padding, padding + spacing + title_size.y);
+    const ImRect message_bb = ImRect(message_pos, message_pos + message_size);
+    RenderShadowedTextClipped(dl, message_font, message_bb.Min, message_bb.Max, text_col, s_state.toast_message.c_str(),
+                              s_state.toast_message.c_str() + s_state.toast_message.length(), &message_size,
+                              ImVec2(0.0f, 0.0f), max_width, &message_bb);
   }
 }
 
@@ -3506,6 +3619,51 @@ void ImGuiFullscreen::SetTheme(std::string_view theme)
     UIStyle.ToastBackgroundColor = HEX_TO_IMVEC4(0xd86a66, 0xff);
     UIStyle.ToastTextColor = HEX_TO_IMVEC4(0xffffff, 0xff);
     UIStyle.ShadowColor = IM_COL32(100, 100, 100, 50);
+  }
+	else if (theme == "GreenGiant")
+	{
+		UIStyle.BackgroundColor = HEX_TO_IMVEC4(0xB0C400, 0xff);
+		UIStyle.BackgroundTextColor = HEX_TO_IMVEC4(0x000000, 0xff);
+		UIStyle.BackgroundLineColor = HEX_TO_IMVEC4(0xf0f0f0, 0xff);
+		UIStyle.BackgroundHighlight = HEX_TO_IMVEC4(0x876433, 0xff);
+		UIStyle.PopupBackgroundColor = HEX_TO_IMVEC4(0xB0C400, 0xf2);
+		UIStyle.PrimaryColor = HEX_TO_IMVEC4(0xD5DE2E, 0xff);
+		UIStyle.PrimaryLightColor = HEX_TO_IMVEC4(0x795A2D, 0xff);
+		UIStyle.PrimaryDarkColor = HEX_TO_IMVEC4(0x523213, 0xff);
+		UIStyle.PrimaryTextColor = HEX_TO_IMVEC4(0x000000, 0xff);
+		UIStyle.DisabledColor = HEX_TO_IMVEC4(0x878269, 0xff);
+		UIStyle.TextHighlightColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+		UIStyle.PrimaryLineColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+		UIStyle.SecondaryColor = HEX_TO_IMVEC4(0x523213, 0xff);
+		UIStyle.SecondaryStrongColor = HEX_TO_IMVEC4(0x523213, 0xff);
+		UIStyle.SecondaryWeakColor = HEX_TO_IMVEC4(0x523213, 0xff);
+		UIStyle.SecondaryTextColor = HEX_TO_IMVEC4(0x000000, 0xff);
+    UIStyle.ToastBackgroundColor = HEX_TO_IMVEC4(0xD5DE2E, 0xff);
+    UIStyle.ToastTextColor = HEX_TO_IMVEC4(0x000000, 0xff);
+    UIStyle.ShadowColor = IM_COL32(100, 100, 100, 50);
+	}
+  else if (theme == "DarkRuby")
+  {
+    UIStyle.BackgroundColor = HEX_TO_IMVEC4(0x1b1b1b, 0xff);
+    UIStyle.BackgroundTextColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+    UIStyle.BackgroundLineColor = HEX_TO_IMVEC4(0xf0f0f0, 0xff);
+    UIStyle.BackgroundHighlight = HEX_TO_IMVEC4(0xab2720, 0xff);
+    UIStyle.PopupFrameBackgroundColor = HEX_TO_IMVEC4(0x313131, 0xf2);
+    UIStyle.PopupBackgroundColor = HEX_TO_IMVEC4(0x212121, 0xf2);
+    UIStyle.PrimaryColor = HEX_TO_IMVEC4(0x121212, 0xff);
+    UIStyle.PrimaryLightColor = HEX_TO_IMVEC4(0xb5b5b5, 0xff);
+    UIStyle.PrimaryDarkColor = HEX_TO_IMVEC4(0x000000, 0xff);
+    UIStyle.PrimaryTextColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+    UIStyle.DisabledColor = HEX_TO_IMVEC4(0x8d8d8d, 0xff);
+    UIStyle.TextHighlightColor = HEX_TO_IMVEC4(0x676767, 0xff);
+    UIStyle.PrimaryLineColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+    UIStyle.SecondaryColor = HEX_TO_IMVEC4(0x969696, 0xff);
+    UIStyle.SecondaryStrongColor = HEX_TO_IMVEC4(0xdc143c, 0xff);
+    UIStyle.SecondaryWeakColor = HEX_TO_IMVEC4(0x2a2e36, 0xff);
+    UIStyle.SecondaryTextColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+    UIStyle.ToastBackgroundColor = HEX_TO_IMVEC4(0x282828, 0xff);
+    UIStyle.ToastTextColor = HEX_TO_IMVEC4(0xffffff, 0xff);
+    UIStyle.ShadowColor = IM_COL32(0, 0, 0, 100);
   }
   else if (theme == "PurpleRain")
   {

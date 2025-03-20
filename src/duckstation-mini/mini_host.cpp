@@ -1251,6 +1251,32 @@ std::optional<WindowInfo> Host::GetTopLevelWindowInfo()
   return MiniHost::TranslateSDLWindowInfo(MiniHost::s_state.sdl_window, nullptr);
 }
 
+void Host::RequestResetSettings(bool system, bool controller)
+{
+  using namespace MiniHost;
+
+  auto lock = Host::GetSettingsLock();
+  {
+    SettingsInterface& si = *s_state.base_settings_interface.get();
+
+    if (system)
+    {
+      System::SetDefaultSettings(si);
+      EmuFolders::SetDefaults();
+      EmuFolders::Save(si);
+    }
+
+    if (controller)
+    {
+      InputManager::SetDefaultSourceConfig(si);
+      Settings::SetDefaultControllerConfig(si);
+      Settings::SetDefaultHotkeyConfig(si);
+    }
+  }
+
+  System::ApplySettings(false);
+}
+
 void Host::RequestExitApplication(bool allow_confirm)
 {
   Host::RunOnCPUThread([]() {
@@ -1422,6 +1448,11 @@ void Host::OpenHostFileSelectorAsync(std::string_view title, bool select_directo
 {
   // TODO: Use SDL FileDialog API
   callback(std::string());
+}
+
+const char* Host::GetDefaultFullscreenUITheme()
+{
+  return "";
 }
 
 bool Host::ShouldPreferHostFileSelector()

@@ -646,15 +646,18 @@ void Host::CheckForSettingsChanges(const Settings& old_settings)
 
 void EmuThread::setDefaultSettings(bool system /* = true */, bool controller /* = true */)
 {
-  if (isCurrentThread())
+  if (!isCurrentThread())
   {
-    QMetaObject::invokeMethod(this, "setDefaultSettings", Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, "setDefaultSettings", Qt::QueuedConnection, Q_ARG(bool, system),
+                              Q_ARG(bool, controller));
     return;
   }
 
-  auto lock = Host::GetSettingsLock();
-  QtHost::SetDefaultSettings(*s_base_settings_interface, system, controller);
-  QtHost::QueueSettingsSave();
+  {
+    auto lock = Host::GetSettingsLock();
+    QtHost::SetDefaultSettings(*s_base_settings_interface, system, controller);
+    QtHost::QueueSettingsSave();
+  }
 
   applySettings(false);
 
@@ -1857,6 +1860,19 @@ void EmuThread::setGPUThreadRunIdle(bool active)
   g_emu_thread->startBackgroundControllerPollTimer();
 }
 
+void EmuThread::updateFullscreenUITheme()
+{
+  if (!isCurrentThread())
+  {
+    QMetaObject::invokeMethod(this, &EmuThread::updateFullscreenUITheme, Qt::QueuedConnection);
+    return;
+  }
+
+  // don't bother if nothing is running
+  if (GPUThread::IsFullscreenUIRequested() || GPUThread::IsGPUBackendRequested())
+    GPUThread::RunOnThread(&FullscreenUI::SetTheme);
+}
+
 void EmuThread::start()
 {
   AssertMsg(!g_emu_thread, "Emu thread does not exist");
@@ -2048,10 +2064,9 @@ void Host::ConfirmMessageAsync(std::string_view title, std::string_view message,
   {
     GPUThread::RunOnThread([title = std::string(title), message = std::string(message), callback = std::move(callback),
                             yes_text = std::string(yes_text), no_text = std::string(no_text), needs_pause]() mutable {
-      if (!FullscreenUI::Initialize())
-      {
-        callback(false);
-
+      // Need to reset run idle state _again_ after displaying.
+      auto final_callback = [callback = std::move(callback), needs_pause](bool result) {
+        FullscreenUI::UpdateRunIdleState();
         if (needs_pause)
         {
           Host::RunOnCPUThread([]() {
@@ -2059,15 +2074,14 @@ void Host::ConfirmMessageAsync(std::string_view title, std::string_view message,
               System::PauseSystem(false);
           });
         }
-
-        return;
-      }
-
-      // Need to reset run idle state _again_ after displaying.
-      auto final_callback = [callback = std::move(callback)](bool result) {
-        FullscreenUI::UpdateRunIdleState();
         callback(result);
       };
+
+      if (!FullscreenUI::Initialize())
+      {
+        final_callback(false);
+        return;
+      }
 
       ImGuiFullscreen::OpenConfirmMessageDialog(std::move(title), std::move(message), std::move(final_callback),
                                                 fmt::format(ICON_FA_CHECK " {}", yes_text),
@@ -2543,6 +2557,11 @@ void Host::RequestSystemShutdown(bool allow_confirm, bool save_state)
 
   QMetaObject::invokeMethod(g_main_window, "requestShutdown", Qt::QueuedConnection, Q_ARG(bool, allow_confirm),
                             Q_ARG(bool, true), Q_ARG(bool, save_state));
+}
+
+void Host::RequestResetSettings(bool system, bool controller)
+{
+  g_emu_thread->setDefaultSettings(system, controller);
 }
 
 void Host::RequestExitApplication(bool allow_confirm)

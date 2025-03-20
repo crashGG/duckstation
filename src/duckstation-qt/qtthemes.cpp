@@ -1,8 +1,10 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2025 Connor McLaughlin <stenzek@gmail.com> and contributors.
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "interfacesettingswidget.h"
 #include "qthost.h"
+
+#include "util/imgui_fullscreen.h"
 
 #include "common/path.h"
 
@@ -40,7 +42,8 @@ void QtHost::UpdateApplicationTheme()
 
 void QtHost::SetStyleFromSettings()
 {
-  const std::string theme = Host::GetBaseStringSettingValue("UI", "Theme", InterfaceSettingsWidget::DEFAULT_THEME_NAME);
+  const TinyString theme =
+    Host::GetBaseTinyStringSettingValue("UI", "Theme", InterfaceSettingsWidget::DEFAULT_THEME_NAME);
 
   if (theme == "qdarkstyle")
   {
@@ -199,75 +202,109 @@ void QtHost::SetStyleFromSettings()
     qApp->setPalette(darkPalette);
     qApp->setStyleSheet(QString());
   }
-	else if (theme == "pinkypals")
+	else if (theme == "greengiant")
 	{
+		// Custom palette by RedDevilus, Tame (Light/Washed out) Green as main color and Grayish Blue as complimentary.
+		// Alternative white theme.
 		qApp->setStyle(QStyleFactory::create("Fusion"));
 
 		const QColor black(25, 25, 25);
-		const QColor pink(255, 174, 201);
-		const QColor darkerPink(214, 145, 168);
-		const QColor brightPink(224, 88, 133);
-		const QColor congoPink(255, 127, 121);
+		const QColor gray(111, 111, 111);
+		const QColor limerick(176, 196, 0);
+		const QColor brown(135, 100, 50);
+		const QColor pear(213, 222, 46);
 
-		QPalette PinkyPalsPalette;
-		PinkyPalsPalette.setColor(QPalette::Window, pink);
-		PinkyPalsPalette.setColor(QPalette::WindowText, black);
-		PinkyPalsPalette.setColor(QPalette::Base, darkerPink);
-		PinkyPalsPalette.setColor(QPalette::AlternateBase, brightPink);
-		PinkyPalsPalette.setColor(QPalette::ToolTipBase, pink);
-		PinkyPalsPalette.setColor(QPalette::ToolTipText, darkerPink);
-		PinkyPalsPalette.setColor(QPalette::Text, black);
-		PinkyPalsPalette.setColor(QPalette::Button, pink);
-		PinkyPalsPalette.setColor(QPalette::ButtonText, black);
-		PinkyPalsPalette.setColor(QPalette::Link, black);
-		PinkyPalsPalette.setColor(QPalette::Highlight, congoPink);
-		PinkyPalsPalette.setColor(QPalette::HighlightedText, black);
+		QPalette greenGiantPalette;
+		greenGiantPalette.setColor(QPalette::Window, pear);
+		greenGiantPalette.setColor(QPalette::WindowText, black);
+		greenGiantPalette.setColor(QPalette::Base, limerick);
+		greenGiantPalette.setColor(QPalette::AlternateBase, brown.lighter());
+		greenGiantPalette.setColor(QPalette::ToolTipBase, brown);
+		greenGiantPalette.setColor(QPalette::ToolTipText, Qt::white);
+		greenGiantPalette.setColor(QPalette::Text, black);
+		greenGiantPalette.setColor(QPalette::Button, brown.lighter());
+		greenGiantPalette.setColor(QPalette::ButtonText, black.lighter());
+		greenGiantPalette.setColor(QPalette::Link, brown.lighter());
+		greenGiantPalette.setColor(QPalette::Highlight, brown);
+		greenGiantPalette.setColor(QPalette::HighlightedText, Qt::white);
 
-		PinkyPalsPalette.setColor(QPalette::Active, QPalette::Button, pink);
-		PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(Qt::white).darker());
-		PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(Qt::white).darker());
-		PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(Qt::white).darker());
-		PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::Light, QColor(Qt::white).darker());
+		greenGiantPalette.setColor(QPalette::Disabled, QPalette::ButtonText, gray);
+		greenGiantPalette.setColor(QPalette::Disabled, QPalette::WindowText, gray.darker());
+		greenGiantPalette.setColor(QPalette::Disabled, QPalette::Text, gray.darker());
+		greenGiantPalette.setColor(QPalette::Disabled, QPalette::Light, gray);
 
-		qApp->setPalette(PinkyPalsPalette);
+		qApp->setPalette(greenGiantPalette);
 		qApp->setStyleSheet(QString());
 	}
-	else if (theme == "AMOLED")
-	{
-		// Custom palette by KamFretoZ, A pure concentrated darkness
-		// of a theme designed for maximum eye comfort and benefits
-		// OLED screens.
-		qApp->setStyle(QStyleFactory::create("Fusion"));
+  else if (theme == "pinkypals")
+  {
+    qApp->setStyle(QStyleFactory::create("Fusion"));
 
-		const QColor black(0, 0, 0);
-		const QColor gray(25, 25, 25);
-		const QColor lighterGray(75, 75, 75);
-		const QColor blue(198, 238, 255);
+    const QColor black(25, 25, 25);
+    const QColor pink(255, 174, 201);
+    const QColor darkerPink(214, 145, 168);
+    const QColor brightPink(224, 88, 133);
+    const QColor congoPink(255, 127, 121);
 
-		QPalette AMOLEDPalette;
-		AMOLEDPalette.setColor(QPalette::Window, black);
-		AMOLEDPalette.setColor(QPalette::WindowText, Qt::white);
-		AMOLEDPalette.setColor(QPalette::Base, gray);
-		AMOLEDPalette.setColor(QPalette::AlternateBase, black);
-		AMOLEDPalette.setColor(QPalette::ToolTipBase, gray);
-		AMOLEDPalette.setColor(QPalette::ToolTipText, Qt::white);
-		AMOLEDPalette.setColor(QPalette::Text, Qt::white);
-		AMOLEDPalette.setColor(QPalette::Button, gray);
-		AMOLEDPalette.setColor(QPalette::ButtonText, Qt::white);
-		AMOLEDPalette.setColor(QPalette::Link, blue);
-		AMOLEDPalette.setColor(QPalette::Highlight, lighterGray);
-		AMOLEDPalette.setColor(QPalette::HighlightedText, Qt::white);
-		AMOLEDPalette.setColor(QPalette::PlaceholderText, QColor(Qt::white).darker());
+    QPalette PinkyPalsPalette;
+    PinkyPalsPalette.setColor(QPalette::Window, pink);
+    PinkyPalsPalette.setColor(QPalette::WindowText, black);
+    PinkyPalsPalette.setColor(QPalette::Base, darkerPink);
+    PinkyPalsPalette.setColor(QPalette::AlternateBase, brightPink);
+    PinkyPalsPalette.setColor(QPalette::ToolTipBase, pink);
+    PinkyPalsPalette.setColor(QPalette::ToolTipText, darkerPink);
+    PinkyPalsPalette.setColor(QPalette::Text, black);
+    PinkyPalsPalette.setColor(QPalette::Button, pink);
+    PinkyPalsPalette.setColor(QPalette::ButtonText, black);
+    PinkyPalsPalette.setColor(QPalette::Link, black);
+    PinkyPalsPalette.setColor(QPalette::Highlight, congoPink);
+    PinkyPalsPalette.setColor(QPalette::HighlightedText, black);
 
-		AMOLEDPalette.setColor(QPalette::Active, QPalette::Button, gray);
-		AMOLEDPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(Qt::white).darker());
-		AMOLEDPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(Qt::white).darker());
-		AMOLEDPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(Qt::white).darker());
-		AMOLEDPalette.setColor(QPalette::Disabled, QPalette::Light, QColor(Qt::white).darker());
+    PinkyPalsPalette.setColor(QPalette::Active, QPalette::Button, pink);
+    PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(Qt::white).darker());
+    PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(Qt::white).darker());
+    PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(Qt::white).darker());
+    PinkyPalsPalette.setColor(QPalette::Disabled, QPalette::Light, QColor(Qt::white).darker());
 
-		qApp->setPalette(AMOLEDPalette);
-		qApp->setStyleSheet(QString());
-	}
+    qApp->setPalette(PinkyPalsPalette);
+    qApp->setStyleSheet(QString());
+  }
+  else if (theme == "AMOLED")
+  {
+    // Custom palette by KamFretoZ, A pure concentrated darkness
+    // of a theme designed for maximum eye comfort and benefits
+    // OLED screens.
+    qApp->setStyle(QStyleFactory::create("Fusion"));
+
+    const QColor black(0, 0, 0);
+    const QColor gray(25, 25, 25);
+    const QColor lighterGray(75, 75, 75);
+    const QColor blue(198, 238, 255);
+
+    QPalette AMOLEDPalette;
+    AMOLEDPalette.setColor(QPalette::Window, black);
+    AMOLEDPalette.setColor(QPalette::WindowText, Qt::white);
+    AMOLEDPalette.setColor(QPalette::Base, gray);
+    AMOLEDPalette.setColor(QPalette::AlternateBase, black);
+    AMOLEDPalette.setColor(QPalette::ToolTipBase, gray);
+    AMOLEDPalette.setColor(QPalette::ToolTipText, Qt::white);
+    AMOLEDPalette.setColor(QPalette::Text, Qt::white);
+    AMOLEDPalette.setColor(QPalette::Button, gray);
+    AMOLEDPalette.setColor(QPalette::ButtonText, Qt::white);
+    AMOLEDPalette.setColor(QPalette::Link, blue);
+    AMOLEDPalette.setColor(QPalette::Highlight, lighterGray);
+    AMOLEDPalette.setColor(QPalette::HighlightedText, Qt::white);
+    AMOLEDPalette.setColor(QPalette::PlaceholderText, QColor(Qt::white).darker());
+
+    AMOLEDPalette.setColor(QPalette::Active, QPalette::Button, gray);
+    AMOLEDPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(Qt::white).darker());
+    AMOLEDPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(Qt::white).darker());
+    AMOLEDPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(Qt::white).darker());
+    AMOLEDPalette.setColor(QPalette::Disabled, QPalette::Light, QColor(Qt::white).darker());
+
+    qApp->setPalette(AMOLEDPalette);
+    qApp->setStyleSheet(QString());
+  }
   else if (theme == "darkruby")
   {
     qApp->setStyle(QStyleFactory::create("Fusion"));
@@ -357,4 +394,29 @@ void QtHost::SetIconThemeFromStyle()
 {
   const bool dark = IsDarkApplicationTheme();
   QIcon::setThemeName(dark ? QStringLiteral("white") : QStringLiteral("black"));
+}
+
+const char* Host::GetDefaultFullscreenUITheme()
+{
+  const TinyString theme =
+    Host::GetBaseTinyStringSettingValue("UI", "Theme", InterfaceSettingsWidget::DEFAULT_THEME_NAME);
+
+  if (theme == "cobaltsky")
+    return "CobaltSky";
+  else if (theme == "greymatter")
+    return "GreyMatter";
+  else if (theme == "greengiant")
+    return "GreenGiant";
+  else if (theme == "pinkypals")
+    return "PinkyPals";
+  else if (theme == "purplerain")
+    return "PurpleRain";
+  else if (theme == "darkruby")
+    return "DarkRuby";
+  else if (theme == "AMOLED")
+    return "AMOLED";
+  else if (theme == "windowsvista")
+    return "Light";
+  else // if (theme == "fusion" || theme == "darkfusion" || theme == "darkfusionblue" || theme == "darkruby")
+    return "Dark";
 }

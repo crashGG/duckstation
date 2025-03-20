@@ -42,6 +42,7 @@ static constexpr float LAYOUT_FOOTER_HEIGHT = LAYOUT_MEDIUM_FONT_SIZE + LAYOUT_F
 static constexpr float LAYOUT_HORIZONTAL_MENU_HEIGHT = 320.0f;
 static constexpr float LAYOUT_HORIZONTAL_MENU_PADDING = 30.0f;
 static constexpr float LAYOUT_HORIZONTAL_MENU_ITEM_WIDTH = 250.0f;
+static constexpr float LAYOUT_HORIZONTAL_MENU_ITEM_IMAGE_SIZE = 150.0f;
 static constexpr float LAYOUT_SHADOW_OFFSET = 1.0f;
 
 struct ALIGN_TO_CACHE_LINE UIStyles
@@ -133,7 +134,14 @@ ALWAYS_INLINE static ImVec4 MulAlpha(const ImVec4& v, float a)
 ALWAYS_INLINE static u32 MulAlpha(u32 col32, float a)
 {
   return (col32 & ~IM_COL32_A_MASK) |
-         (static_cast<u32>(static_cast<float>((col32 & IM_COL32_A_MASK) >> IM_COL32_A_SHIFT) * a) << IM_COL32_A_SHIFT);
+         (static_cast<u32>(static_cast<float>((col32 /*& IM_COL32_A_MASK*/) >> IM_COL32_A_SHIFT) * a)
+          << IM_COL32_A_SHIFT);
+}
+
+ALWAYS_INLINE static u32 MulAlpha(u32 col32, u32 a)
+{
+  return (col32 & ~IM_COL32_A_MASK) |
+         (((((col32 /*& IM_COL32_A_MASK*/) >> IM_COL32_A_SHIFT) * a) / 255u) << IM_COL32_A_SHIFT);
 }
 
 ALWAYS_INLINE static std::string_view RemoveHash(std::string_view s)
@@ -144,7 +152,9 @@ ALWAYS_INLINE static std::string_view RemoveHash(std::string_view s)
 
 /// Centers an image within the specified bounds, scaling up or down as needed.
 ImRect CenterImage(const ImVec2& fit_size, const ImVec2& image_size);
+ImRect CenterImage(const ImVec2& fit_rect, const GPUTexture* texture);
 ImRect CenterImage(const ImRect& fit_rect, const ImVec2& image_size);
+ImRect CenterImage(const ImRect& fit_rect, const GPUTexture* texture);
 
 /// Fits an image to the specified bounds, cropping if needed. Returns UV coordinates.
 ImRect FitImage(const ImVec2& fit_size, const ImVec2& image_size);
@@ -163,6 +173,8 @@ void Shutdown(bool clear_state);
 /// Texture cache.
 const std::shared_ptr<GPUTexture>& GetPlaceholderTexture();
 std::shared_ptr<GPUTexture> LoadTexture(std::string_view path, u32 svg_width = 0, u32 svg_height = 0);
+GPUTexture* FindCachedTexture(std::string_view name);
+GPUTexture* FindCachedTexture(std::string_view name, u32 svg_width, u32 svg_height);
 GPUTexture* GetCachedTexture(std::string_view name);
 GPUTexture* GetCachedTexture(std::string_view name, u32 svg_width, u32 svg_height);
 GPUTexture* GetCachedTextureAsync(std::string_view name);
@@ -227,6 +239,8 @@ void CreateFooterTextString(SmallStringBase& dest, std::span<const std::pair<con
 void SetFullscreenFooterText(std::string_view text, float background_alpha);
 void SetFullscreenFooterText(std::span<const std::pair<const char*, std::string_view>> items, float background_alpha);
 void SetFullscreenFooterTextIconMapping(std::span<const std::pair<const char*, const char*>> mapping);
+void SetFullscreenStatusText(std::string_view text);
+void SetFullscreenStatusText(std::span<const std::pair<const char*, std::string_view>> items);
 void DrawFullscreenFooter();
 
 void PrerenderMenuButtonBorder();
@@ -247,6 +261,9 @@ void RenderShadowedTextClipped(ImDrawList* draw_list, ImFont* font, const ImVec2
                                u32 color, const char* text, const char* text_end,
                                const ImVec2* text_size_if_known = nullptr, const ImVec2& align = ImVec2(0, 0),
                                float wrap_width = 0.0f, const ImRect* clip_rect = nullptr);
+void RenderShadowedTextClipped(ImDrawList* draw_list, ImFont* font, const ImVec2& pos_min, const ImVec2& pos_max,
+                               u32 color, const char* text, const char* text_end, const ImVec2* text_size_if_known,
+                               const ImVec2& align, float wrap_width, const ImRect* clip_rect, float shadow_offset);
 void MenuHeading(const char* title, bool draw_line = true);
 bool MenuHeadingButton(const char* title, const char* value = nullptr, bool enabled = true, bool draw_line = true);
 bool ActiveButton(const char* title, bool is_active, bool enabled = true,
@@ -325,7 +342,8 @@ bool NavTab(const char* title, bool is_active, bool enabled, float width, float 
 bool BeginHorizontalMenu(const char* name, const ImVec2& position, const ImVec2& size, const ImVec4& bg_color,
                          u32 num_items);
 void EndHorizontalMenu();
-bool HorizontalMenuItem(GPUTexture* icon, const char* title, const char* description);
+bool HorizontalMenuItem(GPUTexture* icon, const char* title, const char* description,
+                        u32 color = IM_COL32(255, 255, 255, 255));
 
 using FileSelectorCallback = std::function<void(std::string path)>;
 using FileSelectorFilters = std::vector<std::string>;
@@ -396,6 +414,10 @@ void GetInputDialogHelpText(SmallStringBase& dest);
 
 // Host UI triggers from Big Picture mode.
 namespace Host {
+
+/// Returns the name of the default Big Picture theme to use based on the host theme.
+const char* GetDefaultFullscreenUITheme();
+
 /// Returns true if native file dialogs should be preferred over Big Picture.
 bool ShouldPreferHostFileSelector();
 
@@ -405,4 +427,5 @@ using FileSelectorFilters = std::vector<std::string>;
 void OpenHostFileSelectorAsync(std::string_view title, bool select_directory, FileSelectorCallback callback,
                                FileSelectorFilters filters = FileSelectorFilters(),
                                std::string_view initial_directory = std::string_view());
+
 } // namespace Host
