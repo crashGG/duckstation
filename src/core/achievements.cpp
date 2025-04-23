@@ -7,6 +7,7 @@
 #include "achievements_private.h"
 #include "bios.h"
 #include "bus.h"
+#include "cheats.h"
 #include "cpu_core.h"
 #include "fullscreen_ui.h"
 #include "game_list.h"
@@ -61,13 +62,6 @@
 
 LOG_CHANNEL(Achievements);
 
-#ifdef ENABLE_RAINTEGRATION
-// RA_Interface ends up including windows.h, with its silly macros.
-#ifdef _WIN32
-#include "common/windows_headers.h"
-#endif
-#include "RA_Interface.h"
-#endif
 namespace Achievements {
 
 static constexpr const char* INFO_SOUND_NAME = "sounds/achievements/message.wav";
@@ -143,19 +137,22 @@ template<typename... T>
 static void ReportRCError(int err, fmt::format_string<T...> fmt, T&&... args);
 static void ClearGameInfo();
 static void ClearGameHash();
+static bool HasSavedCredentials();
 static bool TryLoggingInWithToken();
-static void SetHardcoreMode(bool enabled, bool force_display_message);
+static void EnableHardcodeMode(bool display_message, bool display_game_summary);
+static void OnHardcoreModeChanged(bool enabled, bool display_message, bool display_game_summary);
+static bool IsRAIntegrationInitializing();
 static bool IsLoggedInOrLoggingIn();
-static bool CanEnableHardcoreMode();
+static void FinishInitialize();
 static void FinishLogin(const rc_client_t* client);
 static void ShowLoginNotification();
-static void IdentifyGame(const std::string& path, CDImage* image);
+static bool IdentifyGame(CDImage* image);
+static bool IdentifyCurrentGame();
 static void BeginLoadGame();
-static void BeginChangeDisc();
 static void UpdateGameSummary(bool update_progress_database, bool force_update_progress_database);
 static std::string GetLocalImagePath(const std::string_view image_name, int type);
 static void DownloadImage(std::string url, std::string cache_path);
-static const std::string& GetCachedAchievementBadgePath(const rc_client_achievement_t* achievement, int state);
+static const std::string& GetCachedAchievementBadgePath(const rc_client_achievement_t* achievement, bool locked);
 static void UpdateGlyphRanges();
 
 static TinyString DecryptLoginToken(std::string_view encrypted_token, std::string_view username);
@@ -172,6 +169,7 @@ static void ClientEventHandler(const rc_client_event_t* event, rc_client_t* clie
 static void HandleResetEvent(const rc_client_event_t* event);
 static void HandleUnlockEvent(const rc_client_event_t* event);
 static void HandleGameCompleteEvent(const rc_client_event_t* event);
+static void HandleSubsetCompleteEvent(const rc_client_event_t* event);
 static void HandleLeaderboardStartedEvent(const rc_client_event_t* event);
 static void HandleLeaderboardFailedEvent(const rc_client_event_t* event);
 static void HandleLeaderboardSubmittedEvent(const rc_client_event_t* event);
@@ -232,17 +230,28 @@ static void BuildProgressDatabase(const rc_client_all_progress_list_t* allprog);
 static void UpdateProgressDatabase(bool force);
 static void ClearProgressDatabase();
 
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+
+static void BeginLoadRAIntegration();
+static void UnloadRAIntegration();
+
+#endif
+
+namespace {
+
+struct PauseMenuAchievementInfo
+{
+  std::string title;
+  std::string description;
+  std::string badge_path;
+};
+
 struct State
 {
   rc_client_t* client = nullptr;
-  bool hardcore_mode = false;
   bool has_achievements = false;
   bool has_leaderboards = false;
   bool has_rich_presence = false;
-
-#ifdef ENABLE_RAINTEGRATION
-  bool using_raintegration = false;
-#endif
 
   std::recursive_mutex mutex; // large
 
@@ -268,10 +277,10 @@ struct State
   rc_client_async_handle_t* load_game_request = nullptr;
 
   rc_client_achievement_list_t* achievement_list = nullptr;
-  std::vector<std::tuple<const void*, int, std::string>> achievement_badge_paths;
+  std::vector<std::tuple<const void*, std::string, bool>> achievement_badge_paths;
 
-  const rc_client_achievement_t* most_recent_unlock = nullptr;
-  const rc_client_achievement_t* achievement_nearest_completion = nullptr;
+  std::optional<PauseMenuAchievementInfo> most_recent_unlock = {};
+  std::optional<PauseMenuAchievementInfo> achievement_nearest_completion = {};
 
   rc_client_leaderboard_list_t* leaderboard_list = nullptr;
   const rc_client_leaderboard_t* open_leaderboard = nullptr;
@@ -288,7 +297,15 @@ struct State
   rc_client_hash_library_t* fetch_hash_library_result = nullptr;
   rc_client_async_handle_t* fetch_all_progress_request = nullptr;
   rc_client_all_progress_list_t* fetch_all_progress_result = nullptr;
+
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+  rc_client_async_handle_t* load_raintegration_request = nullptr;
+  bool using_raintegration = false;
+  bool raintegration_loading = false;
+#endif
 };
+
+} // namespace
 
 ALIGN_TO_CACHE_LINE static State s_state;
 
@@ -319,9 +336,8 @@ const rc_client_user_game_summary_t& Achievements::GetGameSummary()
 
 void Achievements::ReportError(std::string_view sv)
 {
-  std::string error = fmt::format("Achievements error: {}", sv);
-  ERROR_LOG(error.c_str());
-  Host::AddOSDMessage(std::move(error), Host::OSD_CRITICAL_ERROR_DURATION);
+  ERROR_LOG(sv);
+  Host::AddIconOSDWarning(std::string(), ICON_EMOJI_WARNING, std::string(sv), Host::OSD_CRITICAL_ERROR_DURATION);
 }
 
 template<typename... T>
@@ -556,21 +572,16 @@ void Achievements::UpdateGlyphRanges()
 
 bool Achievements::IsActive()
 {
-#ifdef ENABLE_RAINTEGRATION
-  return (s_state.client != nullptr) || s_state.using_raintegration;
-#else
   return (s_state.client != nullptr);
-#endif
 }
 
 bool Achievements::IsHardcoreModeActive()
 {
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-    return RA_HardcoreModeIsActive() != 0;
-#endif
+  if (!s_state.client)
+    return false;
 
-  return s_state.hardcore_mode;
+  const auto lock = GetLock();
+  return rc_client_get_hardcore_enabled(s_state.client);
 }
 
 bool Achievements::HasActiveGame()
@@ -630,9 +641,6 @@ const std::string& Achievements::GetRichPresenceString()
 
 bool Achievements::Initialize()
 {
-  if (IsUsingRAIntegration())
-    return true;
-
   auto lock = GetLock();
   AssertMsg(g_settings.achievements_enabled, "Achievements are enabled");
   Assert(!s_state.client && !s_state.http_downloader);
@@ -640,27 +648,41 @@ bool Achievements::Initialize()
   if (!CreateClient(&s_state.client, &s_state.http_downloader))
     return false;
 
-  // Hardcore starts off. We enable it on first boot.
-  s_state.hardcore_mode = false;
-
   rc_client_set_event_handler(s_state.client, ClientEventHandler);
 
-  rc_client_set_hardcore_enabled(s_state.client, s_state.hardcore_mode);
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+  if (g_settings.achievements_use_raintegration)
+    BeginLoadRAIntegration();
+#endif
+
+  // Hardcore starts off. We enable it on first boot.
+  rc_client_set_hardcore_enabled(s_state.client, false);
   rc_client_set_encore_mode_enabled(s_state.client, g_settings.achievements_encore_mode);
   rc_client_set_unofficial_enabled(s_state.client, g_settings.achievements_unofficial_test_mode);
   rc_client_set_spectator_mode_enabled(s_state.client, g_settings.achievements_spectator_mode);
 
-  // Begin disc identification early, before the login finishes.
-  if (System::IsValid())
-    IdentifyGame(System::GetDiscPath(), nullptr);
-
-  TryLoggingInWithToken();
-
-  // Hardcore mode isn't enabled when achievements first starts, if a game is already running.
-  if (System::IsValid() && IsLoggedInOrLoggingIn() && g_settings.achievements_hardcore_mode)
-    DisplayHardcoreDeferredMessage();
+  // We can't do an internal client login while using RAIntegration, since the two will conflict.
+  if (!IsRAIntegrationInitializing())
+    FinishInitialize();
 
   return true;
+}
+
+void Achievements::FinishInitialize()
+{
+  // Start logging in. This can take a while.
+  TryLoggingInWithToken();
+
+  // Are we running a game?
+  if (System::IsValid())
+  {
+    IdentifyCurrentGame();
+    BeginLoadGame();
+
+    // Hardcore mode isn't enabled when achievements first starts, if a game is already running.
+    if (IsLoggedInOrLoggingIn() && g_settings.achievements_hardcore_mode)
+      DisplayHardcoreDeferredMessage();
+  }
 }
 
 bool Achievements::CreateClient(rc_client_t** client, std::unique_ptr<HTTPDownloader>* http)
@@ -704,10 +726,17 @@ void Achievements::DestroyClient(rc_client_t** client, std::unique_ptr<HTTPDownl
   http->reset();
 }
 
+bool Achievements::HasSavedCredentials()
+{
+  const TinyString username = Host::GetTinyStringSettingValue("Cheevos", "Username");
+  const TinyString api_token = Host::GetTinyStringSettingValue("Cheevos", "Token");
+  return (!username.empty() && !api_token.empty());
+}
+
 bool Achievements::TryLoggingInWithToken()
 {
-  std::string username = Host::GetBaseStringSettingValue("Cheevos", "Username");
-  std::string api_token = Host::GetBaseStringSettingValue("Cheevos", "Token");
+  const TinyString username = Host::GetTinyStringSettingValue("Cheevos", "Username");
+  const TinyString api_token = Host::GetTinyStringSettingValue("Cheevos", "Token");
   if (username.empty() || api_token.empty())
     return false;
 
@@ -736,13 +765,10 @@ bool Achievements::TryLoggingInWithToken()
 
 void Achievements::UpdateSettings(const Settings& old_config)
 {
-  if (IsUsingRAIntegration())
-    return;
-
   if (!g_settings.achievements_enabled)
   {
     // we're done here
-    Shutdown(false);
+    Shutdown();
     return;
   }
 
@@ -753,28 +779,35 @@ void Achievements::UpdateSettings(const Settings& old_config)
     return;
   }
 
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+  if (g_settings.achievements_use_raintegration != old_config.achievements_use_raintegration)
+  {
+    // RAIntegration requires a full client reload?
+    Shutdown();
+    Initialize();
+    return;
+  }
+#endif
+
   if (g_settings.achievements_hardcore_mode != old_config.achievements_hardcore_mode)
   {
-    // Hardcore mode can only be enabled through reset (ResetChallengeMode()).
-    if (s_state.hardcore_mode && !g_settings.achievements_hardcore_mode)
-    {
-      ResetHardcoreMode(false);
-    }
-    else if (!s_state.hardcore_mode && g_settings.achievements_hardcore_mode)
-    {
-      if (HasActiveGame())
-        DisplayHardcoreDeferredMessage();
-    }
+    // Enables have to wait for reset, disables can go through immediately.
+    if (g_settings.achievements_hardcore_mode)
+      DisplayHardcoreDeferredMessage();
+    else
+      DisableHardcoreMode(true, true);
   }
 
   // These cannot be modified while a game is loaded, so just toss state and reload.
+  auto lock = GetLock();
   if (HasActiveGame())
   {
+    lock.unlock();
     if (g_settings.achievements_encore_mode != old_config.achievements_encore_mode ||
         g_settings.achievements_spectator_mode != old_config.achievements_spectator_mode ||
         g_settings.achievements_unofficial_test_mode != old_config.achievements_unofficial_test_mode)
     {
-      Shutdown(false);
+      Shutdown();
       Initialize();
       return;
     }
@@ -790,48 +823,32 @@ void Achievements::UpdateSettings(const Settings& old_config)
   }
 }
 
-bool Achievements::Shutdown(bool allow_cancel)
+void Achievements::Shutdown()
 {
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-  {
-    if (System::IsValid() && allow_cancel && !RA_ConfirmLoadNewRom(true))
-      return false;
-
-    RA_SetPaused(false);
-    RA_ActivateGame(0);
-    return true;
-  }
-#endif
-
   if (!IsActive())
-    return true;
+    return;
 
   auto lock = GetLock();
   Assert(s_state.client && s_state.http_downloader);
 
   ClearGameInfo();
   ClearGameHash();
-  DisableHardcoreMode();
+  DisableHardcoreMode(false, false);
   UpdateGlyphRanges();
   CancelHashDatabaseRequests();
 
-  if (s_state.load_game_request)
-  {
-    rc_client_abort_async(s_state.client, s_state.load_game_request);
-    s_state.load_game_request = nullptr;
-  }
   if (s_state.login_request)
   {
     rc_client_abort_async(s_state.client, s_state.login_request);
     s_state.login_request = nullptr;
   }
 
-  s_state.hardcore_mode = false;
-  DestroyClient(&s_state.client, &s_state.http_downloader);
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+  if (s_state.using_raintegration)
+    UnloadRAIntegration();
+#endif
 
-  Host::OnAchievementsRefreshed();
-  return true;
+  DestroyClient(&s_state.client, &s_state.http_downloader);
 }
 
 void Achievements::ClientMessageCallback(const char* message, const rc_client_t* client)
@@ -881,7 +898,7 @@ void Achievements::ClientServerCall(const rc_api_request_t* request, rc_client_s
                                                   RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR) :
                                                status_code;
     rr.body_length = data.size();
-    rr.body = reinterpret_cast<const char*>(data.data());
+    rr.body = data.empty() ? nullptr : reinterpret_cast<const char*>(data.data());
 
     callback(&rr, callback_data);
   };
@@ -906,11 +923,6 @@ void Achievements::IdleUpdate()
   if (!IsActive())
     return;
 
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-    return;
-#endif
-
   const auto lock = GetLock();
 
   s_state.http_downloader->PollRequests();
@@ -930,14 +942,6 @@ void Achievements::FrameUpdate()
 {
   if (!IsActive())
     return;
-
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-  {
-    RA_DoAchievementsFrame();
-    return;
-  }
-#endif
 
   auto lock = GetLock();
 
@@ -961,6 +965,10 @@ void Achievements::ClientEventHandler(const rc_client_event_t* event, rc_client_
 
     case RC_CLIENT_EVENT_GAME_COMPLETED:
       HandleGameCompleteEvent(event);
+      break;
+
+    case RC_CLIENT_EVENT_SUBSET_COMPLETED:
+      HandleSubsetCompleteEvent(event);
       break;
 
     case RC_CLIENT_EVENT_LEADERBOARD_STARTED:
@@ -1041,15 +1049,23 @@ void Achievements::UpdateRecentUnlockAndAlmostThere()
 {
   const auto lock = GetLock();
   if (!HasActiveGame())
+  {
+    s_state.most_recent_unlock.reset();
+    s_state.achievement_nearest_completion.reset();
     return;
-
-  s_state.most_recent_unlock = nullptr;
-  s_state.achievement_nearest_completion = nullptr;
+  }
 
   rc_client_achievement_list_t* const achievements = rc_client_create_achievement_list(
     s_state.client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
   if (!achievements)
+  {
+    s_state.most_recent_unlock.reset();
+    s_state.achievement_nearest_completion.reset();
     return;
+  }
+
+  const rc_client_achievement_t* most_recent_unlock = nullptr;
+  const rc_client_achievement_t* nearest_completion = nullptr;
 
   for (u32 i = 0; i < achievements->num_buckets; i++)
   {
@@ -1060,8 +1076,8 @@ void Achievements::UpdateRecentUnlockAndAlmostThere()
 
       if (achievement->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED)
       {
-        if (!s_state.most_recent_unlock || achievement->unlock_time > s_state.most_recent_unlock->unlock_time)
-          s_state.most_recent_unlock = achievement;
+        if (!most_recent_unlock || achievement->unlock_time > most_recent_unlock->unlock_time)
+          most_recent_unlock = achievement;
       }
       else
       {
@@ -1069,14 +1085,34 @@ void Achievements::UpdateRecentUnlockAndAlmostThere()
         // matching the rc_client definition of "almost there"
         const float percent_cutoff = 80.0f;
         if (achievement->measured_percent >= percent_cutoff &&
-            (!s_state.achievement_nearest_completion ||
-             achievement->measured_percent > s_state.achievement_nearest_completion->measured_percent))
+            (!nearest_completion || achievement->measured_percent > nearest_completion->measured_percent))
         {
-          s_state.achievement_nearest_completion = achievement;
+          nearest_completion = achievement;
         }
       }
     }
   }
+
+  // have to take a copy because with RAIntegration the achievement pointer does not persist
+  static constexpr auto cache_info = [](const rc_client_achievement_t* achievement,
+                                        std::optional<PauseMenuAchievementInfo>& info) {
+    if (!achievement)
+    {
+      info.reset();
+      return;
+    }
+
+    if (!info.has_value())
+      info.emplace();
+
+    info->title = achievement->title;
+    info->description = achievement->description;
+    info->badge_path = GetAchievementBadgePath(achievement, false);
+  };
+
+  cache_info(most_recent_unlock, s_state.most_recent_unlock);
+  cache_info(nearest_completion, s_state.achievement_nearest_completion);
+
   rc_client_destroy_achievement_list(achievements);
 }
 
@@ -1108,40 +1144,101 @@ void Achievements::UpdateRichPresence(std::unique_lock<std::recursive_mutex>& lo
   lock.lock();
 }
 
-void Achievements::GameChanged(const std::string& path, CDImage* image, bool booting)
+void Achievements::OnSystemStarting(CDImage* image, bool disable_hardcore_mode)
 {
   std::unique_lock lock(s_state.mutex);
 
-  if (!IsActive())
+  if (!IsActive() || IsRAIntegrationInitializing())
     return;
-
-  IdentifyGame(path, image);
 
   // if we're not logged in, and there's no login request, retry logging in
   // this'll happen if we had no network connection on startup, but gained it before starting a game.
-  // follow the same order as Initialize() - identify, then log in
-  if (!IsLoggedInOrLoggingIn() && booting)
+  if (!IsLoggedInOrLoggingIn())
   {
     WARNING_LOG("Not logged in on game booting, trying again.");
     TryLoggingInWithToken();
   }
-}
 
-void Achievements::IdentifyGame(const std::string& path, CDImage* image)
-{
-  if (s_state.game_path == path)
+  // HC should have been disabled, we're now enabling it
+  // RAIntegration can enable hardcode mode outside of us, so we need to double-check
+  if (rc_client_get_hardcore_enabled(s_state.client))
   {
-    WARNING_LOG("Game path is unchanged.");
-    return;
+    WARNING_LOG("Hardcore mode was enabled on system starting.");
+    OnHardcoreModeChanged(true, false, false);
+  }
+  else
+  {
+    // only enable hardcore mode if we're logged in, or waiting for a login response
+    if (!disable_hardcore_mode && g_settings.achievements_hardcore_mode && IsLoggedInOrLoggingIn())
+      EnableHardcodeMode(false, false);
   }
 
-  std::unique_ptr<CDImage> temp_image;
-  if (!path.empty() && !image)
+  // now we can finally identify the game
+  IdentifyGame(image);
+  BeginLoadGame();
+}
+
+void Achievements::OnSystemDestroyed()
+{
+  ClearGameInfo();
+  ClearGameHash();
+  DisableHardcoreMode(false, false);
+  UpdateGlyphRanges();
+}
+
+void Achievements::OnSystemReset()
+{
+  const auto lock = GetLock();
+  if (!IsActive()|| IsRAIntegrationInitializing())
+    return;
+
+  // Do we need to enable hardcore mode?
+  if (System::IsValid() && g_settings.achievements_hardcore_mode && !rc_client_get_hardcore_enabled(s_state.client))
   {
-    temp_image = CDImage::Open(path.c_str(), g_settings.cdrom_load_image_patches, nullptr);
-    image = temp_image.get();
-    if (!temp_image)
-      ERROR_LOG("Failed to open temporary CD image '{}'", path);
+    // This will raise the silly reset event, but we can safely ignore that since we're immediately resetting the client
+    DEV_LOG("Enabling hardcore mode after reset");
+    EnableHardcodeMode(true, true);
+  }
+
+  DEV_LOG("Reset client");
+  rc_client_reset(s_state.client);
+}
+
+void Achievements::GameChanged(CDImage* image)
+{
+  std::unique_lock lock(s_state.mutex);
+
+  if (!IsActive()|| IsRAIntegrationInitializing())
+    return;
+
+  // disc changed?
+  if (!IdentifyGame(image))
+    return;
+
+  // cancel previous requests
+  if (s_state.load_game_request)
+  {
+    rc_client_abort_async(s_state.client, s_state.load_game_request);
+    s_state.load_game_request = nullptr;
+  }
+
+  // Use a hash that will never match if we removed the disc. See rc_client_begin_change_media().
+  TinyString game_hash_str;
+  if (s_state.game_hash.has_value())
+    game_hash_str = GameHashToString(s_state.game_hash.value());
+  else
+    game_hash_str = "[NO HASH]";
+
+  s_state.load_game_request = rc_client_begin_change_media_from_hash(
+    s_state.client, game_hash_str.c_str(), ClientLoadGameCallback, reinterpret_cast<void*>(static_cast<uintptr_t>(1)));
+}
+
+bool Achievements::IdentifyGame(CDImage* image)
+{
+  if (s_state.game_path == (image ? std::string_view(image->GetPath()) : std::string_view()))
+  {
+    WARNING_LOG("Game path is unchanged.");
+    return false;
   }
 
   std::optional<GameHash> game_hash;
@@ -1150,99 +1247,60 @@ void Achievements::IdentifyGame(const std::string& path, CDImage* image)
     u32 bytes_hashed;
     game_hash = GetGameHash(image, &bytes_hashed);
     if (game_hash.has_value())
-      INFO_LOG("RA Hash: {} ({} bytes hashed)", GameHashToString(game_hash.value()), bytes_hashed);
+    {
+      INFO_COLOR_LOG(StrongOrange, "RA Hash: {} ({} bytes hashed)", GameHashToString(game_hash.value()), bytes_hashed);
+    }
+    else
+    {
+      // If we are starting with this game and it's bad, notify the user that this is why.
+      Host::AddIconOSDWarning(
+        "AchievementsHashFailed", ICON_EMOJI_WARNING,
+        TRANSLATE_STR("Achievements", "Failed to read executable from disc. Achievements disabled."),
+        Host::OSD_ERROR_DURATION);
+    }
   }
+
+  s_state.game_path = image ? image->GetPath() : std::string();
 
   if (s_state.game_hash == game_hash)
   {
     // only the path has changed - different format/save state/etc.
-    INFO_LOG("Detected path change from '{}' to '{}'", s_state.game_path, path);
-    s_state.game_path = path;
-    return;
+    INFO_LOG("Detected path change to '{}'", s_state.game_path);
+    return false;
   }
 
-  ClearGameHash();
-  s_state.game_path = path;
-  s_state.game_hash = std::move(game_hash);
+  s_state.game_hash = game_hash;
+  return true;
+}
 
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
+bool Achievements::IdentifyCurrentGame()
+{
+  DebugAssert(System::IsValid());
+
+  // this crap is only needed because we can't grab the image from the reader...
+  std::unique_ptr<CDImage> temp_image;
+  if (const std::string& disc_path = System::GetDiscPath(); !disc_path.empty())
   {
-    RAIntegration::GameChanged();
-    return;
-  }
-#endif
-
-  // shouldn't have a load game request when we're not logged in.
-  Assert(IsLoggedInOrLoggingIn() || !s_state.load_game_request);
-
-  // bail out if we're not logged in, just save the hash
-  if (!IsLoggedInOrLoggingIn())
-  {
-    INFO_LOG("Skipping load game because we're not logged in.");
-    DisableHardcoreMode();
-    return;
+    Error error;
+    temp_image = CDImage::Open(disc_path.c_str(), g_settings.cdrom_load_image_patches, &error);
+    if (!temp_image)
+      ERROR_LOG("Failed to open disc for late game identification: {}", error.GetDescription());
   }
 
-  if (!rc_client_is_game_loaded(s_state.client))
-    BeginLoadGame();
-  else
-    BeginChangeDisc();
+  return IdentifyGame(temp_image.get());
 }
 
 void Achievements::BeginLoadGame()
 {
-  ClearGameInfo();
-
   if (!s_state.game_hash.has_value())
   {
-    // when we're booting the bios, this will fail
-    if (!s_state.game_path.empty())
-    {
-      Host::AddKeyedOSDMessage(
-        "retroachievements_disc_read_failed",
-        TRANSLATE_STR("Achievements", "Failed to read executable from disc. Achievements disabled."),
-        Host::OSD_ERROR_DURATION);
-    }
-
-    DisableHardcoreMode();
-    UpdateGlyphRanges();
+    // no need to go through ClientLoadGameCallback, just bail out straight away
+    DisableHardcoreMode(false, false);
     return;
   }
 
   s_state.load_game_request = rc_client_begin_load_game(s_state.client, GameHashToString(s_state.game_hash.value()),
                                                         ClientLoadGameCallback, nullptr);
-}
-
-void Achievements::BeginChangeDisc()
-{
-  // cancel previous requests
-  if (s_state.load_game_request)
-  {
-    rc_client_abort_async(s_state.client, s_state.load_game_request);
-    s_state.load_game_request = nullptr;
-  }
-
-  if (!s_state.game_hash.has_value())
-  {
-    // when we're booting the bios, this will fail
-    if (!s_state.game_path.empty())
-    {
-      Host::AddKeyedOSDMessage(
-        "retroachievements_disc_read_failed",
-        TRANSLATE_STR("Achievements", "Failed to read executable from disc. Achievements disabled."),
-        Host::OSD_ERROR_DURATION);
-    }
-
-    ClearGameInfo();
-    DisableHardcoreMode();
-    UpdateGlyphRanges();
-    return;
-  }
-
-  s_state.load_game_request =
-    rc_client_begin_change_media_from_hash(s_state.client, GameHashToString(s_state.game_hash.value()),
-                                           ClientLoadGameCallback, reinterpret_cast<void*>(static_cast<uintptr_t>(1)));
 }
 
 void Achievements::ClientLoadGameCallback(int result, const char* error_message, rc_client_t* client, void* userdata)
@@ -1261,13 +1319,27 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
       UpdateGlyphRanges();
     }
 
-    DisableHardcoreMode();
+    DisableHardcoreMode(false, false);
     return;
   }
   else if (result == RC_LOGIN_REQUIRED)
   {
     // We would've asked to re-authenticate, so leave HC on for now.
     // Once we've done so, we'll reload the game.
+    if (!HasSavedCredentials())
+    {
+      DisableHardcoreMode(false, false);
+      return;
+    }
+
+    return;
+  }
+  else if (result == RC_HARDCORE_DISABLED)
+  {
+    if (error_message)
+      ReportError(error_message);
+
+    OnHardcoreModeChanged(false, true, false);
     return;
   }
   else if (result != RC_OK)
@@ -1279,15 +1351,8 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
       UpdateGlyphRanges();
     }
 
-    DisableHardcoreMode();
+    DisableHardcoreMode(false, false);
     return;
-  }
-  else if (result == RC_HARDCORE_DISABLED)
-  {
-    if (error_message)
-      ReportError(error_message);
-
-    DisableHardcoreMode();
   }
 
   const rc_client_game_t* info = rc_client_get_game_info(s_state.client);
@@ -1300,7 +1365,7 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
       UpdateGlyphRanges();
     }
 
-    DisableHardcoreMode();
+    DisableHardcoreMode(false, false);
     return;
   }
 
@@ -1310,13 +1375,10 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
   // Only display summary if the game title has changed across discs.
   const bool display_summary = (s_state.game_id != info->id || s_state.game_title != info->title);
 
-  // If the game has a RetroAchievements entry but no achievements or leaderboards,
-  // enforcing hardcore mode is pointless.
-  if (!has_achievements && !has_leaderboards)
-    DisableHardcoreMode();
-
-  // We should have matched hardcore mode state.
-  Assert(s_state.hardcore_mode == (rc_client_get_hardcore_enabled(client) != 0));
+  // If the game has a RetroAchievements entry but no achievements or leaderboards, enforcing hardcore mode
+  // is pointless. Have to re-query leaderboards because hidden should still trip HC.
+  if (!has_achievements && !rc_client_has_leaderboards(client, true))
+    DisableHardcoreMode(false, false);
 
   s_state.game_id = info->id;
   s_state.game_title = info->title;
@@ -1400,11 +1462,15 @@ void Achievements::DisplayAchievementSummary()
                                                      s_state.game_summary.points_core),
                                  s_state.game_summary.points_unlocked));
 
+      summary.append('\n');
       if (IsHardcoreModeActive())
       {
-        summary.append('\n');
         summary.append(
           TRANSLATE_SV("Achievements", "Hardcore mode is enabled. Cheats and save states are unavailable."));
+      }
+      else
+      {
+        summary.append(TRANSLATE_SV("Achievements", "Hardcore mode is disabled. Leaderboards will not be tracked."));
       }
     }
     else
@@ -1430,7 +1496,7 @@ void Achievements::DisplayAchievementSummary()
 
 void Achievements::DisplayHardcoreDeferredMessage()
 {
-  if (g_settings.achievements_hardcore_mode && !s_state.hardcore_mode && System::IsValid())
+  if (g_settings.achievements_hardcore_mode && System::IsValid())
   {
     GPUThread::RunOnThread([]() {
       if (!FullscreenUI::Initialize())
@@ -1445,12 +1511,7 @@ void Achievements::DisplayHardcoreDeferredMessage()
 
 void Achievements::HandleResetEvent(const rc_client_event_t* event)
 {
-  // We handle system resets ourselves, but still need to reset the client's state.
-  INFO_LOG("Resetting runtime due to reset event");
-  rc_client_reset(s_state.client);
-
-  if (HasActiveGame())
-    UpdateGameSummary(false, false);
+  WARNING_LOG("Ignoring RC_CLIENT_EVENT_RESET.");
 }
 
 void Achievements::HandleUnlockEvent(const rc_client_event_t* event)
@@ -1469,7 +1530,7 @@ void Achievements::HandleUnlockEvent(const rc_client_event_t* event)
     else
       title = cheevo->title;
 
-    std::string badge_path = GetAchievementBadgePath(cheevo, cheevo->state);
+    std::string badge_path = GetAchievementBadgePath(cheevo, false);
 
     GPUThread::RunOnThread([id = cheevo->id, duration = g_settings.achievements_notification_duration,
                             title = std::move(title), description = std::string(cheevo->description),
@@ -1493,20 +1554,53 @@ void Achievements::HandleGameCompleteEvent(const rc_client_event_t* event)
 
   if (g_settings.achievements_notifications)
   {
-    std::string title = fmt::format(TRANSLATE_FS("Achievements", "Mastered {}"), s_state.game_title);
     std::string message = fmt::format(
-      TRANSLATE_FS("Achievements", "{0}, {1}"),
+      TRANSLATE_FS("Achievements", "Game complete.\n{0}, {1}."),
       TRANSLATE_PLURAL_STR("Achievements", "%n achievements", "Mastery popup",
                            s_state.game_summary.num_unlocked_achievements),
       TRANSLATE_PLURAL_STR("Achievements", "%n points", "Achievement points", s_state.game_summary.points_unlocked));
 
     GPUThread::RunOnThread(
-      [title = std::move(title), message = std::move(message), icon = s_state.game_icon]() mutable {
+      [title = s_state.game_title, message = std::move(message), icon = s_state.game_icon]() mutable {
         if (!FullscreenUI::Initialize())
           return;
 
         ImGuiFullscreen::AddNotification("achievement_mastery", GAME_COMPLETE_NOTIFICATION_TIME, std::move(title),
                                          std::move(message), std::move(icon));
+      });
+  }
+}
+
+void Achievements::HandleSubsetCompleteEvent(const rc_client_event_t* event)
+{
+  INFO_LOG("Subset {} ({}) complete", event->subset->title, event->subset->id);
+  UpdateGameSummary(false, false);
+
+  if (g_settings.achievements_notifications)
+  {
+    // Need to grab the icon for the subset.
+    std::string badge_path;
+    if (const std::string_view badge_url = event->subset->badge_url; !badge_url.empty())
+    {
+      badge_path = GetLocalImagePath(event->subset->badge_name, RC_IMAGE_TYPE_GAME);
+      if (!badge_path.empty() && !FileSystem::FileExists(badge_path.c_str()))
+        DownloadImage(std::string(badge_url), badge_path);
+    }
+
+    std::string title = event->subset->title;
+    std::string message = fmt::format(
+      TRANSLATE_FS("Achievements", "Subset complete.\n{0}, {1}."),
+      TRANSLATE_PLURAL_STR("Achievements", "%n achievements", "Mastery popup",
+                           s_state.game_summary.num_unlocked_achievements),
+      TRANSLATE_PLURAL_STR("Achievements", "%n points", "Achievement points", s_state.game_summary.points_unlocked));
+
+    GPUThread::RunOnThread(
+      [title = std::move(title), message = std::move(message), badge_path = std::move(badge_path)]() mutable {
+        if (!FullscreenUI::Initialize())
+          return;
+
+        ImGuiFullscreen::AddNotification("achievement_mastery", GAME_COMPLETE_NOTIFICATION_TIME, std::move(title),
+                                         std::move(message), std::move(badge_path));
       });
   }
 }
@@ -1674,11 +1768,11 @@ void Achievements::HandleAchievementChallengeIndicatorShowEvent(const rc_client_
     return;
   }
 
-  s_state.active_challenge_indicators.push_back(AchievementChallengeIndicator{
-    .achievement = event->achievement,
-    .badge_path = GetAchievementBadgePath(event->achievement, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED),
-    .opacity = 0.0f,
-    .active = true});
+  s_state.active_challenge_indicators.push_back(
+    AchievementChallengeIndicator{.achievement = event->achievement,
+                                  .badge_path = GetAchievementBadgePath(event->achievement, false),
+                                  .opacity = 0.0f,
+                                  .active = true});
 
   DEV_LOG("Show challenge indicator for {} ({})", event->achievement->id, event->achievement->title);
 }
@@ -1704,8 +1798,7 @@ void Achievements::HandleAchievementProgressIndicatorShowEvent(const rc_client_e
     s_state.active_progress_indicator.emplace();
 
   s_state.active_progress_indicator->achievement = event->achievement;
-  s_state.active_progress_indicator->badge_path =
-    GetAchievementBadgePath(event->achievement, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
+  s_state.active_progress_indicator->badge_path = GetAchievementBadgePath(event->achievement, false);
   s_state.active_progress_indicator->opacity = 0.0f;
   s_state.active_progress_indicator->active = true;
 }
@@ -1767,83 +1860,34 @@ void Achievements::HandleServerReconnectedEvent(const rc_client_event_t* event)
   });
 }
 
-void Achievements::Reset()
+void Achievements::EnableHardcodeMode(bool display_message, bool display_game_summary)
 {
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-  {
-    RA_OnReset();
-    return;
-  }
-#endif
-
-  if (!IsActive())
+  DebugAssert(IsActive());
+  if (rc_client_get_hardcore_enabled(s_state.client))
     return;
 
-  DEV_LOG("Reset client");
-  rc_client_reset(s_state.client);
+  rc_client_set_hardcore_enabled(s_state.client, true);
+  OnHardcoreModeChanged(true, display_message, display_game_summary);
 }
 
-void Achievements::OnSystemPaused(bool paused)
-{
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-    RA_SetPaused(paused);
-#endif
-}
-
-void Achievements::DisableHardcoreMode()
+void Achievements::DisableHardcoreMode(bool show_message, bool display_game_summary)
 {
   if (!IsActive())
     return;
-
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-  {
-    if (RA_HardcoreModeIsActive())
-      RA_DisableHardcore();
-
-    return;
-  }
-#endif
-
-  if (!s_state.hardcore_mode)
-    return;
-
-  SetHardcoreMode(false, true);
-}
-
-bool Achievements::ResetHardcoreMode(bool is_booting)
-{
-  if (!IsActive())
-    return false;
 
   const auto lock = GetLock();
-
-  // If we're not logged in, don't apply hardcore mode restrictions.
-  // If we later log in, we'll start with it off anyway.
-  const bool wanted_hardcore_mode = (IsLoggedInOrLoggingIn() || s_state.load_game_request) &&
-                                    (HasActiveGame() || s_state.load_game_request) &&
-                                    g_settings.achievements_hardcore_mode;
-  if (s_state.hardcore_mode == wanted_hardcore_mode)
-    return false;
-
-  if (!is_booting && wanted_hardcore_mode && !CanEnableHardcoreMode())
-    return false;
-
-  SetHardcoreMode(wanted_hardcore_mode, false);
-  return true;
-}
-
-void Achievements::SetHardcoreMode(bool enabled, bool force_display_message)
-{
-  if (enabled == s_state.hardcore_mode)
+  if (!rc_client_get_hardcore_enabled(s_state.client))
     return;
 
-  // new mode
-  s_state.hardcore_mode = enabled;
+  rc_client_set_hardcore_enabled(s_state.client, false);
+  OnHardcoreModeChanged(false, show_message, display_game_summary);
+}
 
-  if (System::IsValid() && (HasActiveGame() || force_display_message))
+void Achievements::OnHardcoreModeChanged(bool enabled, bool display_message, bool display_game_summary)
+{
+  INFO_COLOR_LOG(StrongYellow, "Hardcore mode/restrictions are now {}.", enabled ? "ACTIVE" : "inactive");
+
+  if (System::IsValid() && display_message)
   {
     GPUThread::RunOnThread([enabled]() {
       if (!FullscreenUI::Initialize())
@@ -1856,17 +1900,28 @@ void Achievements::SetHardcoreMode(bool enabled, bool force_display_message)
     });
   }
 
-  rc_client_set_hardcore_enabled(s_state.client, enabled);
-  DebugAssert((rc_client_get_hardcore_enabled(s_state.client) != 0) == enabled);
-  if (HasActiveGame())
+  if (HasActiveGame() && display_game_summary)
   {
     UpdateGameSummary(true, true);
     DisplayAchievementSummary();
   }
 
+  DebugAssert((rc_client_get_hardcore_enabled(s_state.client) != 0) == enabled);
+
   // Reload setting to permit cheating-like things if we were just disabled.
-  if (!enabled && System::IsValid())
+  if (System::IsValid())
+  {
+    // Make sure a pre-existing cheat file hasn't been loaded when resetting after enabling HC mode.
+    Cheats::ReloadCheats(true, true, false, true, true);
+
+    // Defer settings update in case something is using it.
     Host::RunOnCPUThread([]() { System::ApplySettings(false); });
+  }
+  else if (System::GetState() == System::State::Starting)
+  {
+    // Initial HC enable, activate restrictions.
+    System::ApplySettings(false);
+  }
 
   // Toss away UI state, because it's invalid now
   ClearUIState();
@@ -1895,7 +1950,7 @@ bool Achievements::DoState(StateWrapper& sw)
   {
     // if we're active, make sure we've downloaded and activated all the achievements
     // before deserializing, otherwise that state's going to get lost.
-    if (!IsUsingRAIntegration() && s_state.load_game_request)
+    if (s_state.load_game_request)
     {
       // Messy because GPU-thread, but at least it looks pretty.
       GPUThread::RunOnThread([]() {
@@ -1908,23 +1963,13 @@ bool Achievements::DoState(StateWrapper& sw)
       GPUThread::RunOnThread([]() { FullscreenUI::CloseLoadingScreen(); });
     }
 
-    // loading an old state without cheevos, so reset the runtime
-    Achievements::Reset();
-
     u32 data_size = 0;
     sw.DoEx(&data_size, REQUIRED_VERSION, 0u);
     if (data_size == 0)
     {
       // reset runtime, no data (state might've been created without cheevos)
       WARNING_LOG("State is missing cheevos data, resetting runtime");
-#ifdef ENABLE_RAINTEGRATION
-      if (IsUsingRAIntegration())
-        RA_OnReset();
-      else
-        rc_client_reset(s_state.client);
-#else
       rc_client_reset(s_state.client);
-#endif
 
       return !sw.HasError();
     }
@@ -1933,20 +1978,11 @@ bool Achievements::DoState(StateWrapper& sw)
     if (sw.HasError())
       return false;
 
-#ifdef ENABLE_RAINTEGRATION
-    if (IsUsingRAIntegration())
+    const int result = rc_client_deserialize_progress_sized(s_state.client, data.data(), data_size);
+    if (result != RC_OK)
     {
-      RA_RestoreState(reinterpret_cast<const char*>(data.data()));
-    }
-    else
-#endif
-    {
-      const int result = rc_client_deserialize_progress_sized(s_state.client, data.data(), data_size);
-      if (result != RC_OK)
-      {
-        WARNING_LOG("Failed to deserialize cheevos state ({}), resetting", result);
-        rc_client_reset(s_state.client);
-      }
+      WARNING_LOG("Failed to deserialize cheevos state ({}), resetting", result);
+      rc_client_reset(s_state.client);
     }
 
     return true;
@@ -1955,46 +1991,22 @@ bool Achievements::DoState(StateWrapper& sw)
   {
     const size_t size_pos = sw.GetPosition();
 
-#ifdef ENABLE_RAINTEGRATION
-    if (IsUsingRAIntegration())
-    {
-      const int size = RA_CaptureState(nullptr, 0);
-      u32 write_size = static_cast<u32>(std::max(size, 0));
-      sw.Do(&write_size);
+    u32 data_size = static_cast<u32>(rc_client_progress_size(s_state.client));
+    sw.Do(&data_size);
 
-      const std::span<u8> data = sw.GetDeferredBytes(write_size);
-      if (!data.empty())
+    if (data_size > 0)
+    {
+      const std::span<u8> data = sw.GetDeferredBytes(data_size);
+      if (!sw.HasError()) [[likely]]
       {
-        const int result = RA_CaptureState(reinterpret_cast<char*>(data.data()), size);
-        if (result != static_cast<int>(size))
+        const int result = rc_client_serialize_progress_sized(s_state.client, data.data(), data_size);
+        if (result != RC_OK)
         {
-          WARNING_LOG("Failed to serialize cheevos state from RAIntegration.");
-          write_size = 0;
+          // set data to zero, effectively serializing nothing
+          WARNING_LOG("Failed to serialize cheevos state ({})", result);
+          data_size = 0;
           sw.SetPosition(size_pos);
-          sw.Do(&write_size);
-        }
-      }
-    }
-    else
-#endif
-    {
-      u32 data_size = static_cast<u32>(rc_client_progress_size(s_state.client));
-      sw.Do(&data_size);
-
-      if (data_size > 0)
-      {
-        const std::span<u8> data = sw.GetDeferredBytes(data_size);
-        if (!sw.HasError()) [[likely]]
-        {
-          const int result = rc_client_serialize_progress_sized(s_state.client, data.data(), data_size);
-          if (result != RC_OK)
-          {
-            // set data to zero, effectively serializing nothing
-            WARNING_LOG("Failed to serialize cheevos state ({})", result);
-            data_size = 0;
-            sw.SetPosition(size_pos);
-            sw.Do(&data_size);
-          }
+          sw.Do(&data_size);
         }
       }
     }
@@ -2003,35 +2015,33 @@ bool Achievements::DoState(StateWrapper& sw)
   }
 }
 
-std::string Achievements::GetAchievementBadgePath(const rc_client_achievement_t* achievement, int state,
+std::string Achievements::GetAchievementBadgePath(const rc_client_achievement_t* achievement, bool locked,
                                                   bool download_if_missing)
 {
-  const std::string path = GetLocalImagePath(achievement->badge_name, (state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED) ?
-                                                                        RC_IMAGE_TYPE_ACHIEVEMENT :
-                                                                        RC_IMAGE_TYPE_ACHIEVEMENT_LOCKED);
+  const std::string path =
+    GetLocalImagePath(achievement->badge_name, locked ? RC_IMAGE_TYPE_ACHIEVEMENT_LOCKED : RC_IMAGE_TYPE_ACHIEVEMENT);
   if (download_if_missing && !path.empty() && !FileSystem::FileExists(path.c_str()))
   {
-    char buf[URL_BUFFER_SIZE];
-    const int res = rc_client_achievement_get_image_url(achievement, state, buf, std::size(buf));
-    if (res == RC_OK)
-      DownloadImage(buf, path);
+    const std::string_view url = locked ? achievement->badge_locked_url : achievement->badge_url;
+    if (url.empty())
+      ReportFmtError("Acheivement {} with badge name {} has no badge URL", achievement->id, achievement->badge_name);
     else
-      ReportRCError(res, "rc_client_achievement_get_image_url() for {} failed", achievement->title);
+      DownloadImage(std::string(url), path);
   }
 
   return path;
 }
 
-const std::string& Achievements::GetCachedAchievementBadgePath(const rc_client_achievement_t* achievement, int state)
+const std::string& Achievements::GetCachedAchievementBadgePath(const rc_client_achievement_t* achievement, bool locked)
 {
-  for (const auto& [l_cheevo, l_state, l_path] : s_state.achievement_badge_paths)
+  for (const auto& [l_cheevo, l_path, l_state] : s_state.achievement_badge_paths)
   {
-    if (l_cheevo == achievement && l_state == state)
+    if (l_cheevo == achievement && l_state == locked)
       return l_path;
   }
 
-  std::string path = GetAchievementBadgePath(achievement, state);
-  return std::get<2>(s_state.achievement_badge_paths.emplace_back(achievement, state, std::move(path)));
+  std::string path = GetAchievementBadgePath(achievement, locked);
+  return std::get<1>(s_state.achievement_badge_paths.emplace_back(achievement, std::move(path), locked));
 }
 
 std::string Achievements::GetLeaderboardUserBadgePath(const rc_client_leaderboard_entry_t* entry)
@@ -2055,12 +2065,6 @@ std::string Achievements::GetLeaderboardUserBadgePath(const rc_client_leaderboar
 bool Achievements::IsLoggedInOrLoggingIn()
 {
   return (rc_client_get_user_info(s_state.client) != nullptr || s_state.login_request);
-}
-
-bool Achievements::CanEnableHardcoreMode()
-{
-  // have to re-query leaderboards because hidden should still trip HC
-  return (s_state.load_game_request || s_state.has_achievements || rc_client_has_leaderboards(s_state.client, true));
 }
 
 bool Achievements::Login(const char* username, const char* password, Error* error)
@@ -2106,7 +2110,10 @@ bool Achievements::Login(const char* username, const char* password, Error* erro
 
   // If we were't a temporary client, get the game loaded.
   if (System::IsValid() && !is_temporary_client)
+  {
+    IdentifyCurrentGame();
     BeginLoadGame();
+  }
 
   return true;
 }
@@ -2184,9 +2191,6 @@ void Achievements::ClientLoginWithTokenCallback(int result, const char* error_me
   }
 
   FinishLogin(client);
-
-  if (System::IsValid())
-    BeginLoadGame();
 }
 
 void Achievements::FinishLogin(const rc_client_t* client)
@@ -2266,7 +2270,7 @@ std::string Achievements::GetLoggedInUserBadgePath()
 
 u32 Achievements::GetPauseThrottleFrames()
 {
-  if (!IsActive() || !IsHardcoreModeActive() || IsUsingRAIntegration())
+  if (!IsActive() || !IsHardcoreModeActive())
     return 0;
 
   u32 frames_remaining = 0;
@@ -2283,6 +2287,7 @@ void Achievements::Logout()
     {
       ClearGameInfo();
       UpdateGlyphRanges();
+      DisableHardcoreMode(false, false);
     }
 
     CancelHashDatabaseRequests();
@@ -2299,23 +2304,8 @@ void Achievements::Logout()
   ClearProgressDatabase();
 }
 
-bool Achievements::ConfirmSystemReset()
-{
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-    return RA_ConfirmLoadNewRom(false);
-#endif
-
-  return true;
-}
-
 bool Achievements::ConfirmHardcoreModeDisable(const char* trigger)
 {
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-    return (RA_WarnDisableHardcore(trigger) != 0);
-#endif
-
   // I really hope this doesn't deadlock :/
   const bool confirmed = Host::ConfirmMessage(
     TRANSLATE("Achievements", "Confirm Hardcore Mode Disable"),
@@ -2325,36 +2315,25 @@ bool Achievements::ConfirmHardcoreModeDisable(const char* trigger)
   if (!confirmed)
     return false;
 
-  DisableHardcoreMode();
+  DisableHardcoreMode(true, true);
   return true;
 }
 
 void Achievements::ConfirmHardcoreModeDisableAsync(const char* trigger, std::function<void(bool)> callback)
 {
-  auto real_callback = [callback = std::move(callback)](bool res) mutable {
-    // don't run the callback in the middle of rendering the UI
-    Host::RunOnCPUThread([callback = std::move(callback), res]() {
-      if (res)
-        DisableHardcoreMode();
-      callback(res);
-    });
-  };
-
-#ifdef ENABLE_RAINTEGRATION
-  if (IsUsingRAIntegration())
-  {
-    const bool result = (RA_WarnDisableHardcore(trigger) != 0);
-    real_callback(result);
-    return;
-  }
-#endif
-
   Host::ConfirmMessageAsync(
     TRANSLATE_STR("Achievements", "Confirm Hardcore Mode Disable"),
     fmt::format(TRANSLATE_FS("Achievements", "{0} cannot be performed while hardcore mode is active. Do you want to "
                                              "disable hardcore mode? {0} will be cancelled if you select No."),
                 trigger),
-    std::move(real_callback));
+    [callback = std::move(callback)](bool res) mutable {
+      // don't run the callback in the middle of rendering the UI
+      Host::RunOnCPUThread([callback = std::move(callback), res]() {
+        if (res)
+          DisableHardcoreMode(true, true);
+        callback(res);
+      });
+    });
 }
 
 void Achievements::ClearUIState()
@@ -2377,8 +2356,8 @@ void Achievements::ClearUIState()
     s_state.achievement_list = nullptr;
   }
 
-  s_state.most_recent_unlock = nullptr;
-  s_state.achievement_nearest_completion = nullptr;
+  s_state.most_recent_unlock.reset();
+  s_state.achievement_nearest_completion.reset();
 }
 
 template<typename T>
@@ -2464,10 +2443,9 @@ void Achievements::DrawGameOverlays()
     AchievementProgressIndicator& indicator = s_state.active_progress_indicator.value();
     const float opacity = IndicatorOpacity(io.DeltaTime, indicator);
 
-    const char* text_start = s_state.active_progress_indicator->achievement->measured_progress;
-    const char* text_end = text_start + std::strlen(text_start);
+    const std::string_view text = s_state.active_progress_indicator->achievement->measured_progress;
     const ImVec2 text_size =
-      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, text_start, text_end);
+      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(text));
 
     const ImVec2 box_min = ImVec2(position.x - image_size.x - text_size.x - spacing - padding * 2.0f,
                                   position.y - image_size.y - padding * 2.0f);
@@ -2488,8 +2466,8 @@ void Achievements::DrawGameOverlays()
       box_min + ImVec2(padding + image_size.x + spacing, (box_max.y - box_min.y - text_size.y) * 0.5f);
     const ImRect text_clip_rect(text_pos, box_max);
     RenderShadowedTextClipped(dl, UIStyle.MediumFont, text_pos, box_max,
-                              ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity)), text_start, text_end,
-                              &text_size, ImVec2(0.0f, 0.0f), 0.0f, &text_clip_rect);
+                              ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity)), text, &text_size,
+                              ImVec2(0.0f, 0.0f), 0.0f, &text_clip_rect);
 
     if (!indicator.active && opacity <= 0.01f)
     {
@@ -2512,7 +2490,7 @@ void Achievements::DrawGameOverlays()
       for (u32 i = 0; i < indicator.text.length(); i++)
         width_string.append('0');
       const ImVec2 size = ImGuiFullscreen::UIStyle.MediumFont->CalcTextSizeA(
-        ImGuiFullscreen::UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, width_string.c_str(), width_string.end_ptr());
+        ImGuiFullscreen::UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(width_string));
 
       const ImRect box(ImVec2(position.x - size.x - padding * 2.0f, position.y - size.y - padding * 2.0f), position);
       dl->AddRectFilled(box.Min, box.Max,
@@ -2520,16 +2498,14 @@ void Achievements::DrawGameOverlays()
 
       const u32 text_col = ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity));
       const ImVec2 text_size = ImGuiFullscreen::UIStyle.MediumFont->CalcTextSizeA(
-        ImGuiFullscreen::UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, indicator.text.c_str(),
-        indicator.text.c_str() + indicator.text.length());
+        ImGuiFullscreen::UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(indicator.text));
       const ImVec2 text_pos = ImVec2(box.Max.x - padding - text_size.x, box.Min.y + padding);
-      RenderShadowedTextClipped(dl, UIStyle.MediumFont, text_pos, box.Max, text_col, indicator.text.c_str(),
-                                indicator.text.c_str() + indicator.text.length(), &text_size, ImVec2(0.0f, 0.0f), 0.0f,
-                                &box);
+      RenderShadowedTextClipped(dl, UIStyle.MediumFont, text_pos, box.Max, text_col, indicator.text, &text_size,
+                                ImVec2(0.0f, 0.0f), 0.0f, &box);
 
       const ImVec2 icon_pos = ImVec2(box.Min.x + padding, box.Min.y + padding);
       RenderShadowedTextClipped(dl, UIStyle.MediumFont, icon_pos, box.Max, text_col, ICON_FA_STOPWATCH, nullptr,
-                                nullptr, ImVec2(0.0f, 0.0f), 0.0f, &box);
+                                ImVec2(0.0f, 0.0f), 0.0f, &box);
 
       if (!indicator.active && opacity <= 0.01f)
       {
@@ -2584,10 +2560,12 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
 
   ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-  const auto get_achievement_height = [&badge_size, &badge_text_width,
-                                       &text_spacing](const rc_client_achievement_t* achievement, bool show_measured) {
-    const ImVec2 description_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX,
-                                                                      badge_text_width, achievement->description);
+  const auto get_achievement_height = [&badge_size, &badge_text_width, &text_spacing](std::string_view description,
+                                                                                      bool show_measured) {
+    const ImVec2 description_size = description.empty() ?
+                                      ImVec2(0.0f, 0.0f) :
+                                      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX,
+                                                                        badge_text_width, IMSTR_START_END(description));
     const float text_height = UIStyle.MediumFont->FontSize + text_spacing + description_size.y;
     return std::max(text_height, badge_size);
   };
@@ -2598,16 +2576,16 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
   {
     box_height += UIStyle.MediumFont->FontSize + paragraph_spacing;
   }
-  if (s_state.most_recent_unlock)
+  if (s_state.most_recent_unlock.has_value())
   {
     box_height += UIStyle.MediumFont->FontSize + paragraph_spacing +
-                  get_achievement_height(s_state.most_recent_unlock, false) +
+                  get_achievement_height(s_state.most_recent_unlock->description, false) +
                   (s_state.achievement_nearest_completion ? (paragraph_spacing + paragraph_spacing) : 0.0f);
   }
-  if (s_state.achievement_nearest_completion)
+  if (s_state.achievement_nearest_completion.has_value())
   {
     box_height += UIStyle.MediumFont->FontSize + paragraph_spacing +
-                  get_achievement_height(s_state.achievement_nearest_completion, true);
+                  get_achievement_height(s_state.achievement_nearest_completion->description, true);
   }
 
   ImVec2 box_min = ImVec2(display_size.x - box_width - box_margin, start_pos_y + box_margin);
@@ -2618,25 +2596,33 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
   dl->AddRectFilled(box_min, box_max, box_background_color, box_rounding);
 
   const auto draw_achievement_with_summary = [&box_max, &badge_text_width, &dl, &title_text_color, &text_color,
-                                              &text_spacing, &text_pos, &badge_size](
-                                               const rc_client_achievement_t* achievement, bool show_measured) {
+                                              &text_spacing, &text_pos,
+                                              &badge_size](std::string_view title, std::string_view description,
+                                                           const std::string& badge_path, bool show_measured) {
     const ImVec2 image_max = ImVec2(text_pos.x + badge_size, text_pos.y + badge_size);
     ImVec2 badge_text_pos = ImVec2(image_max.x + text_spacing + text_spacing, text_pos.y);
     const ImVec4 clip_rect = ImVec4(badge_text_pos.x, badge_text_pos.y, badge_text_pos.x + badge_text_width, box_max.y);
-    const ImVec2 description_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX,
-                                                                      badge_text_width, achievement->description);
+    const ImVec2 description_size = description.empty() ?
+                                      ImVec2(0.0f, 0.0f) :
+                                      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX,
+                                                                        badge_text_width, IMSTR_START_END(description));
 
-    GPUTexture* badge_tex = ImGuiFullscreen::GetCachedTextureAsync(
-      GetCachedAchievementBadgePath(achievement, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED));
+    GPUTexture* badge_tex = ImGuiFullscreen::GetCachedTextureAsync(badge_path);
     dl->AddImage(badge_tex, text_pos, image_max);
 
-    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, badge_text_pos, title_text_color, achievement->title,
-                nullptr, 0.0f, &clip_rect);
-    badge_text_pos.y += UIStyle.MediumFont->FontSize + text_spacing;
+    if (!title.empty())
+    {
+      dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, badge_text_pos, title_text_color,
+                  IMSTR_START_END(title), 0.0f, &clip_rect);
+      badge_text_pos.y += UIStyle.MediumFont->FontSize + text_spacing;
+    }
 
-    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, badge_text_pos, text_color, achievement->description,
-                nullptr, badge_text_width, &clip_rect);
-    badge_text_pos.y += description_size.y;
+    if (!description.empty())
+    {
+      dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, badge_text_pos, text_color,
+                  IMSTR_START_END(description), badge_text_width, &clip_rect);
+      badge_text_pos.y += description_size.y;
+    }
 
     text_pos.y = badge_text_pos.y;
   };
@@ -2650,11 +2636,10 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
     const float unlocked_fraction = static_cast<float>(s_state.game_summary.num_unlocked_achievements) /
                                     static_cast<float>(s_state.game_summary.num_core_achievements);
     buffer.format("{}%", static_cast<u32>(std::ceil(unlocked_fraction * 100.0f)));
-    text_size =
-      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, buffer.c_str(), buffer.end_ptr());
+    text_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(buffer));
     dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize,
-                ImVec2(text_pos.x + (box_content_width - text_size.x), text_pos.y), text_color, buffer.c_str(),
-                buffer.end_ptr());
+                ImVec2(text_pos.x + (box_content_width - text_size.x), text_pos.y), text_color,
+                IMSTR_START_END(buffer));
     text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
 
     const ImRect progress_bb(text_pos, text_pos + ImVec2(box_content_width, progress_height));
@@ -2669,12 +2654,11 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
     }
 
     buffer.format("{}/{}", s_state.game_summary.num_unlocked_achievements, s_state.game_summary.num_core_achievements);
-    text_size =
-      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, buffer.c_str(), buffer.end_ptr());
+    text_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(buffer));
     dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize,
                 ImVec2(progress_bb.Min.x + ((progress_bb.Max.x - progress_bb.Min.x) / 2.0f) - (text_size.x / 2.0f),
                        progress_bb.Min.y + ((progress_bb.Max.y - progress_bb.Min.y) / 2.0f) - (text_size.y / 2.0f)),
-                ImGui::GetColorU32(UIStyle.PrimaryTextColor), buffer.c_str(), buffer.end_ptr());
+                ImGui::GetColorU32(UIStyle.PrimaryTextColor), IMSTR_START_END(buffer));
     text_pos.y += progress_height + paragraph_spacing;
 
     if (pending_count > 0)
@@ -2682,33 +2666,34 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
       buffer.format(ICON_EMOJI_WARNING " {}",
                     TRANSLATE_PLURAL_SSTR("Achievements", "%n unlocks have not been confirmed by the server.",
                                           "Pause Menu", pending_count));
-      dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, title_text_color, buffer.c_str(),
-                  buffer.end_ptr());
+      dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, title_text_color,
+                  IMSTR_START_END(buffer));
       text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
     }
   }
 
-  if (s_state.most_recent_unlock)
+  if (s_state.most_recent_unlock.has_value())
   {
     buffer.format(ICON_FA_LOCK_OPEN " {}", TRANSLATE_DISAMBIG_SV("Achievements", "Most Recent", "Pause Menu"));
-    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, buffer.c_str(),
-                buffer.end_ptr());
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, IMSTR_START_END(buffer));
     text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
 
-    draw_achievement_with_summary(s_state.most_recent_unlock, false);
+    draw_achievement_with_summary(s_state.most_recent_unlock->title, s_state.most_recent_unlock->description,
+                                  s_state.most_recent_unlock->badge_path, false);
 
     // extra spacing if we have two
     text_pos.y += s_state.achievement_nearest_completion ? (paragraph_spacing + paragraph_spacing) : 0.0f;
   }
 
-  if (s_state.achievement_nearest_completion)
+  if (s_state.achievement_nearest_completion.has_value())
   {
     buffer.format(ICON_FA_LOCK " {}", TRANSLATE_DISAMBIG_SV("Achievements", "Nearest Completion", "Pause Menu"));
-    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, buffer.c_str(),
-                buffer.end_ptr());
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, IMSTR_START_END(buffer));
     text_pos.y += UIStyle.MediumFont->FontSize + paragraph_spacing;
 
-    draw_achievement_with_summary(s_state.achievement_nearest_completion, true);
+    draw_achievement_with_summary(s_state.achievement_nearest_completion->title,
+                                  s_state.achievement_nearest_completion->description,
+                                  s_state.achievement_nearest_completion->badge_path, true);
     text_pos.y += paragraph_spacing;
   }
 
@@ -2720,7 +2705,7 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
     for (size_t i = 0; i < s_state.active_challenge_indicators.size(); i++)
     {
       const AchievementChallengeIndicator& indicator = s_state.active_challenge_indicators[i];
-      box_height += paragraph_spacing + get_achievement_height(indicator.achievement, false) +
+      box_height += paragraph_spacing + get_achievement_height(indicator.achievement->description, false) +
                     ((i == s_state.active_challenge_indicators.size() - 1) ? paragraph_spacing : 0.0f);
     }
 
@@ -2732,14 +2717,14 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
 
     buffer.format(ICON_FA_STOPWATCH " {}",
                   TRANSLATE_DISAMBIG_SV("Achievements", "Active Challenge Achievements", "Pause Menu"));
-    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, buffer.c_str(),
-                buffer.end_ptr());
+    dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos, text_color, IMSTR_START_END(buffer));
     text_pos.y += UIStyle.MediumFont->FontSize;
 
     for (const AchievementChallengeIndicator& indicator : s_state.active_challenge_indicators)
     {
       text_pos.y += paragraph_spacing;
-      draw_achievement_with_summary(indicator.achievement, false);
+      draw_achievement_with_summary(indicator.achievement->title, indicator.achievement->description,
+                                    indicator.badge_path, false);
       text_pos.y += paragraph_spacing;
     }
   }
@@ -2771,7 +2756,7 @@ void Achievements::DrawAchievementsWindow()
   using ImGuiFullscreen::RenderShadowedTextClipped;
   using ImGuiFullscreen::UIStyle;
 
-  auto lock = Achievements::GetLock();
+  const auto lock = Achievements::GetLock();
 
   // achievements can get turned off via the main UI
   if (!s_state.achievement_list)
@@ -2809,7 +2794,7 @@ void Achievements::DrawAchievementsWindow()
 
       if (!s_state.game_icon.empty())
       {
-        GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(s_state.game_icon.c_str());
+        GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(s_state.game_icon);
         if (badge)
         {
           ImGui::GetWindowDrawList()->AddImage(badge, icon_min, icon_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
@@ -2831,13 +2816,13 @@ void Achievements::DrawAchievementsWindow()
       const ImRect title_bb(ImVec2(left, top), ImVec2(right, top + UIStyle.LargeFont->FontSize));
       text.assign(s_state.game_title);
 
-      if (s_state.hardcore_mode)
+      if (rc_client_get_hardcore_enabled(s_state.client))
         text.append(TRANSLATE_SV("Achievements", " (Hardcore Mode)"));
 
       top += UIStyle.LargeFont->FontSize + spacing;
 
-      RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, ImGui::GetColorU32(ImGuiCol_Text),
-                                text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
+      RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, ImGui::GetColorU32(ImGuiCol_Text), text,
+                                nullptr, ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
 
       const ImRect summary_bb(ImVec2(left, top), ImVec2(right, top + UIStyle.MediumFont->FontSize));
       if (s_state.game_summary.num_core_achievements > 0)
@@ -2864,8 +2849,8 @@ void Achievements::DrawAchievementsWindow()
 
       RenderShadowedTextClipped(
         UIStyle.MediumFont, summary_bb.Min, summary_bb.Max,
-        ImGui::GetColorU32(ImGuiFullscreen::DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text])), text.c_str(),
-        text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &summary_bb);
+        ImGui::GetColorU32(ImGuiFullscreen::DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text])), text, nullptr,
+        ImVec2(0.0f, 0.0f), 0.0f, &summary_bb);
 
       if (s_state.game_summary.num_core_achievements > 0)
       {
@@ -2885,12 +2870,12 @@ void Achievements::DrawAchievementsWindow()
 
         text.format("{}%", static_cast<int>(std::round(fraction * 100.0f)));
         text_size =
-          UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, text.c_str(), text.end_ptr());
+          UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(text));
         const ImVec2 text_pos(
           progress_bb.Min.x + ((progress_bb.Max.x - progress_bb.Min.x) / 2.0f) - (text_size.x / 2.0f),
           progress_bb.Min.y + ((progress_bb.Max.y - progress_bb.Min.y) / 2.0f) - (text_size.y / 2.0f));
         dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos,
-                    ImGui::GetColorU32(UIStyle.PrimaryTextColor), text.c_str(), text.end_ptr());
+                    ImGui::GetColorU32(UIStyle.PrimaryTextColor), IMSTR_START_END(text));
         // top += progress_height + spacing;
       }
     }
@@ -3023,7 +3008,8 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
   if (!visible)
     return;
 
-  const std::string& badge_path = GetCachedAchievementBadgePath(cheevo, cheevo->state);
+  const std::string& badge_path =
+    GetCachedAchievementBadgePath(cheevo, cheevo->state != RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
 
   const ImVec2 image_size(
     LayoutScale(ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT));
@@ -3032,7 +3018,8 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
     GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(badge_path);
     if (badge)
     {
-      ImGui::GetWindowDrawList()->AddImage(badge, bb.Min, bb.Min + image_size, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+      const ImRect image_bb = ImGuiFullscreen::CenterImage(ImRect(bb.Min, bb.Min + image_size), badge);
+      ImGui::GetWindowDrawList()->AddImage(badge, image_bb.Min, image_bb.Max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
                                            IM_COL32(255, 255, 255, 255));
     }
   }
@@ -3042,11 +3029,11 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
   const float midpoint = bb.Min.y + UIStyle.LargeFont->FontSize + spacing;
   text = TRANSLATE_PLURAL_SSTR("Achievements", "%n points", "Achievement points", cheevo->points);
   const ImVec2 points_size(
-    UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, text.c_str(), text.end_ptr()));
+    UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(text)));
   const float points_template_start = bb.Max.x - points_template_size.x;
   const float points_start = points_template_start + ((points_template_size.x - points_size.x) * 0.5f);
 
-  const char* right_icon_text;
+  std::string_view right_icon_text;
   switch (cheevo->type)
   {
     case RC_CLIENT_ACHIEVEMENT_TYPE_MISSABLE:
@@ -3068,8 +3055,8 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
       break;
   }
 
-  const ImVec2 right_icon_size(
-    UIStyle.LargeFont->CalcTextSizeA(UIStyle.LargeFont->FontSize, FLT_MAX, 0.0f, right_icon_text));
+  const ImVec2 right_icon_size =
+    UIStyle.LargeFont->CalcTextSizeA(UIStyle.LargeFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(right_icon_text));
 
   const float text_start_x = bb.Min.x + image_size.x + LayoutScale(15.0f);
   const ImRect title_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(points_start, midpoint));
@@ -3081,18 +3068,18 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
   const ImRect lock_bb(ImVec2(points_template_start + ((points_template_size.x - right_icon_size.x) * 0.5f), bb.Min.y),
                        ImVec2(bb.Max.x, midpoint));
 
-  RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, text_color, cheevo->title, nullptr, nullptr,
+  RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, text_color, cheevo->title, nullptr,
                             ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
-  RenderShadowedTextClipped(UIStyle.LargeFont, lock_bb.Min, lock_bb.Max, text_color, right_icon_text, nullptr,
-                            &right_icon_size, ImVec2(0.0f, 0.0f), 0.0f, &lock_bb);
-  RenderShadowedTextClipped(UIStyle.MediumFont, points_bb.Min, points_bb.Max, summary_color, text.c_str(),
-                            text.end_ptr(), &points_size, ImVec2(0.0f, 0.0f), 0.0f, &points_bb);
+  RenderShadowedTextClipped(UIStyle.LargeFont, lock_bb.Min, lock_bb.Max, text_color, right_icon_text, &right_icon_size,
+                            ImVec2(0.0f, 0.0f), 0.0f, &lock_bb);
+  RenderShadowedTextClipped(UIStyle.MediumFont, points_bb.Min, points_bb.Max, summary_color, text, &points_size,
+                            ImVec2(0.0f, 0.0f), 0.0f, &points_bb);
 
   if (cheevo->description && summary_length > 0)
   {
-    RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max, summary_color, cheevo->description,
-                              cheevo->description + summary_length, &summary_text_size, ImVec2(0.0f, 0.0f),
-                              summary_wrap_width, &summary_bb);
+    RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max, summary_color,
+                              std::string_view(cheevo->description, summary_length), &summary_text_size,
+                              ImVec2(0.0f, 0.0f), summary_wrap_width, &summary_bb);
   }
 
   // display hc if hc is active
@@ -3105,14 +3092,14 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
     text.format(TRANSLATE_FS("Achievements", "Unlocked: {} | {:.1f}% of players have this achievement"), date,
                 rarity_to_display);
 
-    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_rarity_bb.Min, unlock_rarity_bb.Max, rarity_color,
-                              text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_rarity_bb);
+    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_rarity_bb.Min, unlock_rarity_bb.Max, rarity_color, text,
+                              nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_rarity_bb);
   }
   else
   {
     text.format(TRANSLATE_FS("Achievements", "{:.1f}% of players have this achievement"), rarity_to_display);
-    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_rarity_bb.Min, unlock_rarity_bb.Max, rarity_color,
-                              text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_rarity_bb);
+    RenderShadowedTextClipped(UIStyle.MediumFont, unlock_rarity_bb.Min, unlock_rarity_bb.Max, rarity_color, text,
+                              nullptr, ImVec2(0.0f, 0.0f), 0.0f, &unlock_rarity_bb);
   }
 
   if (!is_unlocked && is_measured)
@@ -3130,14 +3117,12 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
     dl->AddRectFilled(progress_bb.Min, ImVec2(progress_bb.Min.x + fraction * progress_bb.GetWidth(), progress_bb.Max.y),
                       ImGui::GetColorU32(ImGuiFullscreen::UIStyle.SecondaryColor), progress_rounding);
 
-    const ImVec2 text_size =
-      UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, measured_progress.data(),
-                                        measured_progress.data() + measured_progress.size());
+    const ImVec2 text_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f,
+                                                               IMSTR_START_END(measured_progress));
     const ImVec2 text_pos(progress_bb.Min.x + ((progress_bb.Max.x - progress_bb.Min.x) / 2.0f) - (text_size.x / 2.0f),
                           progress_bb.Min.y + ((progress_bb.Max.y - progress_bb.Min.y) / 2.0f) - (text_size.y / 2.0f));
     dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize, text_pos,
-                ImGui::GetColorU32(ImGuiFullscreen::UIStyle.PrimaryTextColor), measured_progress.data(),
-                measured_progress.data() + measured_progress.size());
+                ImGui::GetColorU32(ImGuiFullscreen::UIStyle.PrimaryTextColor), IMSTR_START_END(measured_progress));
   }
 
   if (clicked)
@@ -3239,7 +3224,7 @@ void Achievements::DrawLeaderboardsWindow()
 
       if (!s_state.game_icon.empty())
       {
-        GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(s_state.game_icon.c_str());
+        GPUTexture* badge = ImGuiFullscreen::GetCachedTextureAsync(s_state.game_icon);
         if (badge)
         {
           ImGui::GetWindowDrawList()->AddImage(badge, icon_min, icon_max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
@@ -3275,8 +3260,8 @@ void Achievements::DrawLeaderboardsWindow()
 
       top += UIStyle.LargeFont->FontSize + spacing;
 
-      RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, text_color, text.c_str(), text.end_ptr(),
-                                nullptr, ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
+      RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, text_color, text, nullptr,
+                                ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
 
       u32 summary_color;
       if (is_leaderboard_open)
@@ -3287,8 +3272,8 @@ void Achievements::DrawLeaderboardsWindow()
         top += UIStyle.LargeFont->FontSize + spacing_small;
 
         RenderShadowedTextClipped(UIStyle.LargeFont, subtitle_bb.Min, subtitle_bb.Max,
-                                  ImGui::GetColorU32(DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text])),
-                                  text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &subtitle_bb);
+                                  ImGui::GetColorU32(DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text])), text,
+                                  nullptr, ImVec2(0.0f, 0.0f), 0.0f, &subtitle_bb);
 
         text.assign(s_state.open_leaderboard->description);
         summary_color = ImGui::GetColorU32(DarkerColor(DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text])));
@@ -3305,8 +3290,8 @@ void Achievements::DrawLeaderboardsWindow()
       const ImRect summary_bb(ImVec2(left, top), ImVec2(right, top + UIStyle.MediumFont->FontSize));
       top += UIStyle.MediumFont->FontSize + spacing_small;
 
-      RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max, summary_color, text.c_str(),
-                                text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &summary_bb);
+      RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max, summary_color, text, nullptr,
+                                ImVec2(0.0f, 0.0f), 0.0f, &summary_bb);
 
       if (!is_leaderboard_open && !Achievements::IsHardcoreModeActive())
       {
@@ -3320,8 +3305,7 @@ void Achievements::DrawLeaderboardsWindow()
 
         RenderShadowedTextClipped(UIStyle.MediumFont, hardcore_warning_bb.Min, hardcore_warning_bb.Max,
                                   ImGui::GetColorU32(DarkerColor(DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text]))),
-                                  text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f,
-                                  &hardcore_warning_bb);
+                                  text, nullptr, ImVec2(0.0f, 0.0f), 0.0f, &hardcore_warning_bb);
       }
 
       if (is_leaderboard_open)
@@ -3374,14 +3358,12 @@ void Achievements::DrawLeaderboardsWindow()
 
         const ImRect rank_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
         RenderShadowedTextClipped(UIStyle.LargeFont, rank_bb.Min, rank_bb.Max, heading_color,
-                                  TRANSLATE("Achievements", "Rank"), nullptr, nullptr, ImVec2(0.0f, 0.0f), 0.0f,
-                                  &rank_bb);
+                                  TRANSLATE_SV("Achievements", "Rank"), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &rank_bb);
         text_start_x += rank_column_width + column_spacing;
 
         const ImRect user_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
         RenderShadowedTextClipped(UIStyle.LargeFont, user_bb.Min, user_bb.Max, heading_color,
-                                  TRANSLATE("Achievements", "Name"), nullptr, nullptr, ImVec2(0.0f, 0.0f), 0.0f,
-                                  &user_bb);
+                                  TRANSLATE_SV("Achievements", "Name"), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &user_bb);
         text_start_x += name_column_width + column_spacing;
 
         static const char* value_headings[NUM_RC_CLIENT_LEADERBOARD_FORMATS] = {
@@ -3393,16 +3375,16 @@ void Achievements::DrawLeaderboardsWindow()
         const ImRect score_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
         RenderShadowedTextClipped(
           UIStyle.LargeFont, score_bb.Min, score_bb.Max, heading_color,
-          Host::TranslateToCString(
+          Host::TranslateToStringView(
             "Achievements",
             value_headings[std::min<u8>(s_state.open_leaderboard->format, NUM_RC_CLIENT_LEADERBOARD_FORMATS - 1)]),
-          nullptr, nullptr, ImVec2(0.0f, 0.0f), 0.0f, &score_bb);
+          nullptr, ImVec2(0.0f, 0.0f), 0.0f, &score_bb);
         text_start_x += time_column_width + column_spacing;
 
         const ImRect date_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
         RenderShadowedTextClipped(UIStyle.LargeFont, date_bb.Min, date_bb.Max, heading_color,
-                                  TRANSLATE("Achievements", "Date Submitted"), nullptr, nullptr, ImVec2(0.0f, 0.0f),
-                                  0.0f, &date_bb);
+                                  TRANSLATE_SV("Achievements", "Date Submitted"), nullptr, ImVec2(0.0f, 0.0f), 0.0f,
+                                  &date_bb);
 
         const float line_thickness = LayoutScale(1.0f);
         const float line_padding = LayoutScale(5.0f);
@@ -3482,7 +3464,7 @@ void Achievements::DrawLeaderboardsWindow()
           const ImVec2 pos_min(0.0f, heading_height);
           const ImVec2 pos_max(display_size.x, display_size.y);
           RenderShadowedTextClipped(UIStyle.LargeFont, pos_min, pos_max, text_color,
-                                    TRANSLATE("Achievements", "Downloading leaderboard data, please wait..."), nullptr,
+                                    TRANSLATE_SV("Achievements", "Downloading leaderboard data, please wait..."),
                                     nullptr, ImVec2(0.5f, 0.5f), 0.0f);
         }
       }
@@ -3500,15 +3482,15 @@ void Achievements::DrawLeaderboardsWindow()
         // Fetch next chunk if the loading indicator becomes visible (i.e. we scrolled enough).
         bool visible, hovered;
         text.format(ICON_FA_HOURGLASS_HALF " {}", TRANSLATE_SV("Achievements", "Loading..."));
-        ImGuiFullscreen::MenuButtonFrame(text.c_str(), false, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY,
-                                         &visible, &hovered, &bb.Min, &bb.Max);
+        ImGuiFullscreen::MenuButtonFrame(text, false, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY, &visible,
+                                         &hovered, &bb.Min, &bb.Max);
         if (visible)
         {
           const float midpoint = bb.Min.y + UIStyle.LargeFont->FontSize + LayoutScale(4.0f);
           const ImRect title_bb(bb.Min, ImVec2(bb.Max.x, midpoint));
 
-          RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, text_color, text.c_str(),
-                                    text.end_ptr(), nullptr, ImVec2(0, 0), 0.0f, &title_bb);
+          RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, text_color, text, nullptr,
+                                    ImVec2(0, 0), 0.0f, &title_bb);
 
           if (!s_state.leaderboard_fetch_handle)
             FetchNextLeaderboardEntries();
@@ -3568,8 +3550,8 @@ void Achievements::DrawLeaderboardEntry(const rc_client_leaderboard_entry_t& ent
                                               ImGui::GetStyle().Colors[ImGuiCol_Text]);
 
   const ImRect rank_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
-  RenderShadowedTextClipped(UIStyle.LargeFont, rank_bb.Min, rank_bb.Max, text_color, text.c_str(), text.end_ptr(),
-                            nullptr, ImVec2(0.0f, 0.0f), 0.0f, &rank_bb);
+  RenderShadowedTextClipped(UIStyle.LargeFont, rank_bb.Min, rank_bb.Max, text_color, text, nullptr, ImVec2(0.0f, 0.0f),
+                            0.0f, &rank_bb);
   text_start_x += rank_column_width + column_spacing;
 
   const float icon_size = bb.Max.y - bb.Min.y;
@@ -3593,25 +3575,26 @@ void Achievements::DrawLeaderboardEntry(const rc_client_leaderboard_entry_t& ent
   }
   if (icon_tex)
   {
-    ImGui::GetWindowDrawList()->AddImage(reinterpret_cast<ImTextureID>(icon_tex), icon_bb.Min,
-                                         icon_bb.Min + ImVec2(icon_size, icon_size));
+    const ImRect fit_icon_bb =
+      ImGuiFullscreen::CenterImage(ImRect(icon_bb.Min, icon_bb.Min + ImVec2(icon_size, icon_size)), icon_tex);
+    ImGui::GetWindowDrawList()->AddImage(reinterpret_cast<ImTextureID>(icon_tex), fit_icon_bb.Min, fit_icon_bb.Max);
   }
 
   const ImRect user_bb(ImVec2(text_start_x + column_spacing + icon_size, bb.Min.y), ImVec2(bb.Max.x, midpoint));
-  RenderShadowedTextClipped(UIStyle.LargeFont, user_bb.Min, user_bb.Max, text_color, entry.user, nullptr, nullptr,
+  RenderShadowedTextClipped(UIStyle.LargeFont, user_bb.Min, user_bb.Max, text_color, entry.user, nullptr,
                             ImVec2(0.0f, 0.0f), 0.0f, &user_bb);
   text_start_x += name_column_width + column_spacing;
 
   const ImRect score_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
-  RenderShadowedTextClipped(UIStyle.LargeFont, score_bb.Min, score_bb.Max, text_color, entry.display, nullptr, nullptr,
+  RenderShadowedTextClipped(UIStyle.LargeFont, score_bb.Min, score_bb.Max, text_color, entry.display, nullptr,
                             ImVec2(0.0f, 0.0f), 0.0f, &score_bb);
   text_start_x += time_column_width + column_spacing;
 
   const ImRect time_bb(ImVec2(text_start_x, bb.Min.y), ImVec2(bb.Max.x, midpoint));
   SmallString submit_time;
   FullscreenUI::TimeToPrintableString(&submit_time, entry.submitted);
-  RenderShadowedTextClipped(UIStyle.LargeFont, time_bb.Min, time_bb.Max, text_color, submit_time.c_str(),
-                            submit_time.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), 0.0f, &time_bb);
+  RenderShadowedTextClipped(UIStyle.LargeFont, time_bb.Min, time_bb.Max, text_color, submit_time, nullptr,
+                            ImVec2(0.0f, 0.0f), 0.0f, &time_bb);
 
   if (pressed)
   {
@@ -3644,13 +3627,13 @@ void Achievements::DrawLeaderboardListEntry(const rc_client_leaderboard_t* lboar
   const ImRect summary_bb(ImVec2(text_start_x, midpoint), bb.Max);
 
   RenderShadowedTextClipped(UIStyle.LargeFont, title_bb.Min, title_bb.Max, ImGui::GetColorU32(ImGuiCol_Text),
-                            lboard->title, nullptr, nullptr, ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
+                            lboard->title, nullptr, ImVec2(0.0f, 0.0f), 0.0f, &title_bb);
 
   if (lboard->description && lboard->description[0] != '\0')
   {
     RenderShadowedTextClipped(UIStyle.MediumFont, summary_bb.Min, summary_bb.Max,
                               ImGui::GetColorU32(ImGuiFullscreen::DarkerColor(ImGui::GetStyle().Colors[ImGuiCol_Text])),
-                              lboard->description, nullptr, nullptr, ImVec2(0.0f, 0.0f), 0.0f, &summary_bb);
+                              lboard->description, nullptr, ImVec2(0.0f, 0.0f), 0.0f, &summary_bb);
   }
 
   if (pressed)
@@ -4430,7 +4413,7 @@ void Achievements::UpdateProgressDatabase(bool force)
          std::span<const rc_client_achievement_bucket_t>(achievements->buckets, achievements->num_buckets))
     {
       for (const rc_client_achievement_t* achievement :
-           std::span<rc_client_achievement_t*>(bucket.achievements, bucket.num_achievements))
+           std::span<const rc_client_achievement_t*>(bucket.achievements, bucket.num_achievements))
       {
         achievements_unlocked += BoolToUInt32((achievement->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0);
         achievements_unlocked_hardcore +=
@@ -4634,200 +4617,188 @@ const Achievements::ProgressDatabase::Entry* Achievements::ProgressDatabase::Loo
   return (iter != m_entries.end() && iter->game_id == game_id) ? &(*iter) : nullptr;
 }
 
-#ifdef ENABLE_RAINTEGRATION
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
 
-#include "RA_Consoles.h"
+#include "common/windows_headers.h"
+
+#include "rc_client_raintegration.h"
+
+namespace Achievements {
+
+static void FinishLoadRAIntegration();
+static void FinishLoadRAIntegrationOnCPUThread();
+
+static void RAIntegrationBeginLoadCallback(int result, const char* error_message, rc_client_t* client, void* userdata);
+static void RAIntegrationEventHandler(const rc_client_raintegration_event_t* event, rc_client_t* client);
+static void RAIntegrationWriteMemoryCallback(uint32_t address, uint8_t* buffer, uint32_t num_bytes,
+                                             rc_client_t* client);
+static void RAIntegrationGetGameNameCallback(char* buffer, uint32_t buffer_size, rc_client_t* client);
+
+} // namespace Achievements
 
 bool Achievements::IsUsingRAIntegration()
 {
   return s_state.using_raintegration;
 }
 
-namespace Achievements::RAIntegration {
-static void InitializeRAIntegration(void* main_window_handle);
-
-static int RACallbackIsActive();
-static void RACallbackCauseUnpause();
-static void RACallbackCausePause();
-static void RACallbackRebuildMenu();
-static void RACallbackEstimateTitle(char* buf);
-static void RACallbackResetEmulator();
-static void RACallbackLoadROM(const char* unused);
-static unsigned char RACallbackReadRAM(unsigned int address);
-static unsigned int RACallbackReadRAMBlock(unsigned int nAddress, unsigned char* pBuffer, unsigned int nBytes);
-static void RACallbackWriteRAM(unsigned int address, unsigned char value);
-static unsigned char RACallbackReadScratchpad(unsigned int address);
-static unsigned int RACallbackReadScratchpadBlock(unsigned int nAddress, unsigned char* pBuffer, unsigned int nBytes);
-static void RACallbackWriteScratchpad(unsigned int address, unsigned char value);
-
-static bool s_raintegration_initialized = false;
-} // namespace Achievements::RAIntegration
-
-void Achievements::SwitchToRAIntegration()
+bool Achievements::IsRAIntegrationAvailable()
 {
+  return (FileSystem::FileExists(Path::Combine(EmuFolders::AppRoot, "RA_Integration-x64.dll").c_str()) ||
+          FileSystem::FileExists(Path::Combine(EmuFolders::AppRoot, "RA_Integration.dll").c_str()));
+}
+
+bool Achievements::IsRAIntegrationInitializing()
+{
+  return (s_state.using_raintegration && (s_state.load_raintegration_request || s_state.raintegration_loading));
+}
+
+void Achievements::BeginLoadRAIntegration()
+{
+  // set the flag so we don't try to log in immediately, need to wait for RAIntegration to load first
   s_state.using_raintegration = true;
+  s_state.raintegration_loading = true;
+
+  const std::wstring wapproot = StringUtil::UTF8StringToWideString(EmuFolders::AppRoot);
+  s_state.load_raintegration_request = rc_client_begin_load_raintegration_deferred(
+    s_state.client, wapproot.c_str(), RAIntegrationBeginLoadCallback, nullptr);
 }
 
-void Achievements::RAIntegration::InitializeRAIntegration(void* main_window_handle)
+void Achievements::RAIntegrationBeginLoadCallback(int result, const char* error_message, rc_client_t* client,
+                                                  void* userdata)
 {
-  RA_InitClient((HWND)main_window_handle, "DuckStation", g_scm_tag_str);
-  RA_SetUserAgentDetail(Host::GetHTTPUserAgent().c_str());
+  s_state.load_raintegration_request = nullptr;
 
-  RA_InstallSharedFunctions(RACallbackIsActive, RACallbackCauseUnpause, RACallbackCausePause, RACallbackRebuildMenu,
-                            RACallbackEstimateTitle, RACallbackResetEmulator, RACallbackLoadROM);
-  RA_SetConsoleID(PlayStation);
-
-  // Apparently this has to be done early, or the memory inspector doesn't work.
-  // That's a bit unfortunate, because the RAM size can vary between games, and depending on the option.
-  RA_InstallMemoryBank(0, RACallbackReadRAM, RACallbackWriteRAM, Bus::RAM_2MB_SIZE);
-  RA_InstallMemoryBankBlockReader(0, RACallbackReadRAMBlock);
-  RA_InstallMemoryBank(1, RACallbackReadScratchpad, RACallbackWriteScratchpad, CPU::SCRATCHPAD_SIZE);
-  RA_InstallMemoryBankBlockReader(1, RACallbackReadScratchpadBlock);
-
-  // Fire off a login anyway. Saves going into the menu and doing it.
-  RA_AttemptLogin(0);
-
-  s_raintegration_initialized = true;
-
-  // this is pretty lame, but we may as well persist until we exit anyway
-  std::atexit(RA_Shutdown);
-}
-
-void Achievements::RAIntegration::MainWindowChanged(void* new_handle)
-{
-  if (s_raintegration_initialized)
+  if (result != RC_OK)
   {
-    RA_UpdateHWnd((HWND)new_handle);
+    s_state.raintegration_loading = false;
+
+    std::string message = fmt::format("Failed to load RAIntegration:\n{}", error_message ? error_message : "");
+    Host::ReportErrorAsync("RAIntegration Error", message);
     return;
   }
 
-  InitializeRAIntegration(new_handle);
+  INFO_COLOR_LOG(StrongGreen, "RAIntegration DLL loaded, initializing.");
+  Host::RunOnUIThread(&Achievements::FinishLoadRAIntegration);
 }
 
-void Achievements::RAIntegration::GameChanged()
+void Achievements::FinishLoadRAIntegration()
 {
-  s_state.game_id = s_state.game_hash.has_value() ? RA_IdentifyHash(GameHashToString(s_state.game_hash.value())) : 0;
-  RA_ActivateGame(s_state.game_id);
-}
+  const std::optional<WindowInfo> wi = Host::GetTopLevelWindowInfo();
+  const auto lock = GetLock();
 
-std::vector<std::tuple<int, std::string, bool>> Achievements::RAIntegration::GetMenuItems()
-{
-  std::array<RA_MenuItem, 64> items;
-  const int num_items = RA_GetPopupMenuItems(items.data());
-
-  std::vector<std::tuple<int, std::string, bool>> ret;
-  ret.reserve(static_cast<u32>(num_items));
-
-  for (int i = 0; i < num_items; i++)
-  {
-    const RA_MenuItem& it = items[i];
-    if (!it.sLabel)
-      ret.emplace_back(0, std::string(), false);
-    else
-      ret.emplace_back(static_cast<int>(it.nID), StringUtil::WideStringToUTF8String(it.sLabel), it.bChecked);
-  }
-
-  return ret;
-}
-
-void Achievements::RAIntegration::ActivateMenuItem(int item)
-{
-  RA_InvokeDialog(item);
-}
-
-int Achievements::RAIntegration::RACallbackIsActive()
-{
-  return static_cast<int>(HasActiveGame());
-}
-
-void Achievements::RAIntegration::RACallbackCauseUnpause()
-{
-  Host::RunOnCPUThread([]() { System::PauseSystem(false); });
-}
-
-void Achievements::RAIntegration::RACallbackCausePause()
-{
-  Host::RunOnCPUThread([]() { System::PauseSystem(true); });
-}
-
-void Achievements::RAIntegration::RACallbackRebuildMenu()
-{
-  // unused, we build the menu on demand
-}
-
-void Achievements::RAIntegration::RACallbackEstimateTitle(char* buf)
-{
-  StringUtil::Strlcpy(buf, System::GetGameTitle(), 256);
-}
-
-void Achievements::RAIntegration::RACallbackResetEmulator()
-{
-  if (System::IsValid())
-    System::ResetSystem();
-}
-
-void Achievements::RAIntegration::RACallbackLoadROM(const char* unused)
-{
-  // unused
-  UNREFERENCED_PARAMETER(unused);
-}
-
-unsigned char Achievements::RAIntegration::RACallbackReadRAM(unsigned int address)
-{
-  if (!System::IsValid())
-    return 0;
-
-  u8 value = 0;
-  CPU::SafeReadMemoryByte(address, &value);
-  return value;
-}
-
-void Achievements::RAIntegration::RACallbackWriteRAM(unsigned int address, unsigned char value)
-{
-  CPU::SafeWriteMemoryByte(address, value);
-}
-
-unsigned int Achievements::RAIntegration::RACallbackReadRAMBlock(unsigned int nAddress, unsigned char* pBuffer,
-                                                                 unsigned int nBytes)
-{
-  if (nAddress >= Bus::g_ram_size)
-    return 0;
-
-  const u32 copy_size = std::min<u32>(Bus::g_ram_size - nAddress, nBytes);
-  std::memcpy(pBuffer, Bus::g_unprotected_ram + nAddress, copy_size);
-  return copy_size;
-}
-
-unsigned char Achievements::RAIntegration::RACallbackReadScratchpad(unsigned int address)
-{
-  if (!System::IsValid() || address >= CPU::SCRATCHPAD_SIZE)
-    return 0;
-
-  return CPU::g_state.scratchpad[address];
-}
-
-void Achievements::RAIntegration::RACallbackWriteScratchpad(unsigned int address, unsigned char value)
-{
-  if (address >= CPU::SCRATCHPAD_SIZE)
+  // disabled externally?
+  if (!s_state.using_raintegration)
     return;
 
-  CPU::g_state.scratchpad[address] = value;
+  const char* error_message = nullptr;
+  const int res = rc_client_finish_load_raintegration(
+    s_state.client,
+    (wi.has_value() && wi->type == WindowInfo::Type::Win32) ? static_cast<HWND>(wi->window_handle) : NULL,
+    "DuckStation", g_scm_tag_str, &error_message);
+  if (res != RC_OK)
+  {
+    std::string message = fmt::format("Failed to initialize RAIntegration:\n{}", error_message ? error_message : "");
+    Host::ReportErrorAsync("RAIntegration Error", message);
+    s_state.using_raintegration = false;
+    Host::RunOnCPUThread(&Achievements::FinishLoadRAIntegrationOnCPUThread);
+    return;
+  }
+
+  rc_client_raintegration_set_write_memory_function(s_state.client, RAIntegrationWriteMemoryCallback);
+  rc_client_raintegration_set_console_id(s_state.client, RC_CONSOLE_PLAYSTATION);
+  rc_client_raintegration_set_get_game_name_function(s_state.client, RAIntegrationGetGameNameCallback);
+  rc_client_raintegration_set_event_handler(s_state.client, RAIntegrationEventHandler);
+
+  Host::OnRAIntegrationMenuChanged();
+
+  Host::RunOnCPUThread(&Achievements::FinishLoadRAIntegrationOnCPUThread);
 }
 
-unsigned int Achievements::RAIntegration::RACallbackReadScratchpadBlock(unsigned int nAddress, unsigned char* pBuffer,
-                                                                        unsigned int nBytes)
+void Achievements::FinishLoadRAIntegrationOnCPUThread()
 {
-  if (nAddress >= CPU::SCRATCHPAD_SIZE)
-    return 0;
+  // note: this is executed even for the failure case.
+  // we want to finish initializing with internal client if RAIntegration didn't load.
+  const auto lock = GetLock();
+  s_state.raintegration_loading = false;
+  FinishInitialize();
+}
 
-  const u32 copy_size = std::min<u32>(CPU::SCRATCHPAD_SIZE - nAddress, nBytes);
-  std::memcpy(pBuffer, &CPU::g_state.scratchpad[nAddress], copy_size);
-  return copy_size;
+void Achievements::UnloadRAIntegration()
+{
+  if (!s_state.using_raintegration)
+    return;
+
+  if (s_state.load_raintegration_request)
+  {
+    rc_client_abort_async(s_state.client, s_state.load_raintegration_request);
+    s_state.load_raintegration_request = nullptr;
+  }
+
+  rc_client_unload_raintegration(s_state.client);
+  s_state.raintegration_loading = false;
+  s_state.using_raintegration = false;
+  Host::OnRAIntegrationMenuChanged();
+}
+
+void Achievements::RAIntegrationEventHandler(const rc_client_raintegration_event_t* event, rc_client_t* client)
+{
+  switch (event->type)
+  {
+    case RC_CLIENT_RAINTEGRATION_EVENT_MENUITEM_CHECKED_CHANGED:
+    case RC_CLIENT_RAINTEGRATION_EVENT_MENU_CHANGED:
+    {
+      Host::OnRAIntegrationMenuChanged();
+    }
+    break;
+
+    case RC_CLIENT_RAINTEGRATION_EVENT_HARDCORE_CHANGED:
+    {
+      // Could get called from a different thread...
+      Host::RunOnCPUThread([]() {
+        const auto lock = GetLock();
+        OnHardcoreModeChanged(rc_client_get_hardcore_enabled(s_state.client) != 0, false, false);
+      });
+    }
+    break;
+
+    case RC_CLIENT_RAINTEGRATION_EVENT_PAUSE:
+    {
+      Host::RunOnCPUThread([]() { System::PauseSystem(true); });
+    }
+    break;
+
+    default:
+      ERROR_LOG("Unhandled RAIntegration event {}", static_cast<u32>(event->type));
+      break;
+  }
+}
+
+void Achievements::RAIntegrationWriteMemoryCallback(uint32_t address, uint8_t* buffer, uint32_t num_bytes,
+                                                    rc_client_t* client)
+{
+  // This can be called on the UI thread, so always queue it.
+  llvm::SmallVector<u8, 16> data(buffer, buffer + num_bytes);
+  Host::RunOnCPUThread([address, data = std::move(data)]() { CPU::SafeWriteMemoryBytes(address, data); });
+}
+
+void Achievements::RAIntegrationGetGameNameCallback(char* buffer, uint32_t buffer_size, rc_client_t* client)
+{
+  StringUtil::Strlcpy(buffer, System::GetGameTitle(), buffer_size);
 }
 
 #else
 
 bool Achievements::IsUsingRAIntegration()
+{
+  return false;
+}
+
+bool Achievements::IsRAIntegrationAvailable()
+{
+  return false;
+}
+
+bool Achievements::IsRAIntegrationInitializing()
 {
   return false;
 }

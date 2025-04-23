@@ -21,7 +21,6 @@
 #include "settingswindow.h"
 #include "settingwidgetbinder.h"
 
-#include "core/achievements.h"
 #include "core/cheats.h"
 #include "core/game_list.h"
 #include "core/host.h"
@@ -104,8 +103,10 @@ MainWindow* g_main_window = nullptr;
 
 // UI thread VM validity.
 static bool s_disable_window_rounded_corners = false;
+static bool s_system_starting = false;
 static bool s_system_valid = false;
 static bool s_system_paused = false;
+static bool s_achievements_hardcore_mode = false;
 static bool s_fullscreen_ui_started = false;
 static std::atomic_uint32_t s_system_locked{false};
 static QString s_current_game_title;
@@ -170,16 +171,12 @@ void MainWindow::initialize()
   m_ui.setupUi(this);
   setupAdditionalUi();
   updateToolbarActions();
+  updateEmulationActions(false, false, false);
   connectSignals();
 
   restoreStateFromConfig();
   switchToGameListView();
   updateWindowTitle();
-
-#ifdef ENABLE_RAINTEGRATION
-  if (Achievements::IsUsingRAIntegration())
-    Achievements::RAIntegration::MainWindowChanged((void*)winId());
-#endif
 
 #ifdef _WIN32
   registerForDeviceNotifications();
@@ -515,18 +512,20 @@ void MainWindow::onMouseModeRequested(bool relative_mode, bool hide_cursor)
 
 void MainWindow::onSystemStarting()
 {
+  s_system_starting = true;
   s_system_valid = false;
   s_system_paused = false;
 
   switchToEmulationView();
-  updateEmulationActions(true, false, Achievements::IsHardcoreModeActive());
+  updateEmulationActions(true, false, s_achievements_hardcore_mode);
 }
 
 void MainWindow::onSystemStarted()
 {
   m_was_disc_change_request = false;
+  s_system_starting = false;
   s_system_valid = true;
-  updateEmulationActions(false, true, Achievements::IsHardcoreModeActive());
+  updateEmulationActions(false, true, s_achievements_hardcore_mode);
   updateWindowTitle();
   updateStatusBarWidgetVisibility();
   updateDisplayWidgetCursor();
@@ -574,6 +573,7 @@ void MainWindow::onSystemDestroyed()
     m_ui.actionPause->setChecked(false);
   }
 
+  s_system_starting = false;
   s_system_valid = false;
   s_system_paused = false;
 
@@ -585,7 +585,7 @@ void MainWindow::onSystemDestroyed()
     return;
   }
 
-  updateEmulationActions(false, false, Achievements::IsHardcoreModeActive());
+  updateEmulationActions(false, false, s_achievements_hardcore_mode);
   if (m_display_widget)
     updateDisplayWidgetCursor();
   else
@@ -770,7 +770,7 @@ void MainWindow::recreate()
   if (was_display_created)
   {
     g_emu_thread->setSurfaceless(false);
-    g_main_window->updateEmulationActions(false, System::IsValid(), Achievements::IsHardcoreModeActive());
+    g_main_window->updateEmulationActions(false, s_system_valid, s_achievements_hardcore_mode);
     g_main_window->onFullscreenUIStartedOrStopped(s_fullscreen_ui_started);
   }
 
@@ -788,6 +788,8 @@ void MainWindow::recreate()
     dlg->setCategoryRow(settings_window_row);
     QtUtils::ShowOrRaiseWindow(dlg);
   }
+
+  notifyRAIntegrationOfWindowChange();
 }
 
 void MainWindow::destroySubWindows()
@@ -821,7 +823,6 @@ void MainWindow::populateGameListContextMenu(const GameList::Entry* entry, QWidg
     {
       std::vector<SaveStateInfo> available_states(System::GetAvailableSaveStates(entry->serial));
       const QString timestamp_format = QLocale::system().dateTimeFormat(QLocale::ShortFormat);
-      const bool challenge_mode = Achievements::IsHardcoreModeActive();
       for (SaveStateInfo& ssi : available_states)
       {
         if (ssi.global)
@@ -835,7 +836,6 @@ void MainWindow::populateGameListContextMenu(const GameList::Entry* entry, QWidg
         if (slot < 0)
         {
           resume_action->setText(tr("Resume (%1)").arg(timestamp_str));
-          resume_action->setEnabled(!challenge_mode);
           action = resume_action;
         }
         else
@@ -844,7 +844,7 @@ void MainWindow::populateGameListContextMenu(const GameList::Entry* entry, QWidg
           action = load_state_menu->addAction(tr("Game Save %1 (%2)").arg(slot).arg(timestamp_str));
         }
 
-        action->setDisabled(challenge_mode);
+        action->setDisabled(s_achievements_hardcore_mode);
         connect(action, &QAction::triggered,
                 [this, entry, path = std::move(ssi.path)]() { startFile(entry->path, std::move(path), std::nullopt); });
       }
@@ -1037,7 +1037,7 @@ void MainWindow::populateCheatsMenu(QMenu* menu)
     if (Cheats::AreCheatsEnabled() && names.empty())
       return;
 
-    QtHost::RunOnUIThread([menu, names = std::move(names)]() {
+    Host::RunOnUIThread([menu, names = std::move(names)]() {
       if (names.empty())
       {
         QAction* action = menu->addAction(tr("Cheats are not enabled."));
@@ -1154,7 +1154,7 @@ void MainWindow::startFileOrChangeDisc(const QString& path)
   std::optional<std::string> save_path;
   if (!serial.empty())
   {
-    std::string resume_path(System::GetGameSaveStateFileName(serial.c_str(), -1));
+    std::string resume_path(System::GetGameSaveStatePath(serial.c_str(), -1));
     std::optional<bool> resume = promptForResumeState(resume_path);
     if (!resume.has_value())
     {
@@ -1421,7 +1421,7 @@ void MainWindow::onGameListEntryActivated()
   std::optional<std::string> save_path;
   if (!entry->serial.empty())
   {
-    std::string resume_path(System::GetGameSaveStateFileName(entry->serial.c_str(), -1));
+    std::string resume_path(System::GetGameSaveStatePath(entry->serial.c_str(), -1));
     std::optional<bool> resume = promptForResumeState(resume_path);
     if (!resume.has_value())
     {
@@ -1494,13 +1494,14 @@ void MainWindow::onGameListEntryContextMenuRequested(const QPoint& point)
           g_emu_thread->bootSystem(std::move(boot_params));
         });
 
-        if (m_ui.menuDebug->menuAction()->isVisible() && !Achievements::IsHardcoreModeActive())
+        if (m_ui.menuDebug->menuAction()->isVisible())
         {
           connect(menu.addAction(tr("Boot and Debug")), &QAction::triggered, [this, entry]() {
             openCPUDebugger();
 
             std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(entry->path);
             boot_params->override_start_paused = true;
+            boot_params->disable_achievements_hardcore_mode = true;
             g_emu_thread->bootSystem(std::move(boot_params));
           });
         }
@@ -1692,37 +1693,6 @@ void MainWindow::setupAdditionalUi()
   s_disable_window_rounded_corners = Host::GetBaseBoolSettingValue("Main", "DisableWindowRoundedCorners", false);
   if (s_disable_window_rounded_corners)
     PlatformMisc::SetWindowRoundedCornerState(reinterpret_cast<void*>(winId()), false);
-
-#ifdef ENABLE_RAINTEGRATION
-  if (Achievements::IsUsingRAIntegration())
-  {
-    QMenu* raMenu = new QMenu(QStringLiteral("&RAIntegration"));
-    m_ui.menuBar->insertMenu(m_ui.menuDebug->menuAction(), raMenu);
-    connect(raMenu, &QMenu::aboutToShow, this, [this, raMenu]() {
-      raMenu->clear();
-
-      const auto items = Achievements::RAIntegration::GetMenuItems();
-      for (const auto& [id, title, checked] : items)
-      {
-        if (id == 0)
-        {
-          raMenu->addSeparator();
-          continue;
-        }
-
-        QAction* raAction = raMenu->addAction(QString::fromUtf8(title));
-        if (checked)
-        {
-          raAction->setCheckable(true);
-          raAction->setChecked(checked);
-        }
-
-        connect(raAction, &QAction::triggered, this,
-                [id = id]() { Host::RunOnCPUThread([id]() { Achievements::RAIntegration::ActivateMenuItem(id); }); });
-      }
-    });
-  }
-#endif
 }
 
 void MainWindow::updateToolbarActions()
@@ -1805,14 +1775,14 @@ void MainWindow::onToolbarContextMenuRequested(const QPoint& pos)
   updateToolbarActions();
 }
 
-void MainWindow::updateEmulationActions(bool starting, bool running, bool cheevos_challenge_mode)
+void MainWindow::updateEmulationActions(bool starting, bool running, bool achievements_hardcore_mode)
 {
   const bool starting_or_running = (starting || running);
   const bool starting_or_not_running = (starting || !running);
   m_ui.actionStartFile->setDisabled(starting_or_running);
   m_ui.actionStartDisc->setDisabled(starting_or_running);
   m_ui.actionStartBios->setDisabled(starting_or_running);
-  m_ui.actionResumeLastState->setDisabled(starting_or_running || cheevos_challenge_mode);
+  m_ui.actionResumeLastState->setDisabled(starting_or_running || achievements_hardcore_mode);
   m_ui.actionStartFullscreenUI->setDisabled(starting_or_running);
   m_ui.actionStartFullscreenUI2->setDisabled(starting_or_running);
 
@@ -1821,16 +1791,16 @@ void MainWindow::updateEmulationActions(bool starting, bool running, bool cheevo
   m_ui.actionReset->setDisabled(starting_or_not_running);
   m_ui.actionPause->setDisabled(starting_or_not_running);
   m_ui.actionChangeDisc->setDisabled(starting_or_not_running);
-  m_ui.actionCheatsToolbar->setDisabled(starting_or_not_running || cheevos_challenge_mode);
+  m_ui.actionCheatsToolbar->setDisabled(starting_or_not_running || achievements_hardcore_mode);
   m_ui.actionScreenshot->setDisabled(starting_or_not_running);
   m_ui.menuChangeDisc->setDisabled(starting_or_not_running);
-  m_ui.menuCheats->setDisabled(starting_or_not_running || cheevos_challenge_mode);
-  m_ui.actionCPUDebugger->setDisabled(cheevos_challenge_mode);
-  m_ui.actionMemoryScanner->setDisabled(cheevos_challenge_mode);
+  m_ui.menuCheats->setDisabled(starting_or_not_running || achievements_hardcore_mode);
+  m_ui.actionCPUDebugger->setDisabled(achievements_hardcore_mode);
+  m_ui.actionMemoryScanner->setDisabled(achievements_hardcore_mode);
   m_ui.actionReloadTextureReplacements->setDisabled(starting_or_not_running);
-  m_ui.actionDumpRAM->setDisabled(starting_or_not_running || cheevos_challenge_mode);
-  m_ui.actionDumpVRAM->setDisabled(starting_or_not_running || cheevos_challenge_mode);
-  m_ui.actionDumpSPURAM->setDisabled(starting_or_not_running || cheevos_challenge_mode);
+  m_ui.actionDumpRAM->setDisabled(starting_or_not_running || achievements_hardcore_mode);
+  m_ui.actionDumpVRAM->setDisabled(starting_or_not_running || achievements_hardcore_mode);
+  m_ui.actionDumpSPURAM->setDisabled(starting_or_not_running || achievements_hardcore_mode);
 
   m_ui.actionSaveState->setDisabled(starting_or_not_running);
   m_ui.menuSaveState->setDisabled(starting_or_not_running);
@@ -2045,8 +2015,6 @@ void MainWindow::switchToEmulationView()
 
 void MainWindow::connectSignals()
 {
-  updateEmulationActions(false, false, Achievements::IsHardcoreModeActive());
-
   connect(qApp, &QGuiApplication::applicationStateChanged, this, &MainWindow::onApplicationStateChanged);
   connect(m_ui.toolBar, &QToolBar::customContextMenuRequested, this, &MainWindow::onToolbarContextMenuRequested);
 
@@ -2165,8 +2133,8 @@ void MainWindow::connectSignals()
   connect(g_emu_thread, &EmuThread::fullscreenUIStartedOrStopped, this, &MainWindow::onFullscreenUIStartedOrStopped);
   connect(g_emu_thread, &EmuThread::achievementsLoginRequested, this, &MainWindow::onAchievementsLoginRequested);
   connect(g_emu_thread, &EmuThread::achievementsLoginSuccess, this, &MainWindow::onAchievementsLoginSuccess);
-  connect(g_emu_thread, &EmuThread::achievementsChallengeModeChanged, this,
-          &MainWindow::onAchievementsChallengeModeChanged);
+  connect(g_emu_thread, &EmuThread::achievementsHardcoreModeChanged, this,
+          &MainWindow::onAchievementsHardcoreModeChanged);
   connect(g_emu_thread, &EmuThread::onCoverDownloaderOpenRequested, this, &MainWindow::onToolsCoverDownloaderTriggered);
   connect(g_emu_thread, &EmuThread::onCreateAuxiliaryRenderWindow, this, &MainWindow::onCreateAuxiliaryRenderWindow,
           Qt::BlockingQueuedConnection);
@@ -2400,9 +2368,9 @@ void MainWindow::openGamePropertiesForCurrentGame(const char* category /* = null
     if (path.empty() || serial.empty())
       return;
 
-    QtHost::RunOnUIThread([title = std::string(System::GetGameTitle()), path = std::string(path),
-                           serial = std::string(serial), hash = System::GetGameHash(), region = System::GetDiscRegion(),
-                           category]() {
+    Host::RunOnUIThread([title = std::string(System::GetGameTitle()), path = std::string(path),
+                         serial = std::string(serial), hash = System::GetGameHash(), region = System::GetDiscRegion(),
+                         category]() {
       SettingsWindow::openGamePropertiesDialog(path, title, std::move(serial), hash, region, category);
     });
   });
@@ -2795,7 +2763,7 @@ void MainWindow::onAchievementsLoginSuccess(const QString& username, quint32 poi
   }
 }
 
-void MainWindow::onAchievementsChallengeModeChanged(bool enabled)
+void MainWindow::onAchievementsHardcoreModeChanged(bool enabled)
 {
   if (enabled)
   {
@@ -2803,7 +2771,8 @@ void MainWindow::onAchievementsChallengeModeChanged(bool enabled)
     QtUtils::CloseAndDeleteWindow(m_memory_scanner_window);
   }
 
-  updateEmulationActions(false, System::IsValid(), enabled);
+  s_achievements_hardcore_mode = enabled;
+  updateEmulationActions(s_system_starting, s_system_valid, enabled);
 }
 
 bool MainWindow::onCreateAuxiliaryRenderWindow(RenderAPI render_api, qint32 x, qint32 y, quint32 width, quint32 height,
@@ -2889,7 +2858,7 @@ void MainWindow::onToolsMediaCaptureToggled(bool checked)
 
 void MainWindow::onToolsMemoryScannerTriggered()
 {
-  if (Achievements::IsHardcoreModeActive())
+  if (s_achievements_hardcore_mode)
     return;
 
   if (!m_memory_scanner_window)
@@ -2913,6 +2882,9 @@ void MainWindow::onToolsISOBrowserTriggered()
 
 void MainWindow::openCPUDebugger()
 {
+  if (s_achievements_hardcore_mode)
+    return;
+
   if (!m_debugger_window)
   {
     m_debugger_window = new DebuggerWindow();
@@ -3082,3 +3054,94 @@ bool QtHost::IsSystemLocked()
 {
   return (s_system_locked.load(std::memory_order_acquire) > 0);
 }
+
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+
+#include "core/achievements.h"
+#include "core/achievements_private.h"
+
+#include "rc_client_raintegration.h"
+
+void MainWindow::onRAIntegrationMenuChanged()
+{
+  const auto lock = Achievements::GetLock();
+
+  if (!Achievements::IsUsingRAIntegration())
+  {
+    if (m_raintegration_menu)
+    {
+      m_ui.menuBar->removeAction(m_raintegration_menu->menuAction());
+      m_raintegration_menu->deleteLater();
+      m_raintegration_menu = nullptr;
+    }
+
+    return;
+  }
+
+  if (!m_raintegration_menu)
+  {
+    m_raintegration_menu = new QMenu(QStringLiteral("&RAIntegration"));
+    m_ui.menuBar->insertMenu(m_ui.menuDebug->menuAction(), m_raintegration_menu);
+  }
+
+  m_raintegration_menu->clear();
+
+  const rc_client_raintegration_menu_t* menu = rc_client_raintegration_get_menu(Achievements::GetClient());
+  if (!menu)
+    return;
+
+  for (const rc_client_raintegration_menu_item_t& item :
+       std::span<const rc_client_raintegration_menu_item_t>(menu->items, menu->num_items))
+  {
+    if (item.id == 0)
+    {
+      m_raintegration_menu->addSeparator();
+      continue;
+    }
+
+    QAction* action = m_raintegration_menu->addAction(QString::fromUtf8(item.label));
+    action->setEnabled(item.enabled != 0);
+    action->setCheckable(item.checked != 0);
+    action->setChecked(item.checked != 0);
+    connect(action, &QAction::triggered, this, [id = item.id]() {
+      const auto lock = Achievements::GetLock();
+      if (!Achievements::IsUsingRAIntegration())
+        return;
+
+      rc_client_raintegration_activate_menu_item(Achievements::GetClient(), id);
+    });
+  }
+}
+
+void MainWindow::notifyRAIntegrationOfWindowChange()
+{
+  HWND hwnd = static_cast<HWND>((void*)winId());
+
+  {
+    const auto lock = Achievements::GetLock();
+    if (!Achievements::IsUsingRAIntegration())
+      return;
+
+    rc_client_raintegration_update_main_window_handle(Achievements::GetClient(), hwnd);
+  }
+
+  onRAIntegrationMenuChanged();
+}
+
+void Host::OnRAIntegrationMenuChanged()
+{
+  QMetaObject::invokeMethod(g_main_window, "onRAIntegrationMenuChanged", Qt::QueuedConnection);
+}
+
+#else // RC_CLIENT_SUPPORTS_RAINTEGRATION
+
+void MainWindow::onRAIntegrationMenuChanged()
+{
+  // has to be stubbed out because otherwise moc won't find it
+}
+
+void MainWindow::notifyRAIntegrationOfWindowChange()
+{
+}
+
+#endif // RC_CLIENT_SUPPORTS_RAINTEGRATION

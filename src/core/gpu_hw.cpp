@@ -3854,6 +3854,8 @@ void GPU_HW::FlushRender()
                            m_batch.transparency_mode != GPUTransparencyMode::Disabled ?
                              GPUTextureCache::PaletteRecordFlags::HasSemiTransparentDraws :
                              GPUTextureCache::PaletteRecordFlags::None);
+    if (!texture) [[unlikely]]
+      m_batch.texture_mode = static_cast<BatchTextureMode>(m_texture_cache_key.mode);
   }
 
   if (m_batch_ubo_dirty)
@@ -3907,6 +3909,11 @@ void GPU_HW::UpdateDisplay(const GPUBackendUpdateDisplayCommand* cmd)
   GL_SCOPE("UpdateDisplay()");
 
   GPUTextureCache::Compact();
+
+  // If this is a 480i single buffer game, then rendering should complete within one vblank.
+  // Therefore we should clear the depth buffer, because the drawing area may not change.
+  if (m_pgxp_depth_buffer && cmd->interleaved_480i_mode)
+    CopyAndClearDepthBuffer(true);
 
   if (g_gpu_settings.gpu_show_vram)
   {

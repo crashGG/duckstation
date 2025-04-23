@@ -151,7 +151,7 @@ private Q_SLOTS:
   void onMediaCaptureStopped();
   void onAchievementsLoginRequested(Achievements::LoginRequestReason reason);
   void onAchievementsLoginSuccess(const QString& username, quint32 points, quint32 sc_points, quint32 unread_messages);
-  void onAchievementsChallengeModeChanged(bool enabled);
+  void onAchievementsHardcoreModeChanged(bool enabled);
   bool onCreateAuxiliaryRenderWindow(RenderAPI render_api, qint32 x, qint32 y, quint32 width, quint32 height,
                                      const QString& title, const QString& icon_name,
                                      Host::AuxiliaryRenderWindowUserData userdata,
@@ -209,9 +209,11 @@ private Q_SLOTS:
   void onGameListEntryContextMenuRequested(const QPoint& point);
 
   void onUpdateCheckComplete();
+  void onRAIntegrationMenuChanged();
 
   void onDebugLogChannelsMenuAboutToShow();
   void openCPUDebugger();
+
 
 protected:
   void showEvent(QShowEvent* event) override;
@@ -277,6 +279,7 @@ private:
 
   void registerForDeviceNotifications();
   void unregisterForDeviceNotifications();
+  void notifyRAIntegrationOfWindowChange();
 
   /// Fills menu with save state info and handlers.
   void populateGameListContextMenu(const GameList::Entry* entry, QWidget* parent_window, QMenu* menu);
@@ -344,6 +347,10 @@ private:
 
 #ifdef _WIN32
   void* m_device_notification_handle = nullptr;
+#endif
+
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+  QMenu* m_raintegration_menu = nullptr;
 #endif
 };
 

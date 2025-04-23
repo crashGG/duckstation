@@ -70,6 +70,7 @@ declare -a SYSLIBS=(
 	"libbrotlicommon.so.1"
 	"libbrotlidec.so.1"
 	"libbsd.so.0"
+	"libcom_err.so.2"
 	"libcrypto.so.3"
 	"libcurl.so.4"
 	"libffi.so.8"
@@ -112,7 +113,7 @@ declare -a DEPLIBS=(
 
 	"libcpuinfo.so"
 	"libdiscord-rpc.so"
-	"liblunasvg.so"
+	"libplutosvg.so.0"
 	"libshaderc_ds.so"
 	"libsoundtouch.so.2"
 	"libspirv-cross-c-shared.so.0"

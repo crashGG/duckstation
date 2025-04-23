@@ -35,7 +35,7 @@ LOG_CHANNEL(SPU);
 // #define SPU_DUMP_ALL_VOICES 1
 
 // VU meter is only enabled in devel builds due to speed impact.
-#ifdef _DEVEL
+#if defined(_DEBUG) || defined(_DEVEL)
 #define SPU_ENABLE_VU_METER 1
 #endif
 
@@ -431,7 +431,7 @@ struct SPUState
   std::array<std::unique_ptr<WAVWriter>, NUM_VOICES + 1> s_voice_dump_writers;
 #endif
 
-#ifdef _DEVEL
+#ifdef SPU_ENABLE_VU_METER
   s16 output_peaks[2] = {};
   s16 cd_audio_peaks[2] = {};
   s16 reverb_peaks[2] = {};
@@ -2694,7 +2694,7 @@ void SPU::DrawDebugStateWindow(float scale)
       "#",       "StartAddr", "RepeatAddr", "CurAddr", "SampleIdx", "SampleRate",
       "VolLeft", "VolRight",  "ADSRPhase",  "ADSRVol", "ADSRTicks",
 #ifdef SPU_ENABLE_VU_METER
-      ,          "VUMeter"
+      "VUMeter",
 #endif
     };
     static constexpr std::array adsr_phases = {"Off", "Attack", "Decay", "Sustain", "Release"};

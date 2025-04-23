@@ -155,7 +155,7 @@ Q_SIGNALS:
   void achievementsLoginRequested(Achievements::LoginRequestReason reason);
   void achievementsLoginSuccess(const QString& username, quint32 points, quint32 sc_points, quint32 unread_messages);
   void achievementsRefreshed(quint32 id, const QString& game_info_string);
-  void achievementsChallengeModeChanged(bool enabled);
+  void achievementsHardcoreModeChanged(bool enabled);
   void cheatEnabled(quint32 index, bool enabled);
   void mediaCaptureStarted();
   void mediaCaptureStopped();
@@ -225,7 +225,7 @@ private Q_SLOTS:
   void onDisplayWindowKeyEvent(int key, bool pressed);
   void onDisplayWindowTextEntered(const QString& text);
   void doBackgroundControllerPoll();
-  void runOnEmuThread(std::function<void()> callback);
+  void runOnEmuThread(const std::function<void()>& callback);
   void processAuxiliaryRenderWindowInputEvent(void* userdata, quint32 event, quint32 param1, quint32 param2,
                                               quint32 param3);
 
@@ -357,9 +357,6 @@ bool IsRunningOnWayland();
 
 /// Returns true if rendering to the main window should be allowed.
 bool CanRenderToMainWindow();
-
-/// Executes a function on the UI thread.
-void RunOnUIThread(const std::function<void()>& func, bool block = false);
 
 /// Default language for the platform.
 const char* GetDefaultLanguage();

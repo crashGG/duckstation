@@ -201,12 +201,6 @@ bool QtHost::EarlyProcessStartup()
   }
 #endif
 
-  // Config-based RAIntegration switch must happen before the main window is displayed.
-#ifdef ENABLE_RAINTEGRATION
-  if (!Achievements::IsUsingRAIntegration() && Host::GetBaseBoolSettingValue("Cheevos", "UseRAIntegration", false))
-    Achievements::SwitchToRAIntegration();
-#endif
-
   Error error;
   if (System::ProcessStartup(&error)) [[likely]]
     return true;
@@ -1157,7 +1151,7 @@ void EmuThread::confirmActionIfMemoryCardBusy(const QString& action, bool cancel
     return;
   }
 
-  QtHost::RunOnUIThread([action, cancel_resume_on_accept, callback = std::move(callback)]() mutable {
+  Host::RunOnUIThread([action, cancel_resume_on_accept, callback = std::move(callback)]() mutable {
     auto lock = g_main_window->pauseAndLockSystem();
 
     const bool result =
@@ -1386,7 +1380,7 @@ void EmuThread::startControllerTest()
     return;
   }
 
-  QtHost::RunOnUIThread([path = std::move(path)]() mutable {
+  Host::RunOnUIThread([path = std::move(path)]() mutable {
     {
       auto lock = g_main_window->pauseAndLockSystem();
       if (QMessageBox::question(
@@ -1405,7 +1399,7 @@ void EmuThread::startControllerTest()
   });
 }
 
-void EmuThread::runOnEmuThread(std::function<void()> callback)
+void EmuThread::runOnEmuThread(const std::function<void()>& callback)
 {
   callback();
 }
@@ -1419,11 +1413,11 @@ void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false 
                             Q_ARG(std::function<void()>, std::move(function)));
 }
 
-void QtHost::RunOnUIThread(const std::function<void()>& func, bool block /*= false*/)
+void Host::RunOnUIThread(std::function<void()> function, bool block /* = false*/)
 {
   // main window always exists, so it's fine to attach it to that.
   QMetaObject::invokeMethod(g_main_window, "runOnUIThread", block ? Qt::BlockingQueuedConnection : Qt::QueuedConnection,
-                            Q_ARG(const std::function<void()>&, func));
+                            Q_ARG(std::function<void()>, std::move(function)));
 }
 
 QtAsyncTask::QtAsyncTask(WorkCallback callback)
@@ -1440,7 +1434,7 @@ void QtAsyncTask::create(QObject* owner, WorkCallback callback)
   connect(task, &QtAsyncTask::completed, owner, [task]() { std::get<CompletionCallback>(task->m_callback)(); });
   System::QueueAsyncTask([task]() {
     task->m_callback = std::get<WorkCallback>(task->m_callback)();
-    QtHost::RunOnUIThread([task]() {
+    Host::RunOnUIThread([task]() {
       emit task->completed(task);
       delete task;
     });
@@ -1489,8 +1483,8 @@ void EmuThread::loadState(bool global, qint32 slot)
   if (!global && System::GetGameSerial().empty())
     return;
 
-  bootOrLoadState(global ? System::GetGlobalSaveStateFileName(slot) :
-                           System::GetGameSaveStateFileName(System::GetGameSerial(), slot));
+  bootOrLoadState(global ? System::GetGlobalSaveStatePath(slot) :
+                           System::GetGameSaveStatePath(System::GetGameSerial(), slot));
 }
 
 void EmuThread::saveState(const QString& filename, bool block_until_done /* = false */)
@@ -1523,10 +1517,10 @@ void EmuThread::saveState(bool global, qint32 slot, bool block_until_done /* = f
     return;
 
   Error error;
-  if (!System::SaveState((global ? System::GetGlobalSaveStateFileName(slot) :
-                                   System::GetGameSaveStateFileName(System::GetGameSerial(), slot))
-                           .c_str(),
-                         &error, g_settings.create_save_state_backups, false))
+  if (!System::SaveState(
+        (global ? System::GetGlobalSaveStatePath(slot) : System::GetGameSaveStatePath(System::GetGameSerial(), slot))
+          .c_str(),
+        &error, g_settings.create_save_state_backups, false))
   {
     emit errorReported(tr("Error"), tr("Failed to save state: %1").arg(QString::fromStdString(error.GetDescription())));
   }
@@ -1679,7 +1673,7 @@ void Host::OnAchievementsRefreshed()
 
 void Host::OnAchievementsHardcoreModeChanged(bool enabled)
 {
-  emit g_emu_thread->achievementsChallengeModeChanged(enabled);
+  emit g_emu_thread->achievementsHardcoreModeChanged(enabled);
 }
 
 void Host::OnCoverDownloaderOpenRequested()
@@ -1718,10 +1712,9 @@ void Host::OpenHostFileSelectorAsync(std::string_view title, bool select_directo
     }
   }
 
-  QtHost::RunOnUIThread([title = QtUtils::StringViewToQString(title), select_directory, callback = std::move(callback),
-                         filters_str = std::move(filters_str),
-                         initial_directory = QtUtils::StringViewToQString(initial_directory),
-                         from_cpu_thread]() mutable {
+  Host::RunOnUIThread([title = QtUtils::StringViewToQString(title), select_directory, callback = std::move(callback),
+                       filters_str = std::move(filters_str),
+                       initial_directory = QtUtils::StringViewToQString(initial_directory), from_cpu_thread]() mutable {
     auto lock = g_main_window->pauseAndLockSystem();
 
     QString path;
@@ -2111,9 +2104,9 @@ void Host::ConfirmMessageAsync(std::string_view title, std::string_view message,
   else
   {
     // Otherwise, use the desktop UI.
-    QtHost::RunOnUIThread([title = QtUtils::StringViewToQString(title), message = QtUtils::StringViewToQString(message),
-                           callback = std::move(callback), yes_text = QtUtils::StringViewToQString(yes_text),
-                           no_text = QtUtils::StringViewToQString(no_text), needs_pause]() mutable {
+    Host::RunOnUIThread([title = QtUtils::StringViewToQString(title), message = QtUtils::StringViewToQString(message),
+                         callback = std::move(callback), yes_text = QtUtils::StringViewToQString(yes_text),
+                         no_text = QtUtils::StringViewToQString(no_text), needs_pause]() mutable {
       auto lock = g_main_window->pauseAndLockSystem();
 
       bool result;
@@ -2144,14 +2137,14 @@ void Host::ConfirmMessageAsync(std::string_view title, std::string_view message,
 
 void Host::OpenURL(std::string_view url)
 {
-  QtHost::RunOnUIThread([url = QtUtils::StringViewToQString(url)]() { QtUtils::OpenURL(g_main_window, QUrl(url)); });
+  Host::RunOnUIThread([url = QtUtils::StringViewToQString(url)]() { QtUtils::OpenURL(g_main_window, QUrl(url)); });
 }
 
 std::string Host::GetClipboardText()
 {
   // Hope this doesn't deadlock...
   std::string ret;
-  QtHost::RunOnUIThread(
+  Host::RunOnUIThread(
     [&ret]() {
       QClipboard* clipboard = QGuiApplication::clipboard();
       if (clipboard)
@@ -2163,7 +2156,7 @@ std::string Host::GetClipboardText()
 
 bool Host::CopyTextToClipboard(std::string_view text)
 {
-  QtHost::RunOnUIThread([text = QtUtils::StringViewToQString(text)]() {
+  Host::RunOnUIThread([text = QtUtils::StringViewToQString(text)]() {
     QClipboard* clipboard = QGuiApplication::clipboard();
     if (clipboard)
       clipboard->setText(text);
@@ -2551,7 +2544,7 @@ void QtHost::QueueSettingsSave()
 {
   if (!QThread::isMainThread())
   {
-    QtHost::RunOnUIThread(QueueSettingsSave);
+    Host::RunOnUIThread(QueueSettingsSave);
     return;
   }
 
@@ -2596,7 +2589,10 @@ void Host::RequestExitBigPicture()
 std::optional<WindowInfo> Host::GetTopLevelWindowInfo()
 {
   std::optional<WindowInfo> ret;
-  QMetaObject::invokeMethod(g_main_window, &MainWindow::getWindowInfo, Qt::BlockingQueuedConnection, &ret);
+  if (QThread::isMainThread())
+    ret = g_main_window->getWindowInfo();
+  else
+    QMetaObject::invokeMethod(g_main_window, &MainWindow::getWindowInfo, Qt::BlockingQueuedConnection, &ret);
   return ret;
 }
 
@@ -2729,9 +2725,6 @@ void QtHost::PrintCommandLineHelp(const char* progname)
   std::fprintf(stderr, "  -settings <filename>: Loads a custom settings configuration from the\n"
                        "    specified filename. Default settings applied if file not found.\n");
   std::fprintf(stderr, "  -earlyconsole: Creates console as early as possible, for logging.\n");
-#ifdef ENABLE_RAINTEGRATION
-  std::fprintf(stderr, "  -raintegration: Use RAIntegration instead of built-in achievement support.\n");
-#endif
   std::fprintf(stderr, "  --: Signals that no more arguments will follow and the remaining\n"
                        "    parameters make up the filename. Use when the filename contains\n"
                        "    spaces or starts with a dash.\n");
@@ -2869,13 +2862,6 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
         s_cleanup_after_update = AutoUpdaterDialog::isSupported();
         continue;
       }
-#ifdef ENABLE_RAINTEGRATION
-      else if (CHECK_ARG("-raintegration"))
-      {
-        Achievements::SwitchToRAIntegration();
-        continue;
-      }
-#endif
       else if (CHECK_ARG("--"))
       {
         no_more_args = true;
@@ -2891,9 +2877,9 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
 #undef CHECK_ARG_PARAM
     }
 
-    if (autoboot && !autoboot->filename.empty())
-      autoboot->filename += ' ';
-    AutoBoot(autoboot)->filename += args[i].toStdString();
+    if (autoboot && !autoboot->path.empty())
+      autoboot->path += ' ';
+    AutoBoot(autoboot)->path += args[i].toStdString();
   }
 
   // To do anything useful, we need the config initialized.
@@ -2906,11 +2892,11 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
 
   // Check the file we're starting actually exists.
 
-  if (autoboot && !autoboot->filename.empty() && !FileSystem::FileExists(autoboot->filename.c_str()))
+  if (autoboot && !autoboot->path.empty() && !FileSystem::FileExists(autoboot->path.c_str()))
   {
     QMessageBox::critical(
       nullptr, qApp->translate("QtHost", "Error"),
-      qApp->translate("QtHost", "File '%1' does not exist.").arg(QString::fromStdString(autoboot->filename)));
+      qApp->translate("QtHost", "File '%1' does not exist.").arg(QString::fromStdString(autoboot->path)));
     return false;
   }
 
@@ -2918,19 +2904,19 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
   {
     AutoBoot(autoboot);
 
-    if (autoboot->filename.empty())
+    if (autoboot->path.empty())
     {
       // loading global state, -1 means resume the last game
       if (state_index.value() < 0)
         autoboot->save_state = System::GetMostRecentResumeSaveStatePath();
       else
-        autoboot->save_state = System::GetGlobalSaveStateFileName(state_index.value());
+        autoboot->save_state = System::GetGlobalSaveStatePath(state_index.value());
     }
     else
     {
       // loading game state
-      const std::string game_serial(GameDatabase::GetSerialForPath(autoboot->filename.c_str()));
-      autoboot->save_state = System::GetGameSaveStateFileName(game_serial, state_index.value());
+      const std::string game_serial = GameDatabase::GetSerialForPath(autoboot->path.c_str());
+      autoboot->save_state = System::GetGameSaveStatePath(game_serial, state_index.value());
     }
 
     if (autoboot->save_state.empty() || !FileSystem::FileExists(autoboot->save_state.c_str()))
@@ -2943,7 +2929,7 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
 
   // check autoboot parameters, if we set something like fullscreen without a bios
   // or disc, we don't want to actually start.
-  if (autoboot && autoboot->filename.empty() && autoboot->save_state.empty() && !starting_bios)
+  if (autoboot && autoboot->path.empty() && autoboot->save_state.empty() && !starting_bios)
     autoboot.reset();
 
   // if we don't have autoboot, we definitely don't want batch mode (because that'll skip

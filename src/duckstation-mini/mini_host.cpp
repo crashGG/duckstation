@@ -77,11 +77,9 @@ static bool SetDataDirectory();
 static bool SetCriticalFolders();
 static void SetDefaultSettings(SettingsInterface& si, bool system, bool controller);
 static std::string GetResourcePath(std::string_view name, bool allow_override);
-static void ProcessCPUThreadEvents(bool block);
 static bool PerformEarlyHardwareChecks();
 static bool EarlyProcessStartup();
 static void WarnAboutInterface();
-static void RunOnUIThread(std::function<void()> func);
 static void StartCPUThread();
 static void StopCPUThread();
 static void ProcessCPUThreadEvents(bool block);
@@ -582,7 +580,7 @@ std::optional<WindowInfo> Host::AcquireRenderWindow(RenderAPI render_api, bool f
 
   std::optional<WindowInfo> wi;
 
-  MiniHost::RunOnUIThread([render_api, fullscreen, error, &wi]() {
+  Host::RunOnUIThread([render_api, fullscreen, error, &wi]() {
     const std::string window_title = GetWindowTitle(System::GetGameTitle());
     const SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, window_title.c_str());
@@ -658,7 +656,7 @@ void Host::ReleaseRenderWindow()
   if (!s_state.sdl_window)
     return;
 
-  MiniHost::RunOnUIThread([]() {
+  Host::RunOnUIThread([]() {
     if (!s_state.fullscreen.load(std::memory_order_acquire))
     {
       int window_x = SDL_WINDOWPOS_UNDEFINED, window_y = SDL_WINDOWPOS_UNDEFINED;
@@ -911,17 +909,6 @@ void MiniHost::ProcessSDLEvent(const SDL_Event* ev)
   }
 }
 
-void MiniHost::RunOnUIThread(std::function<void()> func)
-{
-  std::function<void()>* pfunc = new std::function<void()>(std::move(func));
-
-  SDL_Event ev;
-  ev.user = {};
-  ev.type = s_state.func_event_id;
-  ev.user.data1 = pfunc;
-  SDL_PushEvent(&ev);
-}
-
 void MiniHost::ProcessCPUThreadPlatformMessages()
 {
   // This is lame. On Win32, we need to pump messages, even though *we* don't have any windows
@@ -1040,7 +1027,7 @@ void MiniHost::CPUThreadEntryPoint()
   System::CPUThreadShutdown();
 
   // Tell the UI thread to shut down.
-  RunOnUIThread([]() { s_state.ui_thread_running = false; });
+  Host::RunOnUIThread([]() { s_state.ui_thread_running = false; });
 }
 
 void MiniHost::CPUThreadMainLoop()
@@ -1065,7 +1052,7 @@ void MiniHost::CPUThreadMainLoop()
 
 void MiniHost::GPUThreadEntryPoint()
 {
-  Threading::SetNameOfCurrentThread("CPU Thread");
+  Threading::SetNameOfCurrentThread("GPU Thread");
   GPUThread::Internal::GPUThreadEntryPoint();
 }
 
@@ -1132,6 +1119,15 @@ void Host::OnAchievementsHardcoreModeChanged(bool enabled)
 {
   // noop
 }
+
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+
+void Host::OnRAIntegrationMenuChanged()
+{
+  // noop
+}
+
+#endif
 
 void Host::OnCoverDownloaderOpenRequested()
 {
@@ -1202,6 +1198,19 @@ void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false 
   s_state.cpu_thread_event_posted.notify_one();
   if (block)
     s_state.cpu_thread_event_done.wait(lock, []() { return s_state.blocking_cpu_events_pending == 0; });
+}
+
+void Host::RunOnUIThread(std::function<void()> function, bool block /* = false */)
+{
+  using namespace MiniHost;
+
+  std::function<void()>* pfunc = new std::function<void()>(std::move(function));
+
+  SDL_Event ev;
+  ev.user = {};
+  ev.type = s_state.func_event_id;
+  ev.user.data1 = pfunc;
+  SDL_PushEvent(&ev);
 }
 
 void Host::RefreshGameListAsync(bool invalidate_cache)
@@ -1710,9 +1719,9 @@ bool MiniHost::ParseCommandLineParametersAndInitializeConfig(int argc, char* arg
 #undef CHECK_ARG_PARAM
     }
 
-    if (autoboot && !autoboot->filename.empty())
-      autoboot->filename += ' ';
-    AutoBoot(autoboot)->filename += argv[i];
+    if (autoboot && !autoboot->path.empty())
+      autoboot->path += ' ';
+    AutoBoot(autoboot)->path += argv[i];
   }
 
   // To do anything useful, we need the config initialized.
@@ -1725,9 +1734,9 @@ bool MiniHost::ParseCommandLineParametersAndInitializeConfig(int argc, char* arg
 
   // Check the file we're starting actually exists.
 
-  if (autoboot && !autoboot->filename.empty() && !FileSystem::FileExists(autoboot->filename.c_str()))
+  if (autoboot && !autoboot->path.empty() && !FileSystem::FileExists(autoboot->path.c_str()))
   {
-    Host::ReportFatalError("Error", fmt::format("File '{}' does not exist.", autoboot->filename));
+    Host::ReportFatalError("Error", fmt::format("File '{}' does not exist.", autoboot->path));
     return false;
   }
 
@@ -1735,19 +1744,19 @@ bool MiniHost::ParseCommandLineParametersAndInitializeConfig(int argc, char* arg
   {
     AutoBoot(autoboot);
 
-    if (autoboot->filename.empty())
+    if (autoboot->path.empty())
     {
       // loading global state, -1 means resume the last game
       if (state_index.value() < 0)
         autoboot->save_state = System::GetMostRecentResumeSaveStatePath();
       else
-        autoboot->save_state = System::GetGlobalSaveStateFileName(state_index.value());
+        autoboot->save_state = System::GetGlobalSaveStatePath(state_index.value());
     }
     else
     {
       // loading game state
-      const std::string game_serial(GameDatabase::GetSerialForPath(autoboot->filename.c_str()));
-      autoboot->save_state = System::GetGameSaveStateFileName(game_serial, state_index.value());
+      const std::string game_serial(GameDatabase::GetSerialForPath(autoboot->path.c_str()));
+      autoboot->save_state = System::GetGameSaveStatePath(game_serial, state_index.value());
     }
 
     if (autoboot->save_state.empty() || !FileSystem::FileExists(autoboot->save_state.c_str()))
@@ -1759,7 +1768,7 @@ bool MiniHost::ParseCommandLineParametersAndInitializeConfig(int argc, char* arg
 
   // check autoboot parameters, if we set something like fullscreen without a bios
   // or disc, we don't want to actually start.
-  if (autoboot && autoboot->filename.empty() && autoboot->save_state.empty() && !starting_bios)
+  if (autoboot && autoboot->path.empty() && autoboot->save_state.empty() && !starting_bios)
     autoboot.reset();
 
   // if we don't have autoboot, we definitely don't want batch mode (because that'll skip

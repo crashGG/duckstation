@@ -55,7 +55,18 @@ static bool SetFolders();
 static bool SetNewDataRoot(const std::string& filename);
 static void DumpSystemStateHashes();
 static std::string GetFrameDumpPath(u32 frame);
+static void ProcessCPUThreadEvents();
 static void GPUThreadEntryPoint();
+
+struct RegTestHostState
+{
+  ALIGN_TO_CACHE_LINE std::mutex cpu_thread_events_mutex;
+  std::condition_variable cpu_thread_event_done;
+  std::deque<std::pair<std::function<void()>, bool>> cpu_thread_events;
+  u32 blocking_cpu_events_pending = 0;
+};
+
+static RegTestHostState s_state;
 
 } // namespace RegTestHost
 
@@ -326,6 +337,8 @@ void Host::OnMediaCaptureStopped()
 
 void Host::PumpMessagesOnCPUThread()
 {
+  RegTestHost::ProcessCPUThreadEvents();
+
   s_frames_remaining--;
   if (s_frames_remaining == 0)
   {
@@ -336,8 +349,41 @@ void Host::PumpMessagesOnCPUThread()
 
 void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false */)
 {
-  // only one thread in this version...
-  function();
+  using namespace RegTestHost;
+
+  std::unique_lock lock(s_state.cpu_thread_events_mutex);
+  s_state.cpu_thread_events.emplace_back(std::move(function), block);
+  s_state.blocking_cpu_events_pending += BoolToUInt32(block);
+  if (block)
+    s_state.cpu_thread_event_done.wait(lock, []() { return s_state.blocking_cpu_events_pending == 0; });
+}
+
+void RegTestHost::ProcessCPUThreadEvents()
+{
+  std::unique_lock lock(s_state.cpu_thread_events_mutex);
+
+  for (;;)
+  {
+    if (s_state.cpu_thread_events.empty())
+      break;
+
+    auto event = std::move(s_state.cpu_thread_events.front());
+    s_state.cpu_thread_events.pop_front();
+    lock.unlock();
+    event.first();
+    lock.lock();
+
+    if (event.second)
+    {
+      s_state.blocking_cpu_events_pending--;
+      s_state.cpu_thread_event_done.notify_one();
+    }
+  }
+}
+
+void Host::RunOnUIThread(std::function<void()> function, bool block /* = false */)
+{
+  RunOnCPUThread(std::move(function), block);
 }
 
 void Host::RequestResizeHostDisplay(s32 width, s32 height)
@@ -534,6 +580,15 @@ void Host::OnAchievementsHardcoreModeChanged(bool enabled)
 {
   // noop
 }
+
+#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
+
+void Host::OnRAIntegrationMenuChanged()
+{
+  // noop
+}
+
+#endif
 
 void Host::OnCoverDownloaderOpenRequested()
 {
@@ -857,9 +912,9 @@ bool RegTestHost::ParseCommandLineParameters(int argc, char* argv[], std::option
 #undef CHECK_ARG_PARAM
     }
 
-    if (autoboot && !autoboot->filename.empty())
-      autoboot->filename += ' ';
-    AutoBoot(autoboot)->filename += argv[i];
+    if (autoboot && !autoboot->path.empty())
+      autoboot->path += ' ';
+    AutoBoot(autoboot)->path += argv[i];
   }
 
   return true;
@@ -916,13 +971,13 @@ int main(int argc, char* argv[])
   if (!RegTestHost::ParseCommandLineParameters(argc, argv, autoboot))
     return EXIT_FAILURE;
 
-  if (!autoboot || autoboot->filename.empty())
+  if (!autoboot || autoboot->path.empty())
   {
     ERROR_LOG("No boot path specified.");
     return EXIT_FAILURE;
   }
 
-  if (!RegTestHost::SetNewDataRoot(autoboot->filename))
+  if (!RegTestHost::SetNewDataRoot(autoboot->path))
     return EXIT_FAILURE;
 
   // Only one async worker.
@@ -937,7 +992,7 @@ int main(int argc, char* argv[])
 
   Error error;
   int result = -1;
-  INFO_LOG("Trying to boot '{}'...", autoboot->filename);
+  INFO_LOG("Trying to boot '{}'...", autoboot->path);
   if (!System::BootSystem(std::move(autoboot.value()), &error))
   {
     ERROR_LOG("Failed to boot system: {}", error.GetDescription());
@@ -987,6 +1042,7 @@ cleanup:
     s_gpu_thread.Join();
   }
 
+  RegTestHost::ProcessCPUThreadEvents();
   System::CPUThreadShutdown();
   System::ProcessShutdown();
   return result;

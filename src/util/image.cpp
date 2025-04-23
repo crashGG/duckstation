@@ -17,9 +17,8 @@
 #include "common/scoped_guard.h"
 #include "common/string_util.h"
 
-#include "lunasvg_c.h"
-
 #include <jpeglib.h>
+#include <plutosvg.h>
 #include <png.h>
 #include <webp/decode.h>
 #include <webp/encode.h>
@@ -80,8 +79,8 @@ static const FormatHandler* GetFormatHandler(std::string_view extension)
   return nullptr;
 }
 
-static void SwapBGRAToRGBA(void* pixels_out, u32 pixels_out_pitch, const void* pixels_in, u32 pixels_in_pitch,
-                           u32 width, u32 height);
+static void SwapBGRAToRGBA(void* RESTRICT pixels_out, u32 pixels_out_pitch, const void* RESTRICT pixels_in,
+                           u32 pixels_in_pitch, u32 width, u32 height);
 
 Image::Image() = default;
 
@@ -391,26 +390,32 @@ bool Image::RasterizeSVG(const std::span<const u8> data, u32 width, u32 height, 
     return false;
   }
 
-  std::unique_ptr<lunasvg_document, void (*)(lunasvg_document*)> doc(
-    lunasvg_document_load_from_data(data.data(), data.size()), lunasvg_document_destroy);
+  std::unique_ptr<plutosvg_document, void (*)(plutosvg_document*)> doc(
+    plutosvg_document_load_from_data(reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size_bytes()),
+                                     static_cast<float>(width), static_cast<float>(height), nullptr, nullptr),
+    plutosvg_document_destroy);
   if (!doc)
   {
-    Error::SetStringView(error, "lunasvg_document_load_from_data() failed");
+    Error::SetStringView(error, "plutosvg_document_load_from_data() failed");
     return false;
   }
 
-  std::unique_ptr<lunasvg_bitmap, void (*)(lunasvg_bitmap*)> bitmap(
-    lunasvg_document_render_to_bitmap(doc.get(), width, height, 0), lunasvg_bitmap_destroy);
+  const plutovg_color_t current_color = {.r = 1.0f, .g = 1.0f, .b = 1.0f, .a = 1.0f};
+
+  std::unique_ptr<plutovg_surface, void (*)(plutovg_surface*)> bitmap(
+    plutosvg_document_render_to_surface(doc.get(), nullptr, static_cast<int>(width), static_cast<int>(height),
+                                        &current_color, nullptr, nullptr),
+    plutovg_surface_destroy);
   if (!bitmap)
   {
-    Error::SetStringView(error, "lunasvg_document_render_to_bitmap() failed");
+    Error::SetStringView(error, "plutosvg_document_render_to_surface() failed");
     return false;
   }
 
   // lunasvg works in BGRA, swap to RGBA
   Resize(width, height, ImageFormat::RGBA8, false);
-  SwapBGRAToRGBA(m_pixels.get(), m_pitch, lunasvg_bitmap_data(bitmap.get()), lunasvg_bitmap_stride(bitmap.get()), width,
-                 height);
+  SwapBGRAToRGBA(m_pixels.get(), m_pitch, plutovg_surface_get_data(bitmap.get()),
+                 plutovg_surface_get_stride(bitmap.get()), width, height);
   return true;
 }
 
@@ -500,16 +505,17 @@ void SwapBGRAToRGBA(void* pixels_out, u32 pixels_out_pitch, const void* pixels_i
 }
 
 template<ImageFormat format>
-static void DecompressBC(Image& image_out, const Image& image_in)
+static void DecompressBC(void* RESTRICT pixels_out, u32 pixels_out_pitch, const void* RESTRICT pixels_in,
+                         u32 pixels_in_pitch, u32 width, u32 height)
 {
   constexpr u32 BC_BLOCK_SIZE = 4;
   constexpr u32 BC_BLOCK_BYTES = 16;
 
-  const u32 blocks_wide = image_in.GetBlocksWide();
-  const u32 blocks_high = image_in.GetBlocksHigh();
+  const u32 blocks_wide = Common::AlignUpPow2(width, 4) / 4;
+  const u32 blocks_high = Common::AlignUpPow2(height, 4) / 4;
   for (u32 y = 0; y < blocks_high; y++)
   {
-    const u8* block_in = image_in.GetRowPixels(y);
+    const u8* block_in = static_cast<const u8*>(pixels_in) + (y * pixels_in_pitch);
     for (u32 x = 0; x < blocks_wide; x++, block_in += BC_BLOCK_BYTES)
     {
       // decompress block
@@ -517,20 +523,20 @@ static void DecompressBC(Image& image_out, const Image& image_in)
       {
         case ImageFormat::BC1:
         {
-          DecompressBlockBC1(x * BC_BLOCK_SIZE, y * BC_BLOCK_SIZE, image_out.GetPitch(), block_in,
-                             image_out.GetPixels());
+          DecompressBlockBC1(x * BC_BLOCK_SIZE, y * BC_BLOCK_SIZE, pixels_out_pitch, block_in,
+                             static_cast<unsigned char*>(pixels_out));
         }
         break;
         case ImageFormat::BC2:
         {
-          DecompressBlockBC2(x * BC_BLOCK_SIZE, y * BC_BLOCK_SIZE, image_out.GetPitch(), block_in,
-                             image_out.GetPixels());
+          DecompressBlockBC2(x * BC_BLOCK_SIZE, y * BC_BLOCK_SIZE, pixels_out_pitch, block_in,
+                             static_cast<unsigned char*>(pixels_out));
         }
         break;
         case ImageFormat::BC3:
         {
-          DecompressBlockBC3(x * BC_BLOCK_SIZE, y * BC_BLOCK_SIZE, image_out.GetPitch(), block_in,
-                             image_out.GetPixels());
+          DecompressBlockBC3(x * BC_BLOCK_SIZE, y * BC_BLOCK_SIZE, pixels_out_pitch, block_in,
+                             static_cast<unsigned char*>(pixels_out));
         }
         break;
 
@@ -540,13 +546,14 @@ static void DecompressBC(Image& image_out, const Image& image_in)
           bc7decomp::unpack_bc7(block_in, reinterpret_cast<bc7decomp::color_rgba*>(block_pixels_out));
 
           // and write it to the new image
-          const u32* copy_in_ptr = block_pixels_out;
-          u8* copy_out_ptr = image_out.GetRowPixels(y * BC_BLOCK_SIZE) + (x * BC_BLOCK_SIZE * sizeof(u32));
+          const u32* RESTRICT copy_in_ptr = block_pixels_out;
+          u8* RESTRICT copy_out_ptr =
+            static_cast<u8*>(pixels_out) + (y * BC_BLOCK_SIZE * pixels_out_pitch) + (x * BC_BLOCK_SIZE * sizeof(u32));
           for (u32 sy = 0; sy < 4; sy++)
           {
             std::memcpy(copy_out_ptr, copy_in_ptr, sizeof(u32) * BC_BLOCK_SIZE);
             copy_in_ptr += BC_BLOCK_SIZE;
-            copy_out_ptr += image_out.GetPitch();
+            copy_out_ptr += pixels_out_pitch;
           }
         }
         break;
@@ -565,39 +572,46 @@ std::optional<Image> Image::ConvertToRGBA8(Error* error) const
     return ret;
   }
 
-  switch (m_format)
+  ret = Image(m_width, m_height, ImageFormat::RGBA8);
+  if (!ConvertToRGBA8(ret->GetPixels(), ret->GetPitch(), m_pixels.get(), m_pitch, m_width, m_height, m_format, error))
+    ret.reset();
+
+  return ret;
+}
+
+bool Image::ConvertToRGBA8(void* RESTRICT pixels_out, u32 pixels_out_pitch, const void* RESTRICT pixels_in,
+                           u32 pixels_in_pitch, u32 width, u32 height, ImageFormat format, Error* error)
+{
+  switch (format)
   {
     case ImageFormat::BGRA8:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-      SwapBGRAToRGBA(ret->GetPixels(), ret->GetPitch(), m_pixels.get(), m_pitch, m_width, m_height);
+      SwapBGRAToRGBA(pixels_out, pixels_out_pitch, pixels_in, pixels_in_pitch, width, height);
+      return true;
     }
-    break;
 
     case ImageFormat::RGBA8:
     {
-      ret = Image(m_width, m_height, m_format, m_pixels.get(), m_pitch);
+      StringUtil::StrideMemCpy(pixels_out, pixels_out_pitch, pixels_in, pixels_in_pitch, sizeof(u32) * width, height);
+      return true;
     }
-    break;
 
     case ImageFormat::RGB565:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-
       constexpr u32 pixels_per_vec = 8;
-      [[maybe_unused]] const u32 aligned_width = Common::AlignDownPow2(m_width, pixels_per_vec);
+      [[maybe_unused]] const u32 aligned_width = Common::AlignDownPow2(width, pixels_per_vec);
 
-      for (u32 y = 0; y < m_height; y++)
+      for (u32 y = 0; y < height; y++)
       {
-        const u8* pixels_in = GetRowPixels(y);
-        u8* pixels_out = ret->GetRowPixels(y);
+        const u8* RESTRICT row_pixels_in = static_cast<const u8*>(pixels_in) + (y * pixels_in_pitch);
+        u8* RESTRICT row_pixels_out = static_cast<u8*>(pixels_out) + (y * pixels_out_pitch);
         u32 x = 0;
 
 #ifdef CPU_ARCH_SIMD
         for (; x < aligned_width; x += pixels_per_vec)
         {
-          GSVector4i rgb565 = GSVector4i::load<false>(pixels_in);
-          pixels_in += sizeof(u16) * pixels_per_vec;
+          GSVector4i rgb565 = GSVector4i::load<false>(row_pixels_in);
+          row_pixels_in += sizeof(u16) * pixels_per_vec;
 
           GSVector4i r = rgb565.srl16<11>();
           r = r.sll16<3>() | r.sll16<13>().srl16<13>();
@@ -613,51 +627,50 @@ std::optional<Image> Image::ConvertToRGBA8(Error* error) const
           const GSVector4i high = r.uph64().u16to32() | g.uph64().u16to32().sll32<8>() |
                                   b.uph64().u16to32().sll32<16>() | GSVector4i::cxpr(0xFF000000);
 
-          GSVector4i::store<false>(pixels_out, low);
-          pixels_out += sizeof(GSVector4i);
+          GSVector4i::store<false>(row_pixels_out, low);
+          row_pixels_out += sizeof(GSVector4i);
 
-          GSVector4i::store<false>(pixels_out, high);
-          pixels_out += sizeof(GSVector4i);
+          GSVector4i::store<false>(row_pixels_out, high);
+          row_pixels_out += sizeof(GSVector4i);
         }
 #endif
 
         DONT_VECTORIZE_THIS_LOOP
-        for (; x < m_width; x++)
+        for (; x < width; x++)
         {
           // RGB565 -> RGBA8
           u16 pixel_in;
-          std::memcpy(&pixel_in, pixels_in, sizeof(u16));
-          pixels_in += sizeof(u16);
+          std::memcpy(&pixel_in, row_pixels_in, sizeof(u16));
+          row_pixels_in += sizeof(u16);
           const u8 r5 = Truncate8(pixel_in >> 11);
           const u8 g6 = Truncate8((pixel_in >> 5) & 0x3F);
           const u8 b5 = Truncate8(pixel_in & 0x1F);
           const u32 rgba8 = ZeroExtend32((r5 << 3) | (r5 & 7)) | (ZeroExtend32((g6 << 2) | (g6 & 3)) << 8) |
                             (ZeroExtend32((b5 << 3) | (b5 & 7)) << 16) | (0xFF000000u);
-          std::memcpy(pixels_out, &rgba8, sizeof(u32));
-          pixels_out += sizeof(u32);
+          std::memcpy(row_pixels_out, &rgba8, sizeof(u32));
+          row_pixels_out += sizeof(u32);
         }
       }
+
+      return true;
     }
-    break;
 
     case ImageFormat::RGB5A1:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-
       constexpr u32 pixels_per_vec = 8;
-      [[maybe_unused]] const u32 aligned_width = Common::AlignDownPow2(m_width, pixels_per_vec);
+      [[maybe_unused]] const u32 aligned_width = Common::AlignDownPow2(width, pixels_per_vec);
 
-      for (u32 y = 0; y < m_height; y++)
+      for (u32 y = 0; y < height; y++)
       {
-        const u8* pixels_in = GetRowPixels(y);
-        u8* pixels_out = ret->GetRowPixels(y);
+        const u8* RESTRICT row_pixels_in = static_cast<const u8*>(pixels_in) + (y * pixels_in_pitch);
+        u8* RESTRICT row_pixels_out = static_cast<u8*>(pixels_out) + (y * pixels_out_pitch);
         u32 x = 0;
 
 #ifdef CPU_ARCH_SIMD
         for (; x < aligned_width; x += pixels_per_vec)
         {
-          GSVector4i rgb5a1 = GSVector4i::load<false>(pixels_in);
-          pixels_in += sizeof(u16) * pixels_per_vec;
+          GSVector4i rgb5a1 = GSVector4i::load<false>(row_pixels_in);
+          row_pixels_in += sizeof(u16) * pixels_per_vec;
 
           GSVector4i r = rgb5a1.sll16<1>().srl16<11>();
           r = r.sll16<3>() | r.sll16<13>().srl16<13>();
@@ -675,52 +688,51 @@ std::optional<Image> Image::ConvertToRGBA8(Error* error) const
           const GSVector4i high = r.uph64().u16to32() | g.uph64().u16to32().sll32<8>() |
                                   b.uph64().u16to32().sll32<16>() | a.uph64().u16to32().sll32<24>();
 
-          GSVector4i::store<false>(pixels_out, low);
-          pixels_out += sizeof(GSVector4i);
+          GSVector4i::store<false>(row_pixels_out, low);
+          row_pixels_out += sizeof(GSVector4i);
 
-          GSVector4i::store<false>(pixels_out, high);
-          pixels_out += sizeof(GSVector4i);
+          GSVector4i::store<false>(row_pixels_out, high);
+          row_pixels_out += sizeof(GSVector4i);
         }
 #endif
 
         DONT_VECTORIZE_THIS_LOOP
-        for (; x < m_width; x++)
+        for (; x < width; x++)
         {
           // RGB5A1 -> RGBA8
           u16 pixel_in;
-          std::memcpy(&pixel_in, pixels_in, sizeof(u16));
-          pixels_in += sizeof(u16);
+          std::memcpy(&pixel_in, row_pixels_in, sizeof(u16));
+          row_pixels_in += sizeof(u16);
           const u8 a1 = Truncate8(pixel_in >> 15);
           const u8 r5 = Truncate8((pixel_in >> 10) & 0x1F);
           const u8 g6 = Truncate8((pixel_in >> 5) & 0x1F);
           const u8 b5 = Truncate8(pixel_in & 0x1F);
           const u32 rgba8 = ZeroExtend32((r5 << 3) | (r5 & 7)) | (ZeroExtend32((g6 << 3) | (g6 & 7)) << 8) |
                             (ZeroExtend32((b5 << 3) | (b5 & 7)) << 16) | (a1 ? 0xFF000000u : 0u);
-          std::memcpy(pixels_out, &rgba8, sizeof(u32));
-          pixels_out += sizeof(u32);
+          std::memcpy(row_pixels_out, &rgba8, sizeof(u32));
+          row_pixels_out += sizeof(u32);
         }
       }
+
+      return true;
     }
-    break;
 
     case ImageFormat::A1BGR5:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-
       constexpr u32 pixels_per_vec = 8;
-      [[maybe_unused]] const u32 aligned_width = Common::AlignDownPow2(m_width, pixels_per_vec);
+      [[maybe_unused]] const u32 aligned_width = Common::AlignDownPow2(width, pixels_per_vec);
 
-      for (u32 y = 0; y < m_height; y++)
+      for (u32 y = 0; y < height; y++)
       {
-        const u8* pixels_in = GetRowPixels(y);
-        u8* pixels_out = ret->GetRowPixels(y);
+        const u8* RESTRICT row_pixels_in = static_cast<const u8*>(pixels_in) + (y * pixels_in_pitch);
+        u8* RESTRICT row_pixels_out = static_cast<u8*>(pixels_out) + (y * pixels_out_pitch);
         u32 x = 0;
 
 #ifdef CPU_ARCH_SIMD
         for (; x < aligned_width; x += pixels_per_vec)
         {
-          GSVector4i a1bgr5 = GSVector4i::load<false>(pixels_in);
-          pixels_in += sizeof(u16) * pixels_per_vec;
+          GSVector4i a1bgr5 = GSVector4i::load<false>(row_pixels_in);
+          row_pixels_in += sizeof(u16) * pixels_per_vec;
 
           GSVector4i r = a1bgr5.srl16<11>();
           r = r.sll16<3>() | r.sll16<13>().srl16<13>();
@@ -738,91 +750,90 @@ std::optional<Image> Image::ConvertToRGBA8(Error* error) const
           const GSVector4i high = r.uph64().u16to32() | g.uph64().u16to32().sll32<8>() |
                                   b.uph64().u16to32().sll32<16>() | a.uph64().u16to32().sll32<24>();
 
-          GSVector4i::store<false>(pixels_out, low);
-          pixels_out += sizeof(GSVector4i);
+          GSVector4i::store<false>(row_pixels_out, low);
+          row_pixels_out += sizeof(GSVector4i);
 
-          GSVector4i::store<false>(pixels_out, high);
-          pixels_out += sizeof(GSVector4i);
+          GSVector4i::store<false>(row_pixels_out, high);
+          row_pixels_out += sizeof(GSVector4i);
         }
 #endif
 
         DONT_VECTORIZE_THIS_LOOP
-        for (; x < m_width; x++)
+        for (; x < width; x++)
         {
           // RGB5A1 -> RGBA8
           u16 pixel_in;
-          std::memcpy(&pixel_in, pixels_in, sizeof(u16));
-          pixels_in += sizeof(u16);
+          std::memcpy(&pixel_in, row_pixels_in, sizeof(u16));
+          row_pixels_in += sizeof(u16);
           const u8 a1 = Truncate8(pixel_in & 0x01);
           const u8 r5 = Truncate8((pixel_in >> 11) & 0x1F);
           const u8 g6 = Truncate8((pixel_in >> 6) & 0x1F);
           const u8 b5 = Truncate8((pixel_in >> 1) & 0x1F);
           const u32 rgba8 = ZeroExtend32((r5 << 3) | (r5 & 7)) | (ZeroExtend32((g6 << 3) | (g6 & 7)) << 8) |
                             (ZeroExtend32((b5 << 3) | (b5 & 7)) << 16) | (a1 ? 0xFF000000u : 0u);
-          std::memcpy(pixels_out, &rgba8, sizeof(u32));
-          pixels_out += sizeof(u32);
+          std::memcpy(row_pixels_out, &rgba8, sizeof(u32));
+          row_pixels_out += sizeof(u32);
         }
       }
+
+      return true;
     }
-    break;
 
     case ImageFormat::BGR8:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-      for (u32 y = 0; y < m_height; y++)
+      for (u32 y = 0; y < height; y++)
       {
-        const u8* pixels_in = GetRowPixels(y);
-        u8* pixels_out = ret->GetRowPixels(y);
+        const u8* RESTRICT row_pixels_in = static_cast<const u8*>(pixels_in) + (y * pixels_in_pitch);
+        u8* RESTRICT row_pixels_out = static_cast<u8*>(pixels_out) + (y * pixels_out_pitch);
 
-        for (u32 x = 0; x < m_width; x++)
+        for (u32 x = 0; x < width; x++)
         {
           // Set alpha channel to full intensity.
-          const u32 rgba = (ZeroExtend32(pixels_in[0]) | (ZeroExtend32(pixels_in[2]) << 8) |
-                            (ZeroExtend32(pixels_in[2]) << 16) | 0xFF000000u);
-          std::memcpy(pixels_out, &rgba, sizeof(rgba));
-          pixels_in += 3;
-          pixels_out += sizeof(rgba);
+          const u32 rgba = (ZeroExtend32(row_pixels_in[0]) | (ZeroExtend32(row_pixels_in[2]) << 8) |
+                            (ZeroExtend32(row_pixels_in[2]) << 16) | 0xFF000000u);
+          std::memcpy(row_pixels_out, &rgba, sizeof(rgba));
+          row_pixels_in += 3;
+          row_pixels_out += sizeof(rgba);
         }
       }
+
+      return true;
     }
     break;
 
     case ImageFormat::BC1:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-      DecompressBC<ImageFormat::BC1>(ret.value(), *this);
+      DecompressBC<ImageFormat::BC1>(pixels_out, pixels_out_pitch, pixels_in, pixels_in_pitch, width, height);
+      return true;
     }
     break;
 
     case ImageFormat::BC2:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-      DecompressBC<ImageFormat::BC2>(ret.value(), *this);
+      DecompressBC<ImageFormat::BC2>(pixels_out, pixels_out_pitch, pixels_in, pixels_in_pitch, width, height);
+      return true;
     }
     break;
 
     case ImageFormat::BC3:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-      DecompressBC<ImageFormat::BC3>(ret.value(), *this);
+      DecompressBC<ImageFormat::BC3>(pixels_out, pixels_out_pitch, pixels_in, pixels_in_pitch, width, height);
+      return true;
     }
     break;
 
     case ImageFormat::BC7:
     {
-      ret = Image(m_width, m_height, ImageFormat::RGBA8);
-      DecompressBC<ImageFormat::BC7>(ret.value(), *this);
+      DecompressBC<ImageFormat::BC7>(pixels_out, pixels_out_pitch, pixels_in, pixels_in_pitch, width, height);
+      return true;
     }
-    break;
 
     default:
     {
-      Error::SetStringFmt(error, "Unhandled format {}", GetFormatName(m_format));
+      Error::SetStringFmt(error, "Unhandled format {}", GetFormatName(format));
+      return false;
     }
-    break;
   }
-
-  return ret;
 }
 
 void Image::FlipY()
