@@ -245,7 +245,6 @@ static void DrawAboutWindow();
 static void FixStateIfPaused();
 static void GetStandardSelectionFooterText(SmallStringBase& dest, bool back_instead_of_cancel);
 static bool CompileTransitionPipelines();
-static void UpdateTransitionState();
 
 //////////////////////////////////////////////////////////////////////////
 // Backgrounds
@@ -7552,7 +7551,7 @@ bool FullscreenUI::OpenLoadStateSelectorForGameResume(const GameList::Entry* ent
 
 void FullscreenUI::DrawResumeStateSelector()
 {
-  if (!BeginFixedPopupDialog(LayoutScale(30.0f), LayoutScale(40.0f), LayoutScale(820.0f, 640.0f)))
+  if (!BeginFixedPopupDialog(LayoutScale(30.0f), LayoutScale(40.0f), LayoutScale(820.0f, 645.0f)))
   {
     ClearSaveStateEntryList();
     return;
@@ -8730,8 +8729,13 @@ void FullscreenUI::OpenAchievementsWindow()
   const auto lock = Achievements::GetLock();
   if (!Achievements::IsActive() || !Achievements::HasAchievements())
   {
-    ShowToast(std::string(), Achievements::IsActive() ? FSUI_STR("This game has no achievements.") :
-                                                        FSUI_STR("Achievements are not enabled."));
+    GPUThread::RunOnThread([]() {
+      if (!Initialize())
+        return;
+
+      ShowToast(std::string(), Achievements::IsActive() ? FSUI_STR("This game has no achievements.") :
+                                                          FSUI_STR("Achievements are not enabled."));
+    });
     return;
   }
 
@@ -8765,8 +8769,13 @@ void FullscreenUI::OpenLeaderboardsWindow()
   const auto lock = Achievements::GetLock();
   if (!Achievements::IsActive() || !Achievements::HasLeaderboards())
   {
-    ShowToast(std::string(), Achievements::IsActive() ? FSUI_STR("This game has no leaderboards.") :
-                                                        FSUI_STR("Achievements are not enabled."));
+    GPUThread::RunOnThread([]() {
+      if (!Initialize())
+        return;
+
+      ShowToast(std::string(), Achievements::IsActive() ? FSUI_STR("This game has no leaderboards.") :
+                                                          FSUI_STR("Achievements are not enabled."));
+    });
     return;
   }
 
