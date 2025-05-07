@@ -32,7 +32,7 @@
       <Outputs>$(ProjectDir)scmversion.cpp</Outputs>
     </CustomBuildStep>
     <ClCompile>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">-march=znver4 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-march=znver4 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="..\..\dep\msvc\vsprops\Targets.props" />
