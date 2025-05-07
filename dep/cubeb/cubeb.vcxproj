@@ -55,7 +55,7 @@
       <AdditionalDependencies Condition="'$(Platform)'!='ARM64'">ksuser.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Lib>
     <ClCompile>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">-march=znver4 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>-march=znver4 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="..\msvc\vsprops\Targets.props" />
