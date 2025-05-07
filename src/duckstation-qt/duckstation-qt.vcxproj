@@ -417,6 +417,7 @@
       <!-- Qt relies on RTTI for assertions in Debug builds. -->
       <RuntimeTypeInfo Condition="$(Configuration.Contains(Debug))">true</RuntimeTypeInfo>
       <AdditionalOptions Condition="$(Configuration.Contains(Clang)) And $(Configuration.Contains(Debug))">%(AdditionalOptions) /clang:-frtti</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">-march=znver4 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="$(Configuration.Contains(Clang))">
