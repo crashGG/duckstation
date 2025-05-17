@@ -218,14 +218,14 @@ static void CancelHashDatabaseRequests();
 
 static void FetchHashLibraryCallback(int result, const char* error_message, rc_client_hash_library_t* list,
                                      rc_client_t* client, void* callback_userdata);
-static void FetchAllProgressCallback(int result, const char* error_message, rc_client_all_progress_list_t* list,
+static void FetchAllProgressCallback(int result, const char* error_message, rc_client_all_user_progress_t* list,
                                      rc_client_t* client, void* callback_userdata);
 
-static void BuildHashDatabase(const rc_client_hash_library_t* hashlib, const rc_client_all_progress_list_t* allprog);
+static void BuildHashDatabase(const rc_client_hash_library_t* hashlib, const rc_client_all_user_progress_t* allprog);
 static bool SortAndSaveHashDatabase(Error* error);
 
 static FileSystem::ManagedCFilePtr OpenProgressDatabase(bool for_write, bool truncate, Error* error);
-static void BuildProgressDatabase(const rc_client_all_progress_list_t* allprog);
+static void BuildProgressDatabase(const rc_client_all_user_progress_t* allprog);
 static void UpdateProgressDatabase(bool force);
 static void ClearProgressDatabase();
 
@@ -295,7 +295,7 @@ struct State
   rc_client_async_handle_t* fetch_hash_library_request = nullptr;
   rc_client_hash_library_t* fetch_hash_library_result = nullptr;
   rc_client_async_handle_t* fetch_all_progress_request = nullptr;
-  rc_client_all_progress_list_t* fetch_all_progress_result = nullptr;
+  rc_client_all_user_progress_t* fetch_all_progress_result = nullptr;
 
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
   rc_client_async_handle_t* load_raintegration_request = nullptr;
@@ -858,7 +858,10 @@ void Achievements::Shutdown()
 
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
   if (s_state.using_raintegration)
+  {
     UnloadRAIntegration();
+    return;
+  }
 #endif
 
   DestroyClient(&s_state.client, &s_state.http_downloader);
@@ -1585,7 +1588,7 @@ void Achievements::HandleSubsetCompleteEvent(const rc_client_event_t* event)
   INFO_LOG("Subset {} ({}) complete", event->subset->title, event->subset->id);
   UpdateGameSummary(false, false);
 
-  if (g_settings.achievements_notifications && event->subset->badge_name)
+  if (g_settings.achievements_notifications && event->subset->badge_name[0] != '\0')
   {
     // Need to grab the icon for the subset.
     std::string badge_path = GetLocalImagePath(event->subset->badge_name, RC_IMAGE_TYPE_GAME);
@@ -2651,7 +2654,7 @@ void Achievements::DrawPauseMenuOverlays(float start_pos_y)
                 TRANSLATE_DISAMBIG("Achievements", "Achievements Unlocked", "Pause Menu"));
     const float unlocked_fraction = static_cast<float>(s_state.game_summary.num_unlocked_achievements) /
                                     static_cast<float>(s_state.game_summary.num_core_achievements);
-    buffer.format("{}%", static_cast<u32>(std::ceil(unlocked_fraction * 100.0f)));
+    buffer.format("{}%", static_cast<u32>(std::round(unlocked_fraction * 100.0f)));
     text_size = UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(buffer));
     dl->AddText(UIStyle.MediumFont, UIStyle.MediumFont->FontSize,
                 ImVec2(text_pos.x + (box_content_width - text_size.x), text_pos.y), text_color,
@@ -2884,7 +2887,7 @@ void Achievements::DrawAchievementsWindow()
                             ImGui::GetColorU32(UIStyle.SecondaryColor), progress_rounding);
         }
 
-        text.format("{}%", static_cast<int>(std::round(fraction * 100.0f)));
+        text.format("{}%", static_cast<u32>(std::round(fraction * 100.0f)));
         text_size =
           UIStyle.MediumFont->CalcTextSizeA(UIStyle.MediumFont->FontSize, FLT_MAX, 0.0f, IMSTR_START_END(text));
         const ImVec2 text_pos(
@@ -3957,7 +3960,7 @@ void Achievements::BeginRefreshHashDatabase()
   s_state.fetch_hash_library_request =
     rc_client_begin_fetch_hash_library(s_state.client, RC_CONSOLE_PLAYSTATION, FetchHashLibraryCallback, nullptr);
   s_state.fetch_all_progress_request =
-    rc_client_begin_fetch_all_progress_list(s_state.client, RC_CONSOLE_PLAYSTATION, FetchAllProgressCallback, nullptr);
+    rc_client_begin_fetch_all_user_progress(s_state.client, RC_CONSOLE_PLAYSTATION, FetchAllProgressCallback, nullptr);
   if (!s_state.fetch_hash_library_request || !s_state.fetch_hash_library_request)
   {
     ERROR_LOG("Failed to create hash database refresh requests.");
@@ -3981,7 +3984,7 @@ void Achievements::FetchHashLibraryCallback(int result, const char* error_messag
   FinishRefreshHashDatabase();
 }
 
-void Achievements::FetchAllProgressCallback(int result, const char* error_message, rc_client_all_progress_list_t* list,
+void Achievements::FetchAllProgressCallback(int result, const char* error_message, rc_client_all_user_progress_t* list,
                                             rc_client_t* client, void* callback_userdata)
 {
   s_state.fetch_all_progress_request = nullptr;
@@ -4001,7 +4004,7 @@ void Achievements::CancelHashDatabaseRequests()
 {
   if (s_state.fetch_all_progress_result)
   {
-    rc_client_destroy_all_progress_list(s_state.fetch_all_progress_result);
+    rc_client_destroy_all_user_progress(s_state.fetch_all_progress_result);
     s_state.fetch_all_progress_result = nullptr;
   }
   if (s_state.fetch_all_progress_request)
@@ -4037,7 +4040,7 @@ void Achievements::FinishRefreshHashDatabase()
   BuildProgressDatabase(s_state.fetch_all_progress_result);
 
   // tidy up
-  rc_client_destroy_all_progress_list(s_state.fetch_all_progress_result);
+  rc_client_destroy_all_user_progress(s_state.fetch_all_progress_result);
   s_state.fetch_all_progress_result = nullptr;
   rc_client_destroy_hash_library(s_state.fetch_hash_library_result);
   s_state.fetch_hash_library_result = nullptr;
@@ -4047,7 +4050,7 @@ void Achievements::FinishRefreshHashDatabase()
 }
 
 void Achievements::BuildHashDatabase(const rc_client_hash_library_t* hashlib,
-                                     const rc_client_all_progress_list_t* allprog)
+                                     const rc_client_all_user_progress_t* allprog)
 {
   std::vector<HashDatabaseEntry> dbentries;
   dbentries.reserve(hashlib->num_entries);
@@ -4076,8 +4079,8 @@ void Achievements::BuildHashDatabase(const rc_client_hash_library_t* hashlib,
   }
 
   // fill in achievement counts
-  for (const rc_client_all_progress_list_entry_t& entry :
-       std::span<const rc_client_all_progress_list_entry_t>(allprog->entries, allprog->num_entries))
+  for (const rc_client_all_user_progress_entry_t& entry :
+       std::span<const rc_client_all_user_progress_entry_t>(allprog->entries, allprog->num_entries))
   {
     // can have multiple hashes with the same game id, update count on all of them
     bool found_one = false;
@@ -4105,6 +4108,11 @@ void Achievements::BuildHashDatabase(const rc_client_hash_library_t* hashlib,
 bool Achievements::CreateHashDatabaseFromSeedDatabase(const std::string& path, Error* error)
 {
   std::optional<std::string> yaml_data = Host::ReadResourceFileToString("achievement_hashlib.yaml", false, error);
+  if (!yaml_data.has_value())
+  {
+    Error::SetStringView(error, "Seed database is missing.");
+    return false;
+  }
 
   const ryml::Tree yaml =
     ryml::parse_in_place(to_csubstr(path), c4::substr(reinterpret_cast<char*>(yaml_data->data()), yaml_data->size()));
@@ -4371,7 +4379,7 @@ FileSystem::ManagedCFilePtr Achievements::OpenProgressDatabase(bool for_write, b
   return nullptr;
 }
 
-void Achievements::BuildProgressDatabase(const rc_client_all_progress_list_t* allprog)
+void Achievements::BuildProgressDatabase(const rc_client_all_user_progress_t* allprog)
 {
   // no point storing it in memory, just write directly to the file
   Error error;
@@ -4398,8 +4406,8 @@ void Achievements::BuildProgressDatabase(const rc_client_all_progress_list_t* al
   writer.WriteU32(games_with_unlocks);
   if (games_with_unlocks > 0)
   {
-    for (const rc_client_all_progress_list_entry_t& entry :
-         std::span<const rc_client_all_progress_list_entry_t>(allprog->entries, allprog->num_entries))
+    for (const rc_client_all_user_progress_entry_t& entry :
+         std::span<const rc_client_all_user_progress_entry_t>(allprog->entries, allprog->num_entries))
     {
       if ((entry.num_unlocked_achievements + entry.num_unlocked_achievements_hardcore) == 0)
         continue;
@@ -4744,8 +4752,7 @@ void Achievements::FinishLoadRAIntegrationOnCPUThread()
 
 void Achievements::UnloadRAIntegration()
 {
-  if (!s_state.using_raintegration)
-    return;
+  DebugAssert(s_state.using_raintegration && s_state.client);
 
   if (s_state.load_raintegration_request)
   {
@@ -4753,9 +4760,16 @@ void Achievements::UnloadRAIntegration()
     s_state.load_raintegration_request = nullptr;
   }
 
-  rc_client_unload_raintegration(s_state.client);
+  // Have to unload it on the UI thread, otherwise the DLL unload races the UI thread message processing.
+  s_state.http_downloader->WaitForAllRequests();
+  s_state.http_downloader.reset();
   s_state.raintegration_loading = false;
   s_state.using_raintegration = false;
+  Host::RunOnUIThread([client = std::exchange(s_state.client, nullptr)]() {
+    rc_client_unload_raintegration(client);
+    rc_client_destroy(client);
+  });
+
   Host::OnRAIntegrationMenuChanged();
 }
 
