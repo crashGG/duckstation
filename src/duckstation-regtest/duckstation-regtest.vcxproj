@@ -4,11 +4,6 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{3029310E-4211-4C87-801A-72E130A648EF}</ProjectGuid>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <ClCompile>
-      <AdditionalOptions>-march=znver4 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="regtest_host.cpp" />
   </ItemGroup>
