@@ -1425,6 +1425,11 @@ std::unique_ptr<INISettingsInterface> System::GetGameSettingsInterface(const Gam
   std::unique_ptr<INISettingsInterface> ret;
   std::string path = GetGameSettingsPath(serial, false);
 
+  // 假如存在zzz.ini就指定此文件为游戏个性设置
+  std::string pathzzz = GetGameSettingsPath("zzz", false);
+  if (FileSystem::FileExists(pathzzz.c_str()))
+	  path=pathzzz;
+  
   if (FileSystem::FileExists(path.c_str()))
   {
     if (!quiet)
