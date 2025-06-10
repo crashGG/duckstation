@@ -886,53 +886,56 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
     uint Q = src(-2, +0), R = src(+2, +0);
     uint Bl = luma(B), Dl = luma(D), El = luma(E), Fl = luma(F), Hl = luma(H);
 
-    // 提取公共输出逻辑
-    auto sendDefaultColor = [&]() {
-      uint res = E;  // 直接使用中心像素E
+    // 默认使用中心像素E
+	uint res = E;
+	
+    // 以"凸"字形态检查避免长直线边缘的单像素毛刺棘突
+    if (A == B && B == C && E == H && A != D && C != F && rgb_distance(D, F) < 0.2 && rgb_distance(B, E) > 0.6) {
       ialpha = float(res != 0u);
       texcol = unpackUnorm4x8(res);
-      return;
-    };
-	
-// 以"凸"字形态检查避免长直线边缘的单像素毛刺棘突
-    if (A == B && B == C && E == H && A != D && C != F && rgb_distance(D, F) < 0.2 && rgb_distance(B, E) > 0.6) {
-      sendDefaultColor();
       return;
     }
 
     if (A == D && D == G && E == F && A != B && G != H && rgb_distance(B, H) < 0.2 && rgb_distance(D, E) > 0.6) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
     if (C == F && F == I && E == D && B != C && H != I && rgb_distance(B, H) < 0.2 && rgb_distance(E, F) > 0.6) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
     if (G == H && H == I && B == E && D != G && F != I && rgb_distance(D, F) < 0.2 && rgb_distance(E, H) > 0.6) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
     // 以"田"字检查每4像素交叉的状态,并传输周围五个像素做形态判断
     if (A == E && B == D && A != B && countPatternMatches(A, B, C, F, I, H, G)) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
     if (C == E && B == F && C != B && countPatternMatches(C, B, A, D, G, H, I)) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
     if (G == E && D == H && G != H && countPatternMatches(G, H, I, F, C, B, A)) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
     if (I == E && F == H && I != H && countPatternMatches(I, H, G, D, A, B, C)) {
-      sendDefaultColor();
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
       return;
     }
 
