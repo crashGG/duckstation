@@ -484,8 +484,8 @@ bool QtHost::InitializeConfig(std::string settings_filename)
 
   const bool settings_exists = FileSystem::FileExists(settings_filename.c_str());
   INFO_LOG("Loading config from {}.", settings_filename);
-  s_base_settings_interface = std::make_unique<INISettingsInterface>(std::move(settings_filename));
-  Host::Internal::SetBaseSettingsLayer(s_base_settings_interface.get());
+  s_state.base_settings_interface.SetPath(std::move(settings_filename));
+  Host::Internal::SetBaseSettingsLayer(&s_base_settings_interface);
 
   uint settings_version;
   if (!settings_exists || !s_base_settings_interface.Load() ||
