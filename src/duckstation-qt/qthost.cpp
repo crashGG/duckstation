@@ -97,7 +97,7 @@ namespace QtHost {
 static bool PerformEarlyHardwareChecks();
 static bool EarlyProcessStartup();
 static void RegisterTypes();
-static bool InitializeConfig();
+static bool InitializeConfig(std::string settings_filename);
 static void SetAppRoot();
 static void SetResourcesDirectory();
 static bool SetDataDirectory();
@@ -474,16 +474,18 @@ bool QtHost::DownloadFileFromZip(QWidget* parent, const QString& title, std::str
   return true;
 }
 
-bool QtHost::InitializeConfig()
+bool QtHost::InitializeConfig(std::string settings_filename)
 {
   if (!SetCriticalFolders())
     return false;
 
-  std::string settings_path = Path::Combine(EmuFolders::DataRoot, "settings.ini");
-  const bool settings_exists = FileSystem::FileExists(settings_path.c_str());
-  INFO_LOG("Loading config from {}.", settings_path);
-  s_base_settings_interface.SetPath(std::move(settings_path));
-  Host::Internal::SetBaseSettingsLayer(&s_base_settings_interface);
+  if (settings_filename.empty())
+    settings_filename = Path::Combine(EmuFolders::DataRoot, "settings.ini");
+
+  const bool settings_exists = FileSystem::FileExists(settings_filename.c_str());
+  INFO_LOG("Loading config from {}.", settings_filename);
+  s_base_settings_interface = std::make_unique<INISettingsInterface>(std::move(settings_filename));
+  Host::Internal::SetBaseSettingsLayer(s_base_settings_interface.get());
 
   uint settings_version;
   if (!settings_exists || !s_base_settings_interface.Load() ||
@@ -2749,6 +2751,8 @@ void QtHost::PrintCommandLineHelp(const char* progname)
   std::fprintf(stderr, "  -nofullscreen: Prevents fullscreen mode from triggering if enabled.\n");
   std::fprintf(stderr, "  -nogui: Disables main window from being shown, exits on shutdown.\n");
   std::fprintf(stderr, "  -bigpicture: Automatically starts big picture UI.\n");
+  std::fprintf(stderr, "  -settings <filename>: Loads a custom settings configuration from the\n"
+                       "    specified filename. Default settings applied if file not found.\n");
   std::fprintf(stderr, "  -earlyconsole: Creates console as early as possible, for logging.\n");
   std::fprintf(stderr, "  --: Signals that no more arguments will follow and the remaining\n"
                        "    parameters make up the filename. Use when the filename contains\n"
@@ -2769,6 +2773,7 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
 {
   const QStringList args(app.arguments());
   std::optional<s32> state_index;
+  std::string settings_filename;
   bool starting_bios = false;
 
   bool no_more_args = false;
@@ -2859,6 +2864,12 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
         AutoBoot(autoboot)->override_fullscreen = false;
         continue;
       }
+      else if (CHECK_ARG_PARAM("-settings"))
+      {
+        settings_filename = args[++i].toStdString();
+        INFO_LOG("Command Line: Overriding settings filename: {}", settings_filename);
+        continue;
+      }
       else if (CHECK_ARG("-bigpicture"))
       {
         INFO_LOG("Command Line: Starting big picture mode.");
@@ -2901,7 +2912,7 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
   }
 
   // To do anything useful, we need the config initialized.
-  if (!InitializeConfig())
+  if (!InitializeConfig(std::move(settings_filename)))
   {
     // NOTE: No point translating this, because no config means the language won't be loaded anyway.
     QMessageBox::critical(nullptr, QStringLiteral("Error"), QStringLiteral("Failed to initialize config."));
