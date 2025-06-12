@@ -742,7 +742,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
     ss << R"(
 uint luma(uint C) {
     uint alpha = (C & 0xFF000000u) >> 24;
-    return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu) + 1u) * (256u - alpha);
+    return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu)) + (255u - alpha) * 3;
 }
 
 bool all_eq2(uint B, uint A0, uint A1) {
@@ -777,10 +777,10 @@ float rgb_distance(uint a, uint b)
     return distance(ca.rgb, cb.rgb);
 }
 
-// 计算两个ABGR8颜色之间的亮度差并归一,实测luma值在0.001~0.9998 之间
+// 计算两个ABGR8颜色之间的亮度差并归一
 float luma_distance(uint a, uint b)
 {
-    return abs(luma(a) - luma(b)) * 0.00000509f;  // 除以(255.0 * 256.0)的乘法替代;
+    return abs(luma(a) - luma(b)) * 0.0006535948f;  // 除以1530的乘法替代
 }
 
 /*=============================================================================
