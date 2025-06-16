@@ -881,13 +881,14 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
 
   uint J = E, K = E, L = E, M = E;
 
+  // 默认使用中心像素E
+  uint res = E;
+
   if (((A ^ E) | (B ^ E) | (C ^ E) | (D ^ E) | (F ^ E) | (G ^ E) | (H ^ E) | (I ^ E)) != 0u) {
     uint P = src(+0, -2), S = src(+0, +2);
     uint Q = src(-2, +0), R = src(+2, +0);
     uint Bl = luma(B), Dl = luma(D), El = luma(E), Fl = luma(F), Hl = luma(H);
 
-    // 默认使用中心像素E
-	uint res = E;
 	
     // 以"凸"字形态检查避免长直线边缘的单像素毛刺棘突
     if (A == B && B == C && E == H && A != D && C != F && rgb_distance(D, F) < 0.2 && rgb_distance(B, E) > 0.6) {
