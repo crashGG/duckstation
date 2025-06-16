@@ -780,7 +780,7 @@ float rgb_distance(uint a, uint b)
 // 计算两个ABGR8颜色之间的亮度差并归一
 float luma_distance(uint a, uint b)
 {
-    return abs(luma(a) - luma(b)) * 0.0006535948f;  // 除以1530的乘法替代
+    return abs(int(luma(a)) - int(luma(b))) * 0.0006535948f;  // 除以 255x6 的乘法替代
 }
 
 /*=============================================================================
