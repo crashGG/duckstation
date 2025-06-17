@@ -814,7 +814,7 @@ uint admix2d(uint a, uint d) {
     bool aIsTransparent = a_float.a < 0.01;
     bool dIsTransparent = d_float.a < 0.01;
     
-    if (aIsBlack) {
+    if (aIsBlack || aIsTransparent)) {
         return d;
     }
     
