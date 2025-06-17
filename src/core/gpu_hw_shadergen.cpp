@@ -770,20 +770,21 @@ bool none_eq4(uint B, uint A0, uint A1, uint A2, uint A3) {
     return B != A0 && B != A1 && B != A2 && B != A3;
 }
 
-//二段弱式混合，混/无 
-uint admix2d(uint a, uint b) {
+//二段弱式混合，混/无
+/*
+uint admix2d(uint a, uint d) {
     float4 a_float = unpackUnorm4x8(a);
-    float4 b_float = unpackUnorm4x8(b);
-    float3 diff_rgb = a_float.rgb - b_float.rgb;
+    float4 b_float = unpackUnorm4x8(d);
+    float3 diff_rgb = a_float.rgb - d_float.rgb;
     float rgbDist = dot(diff_rgb, diff_rgb);
     
     // 合并条件判断（减少分支）
     bool aIsBlack = dot(a_float.rgb, a_float.rgb) < 0.01;
     bool aIsTransparent = a_float.a < 0.01;
-    bool bIsTransparent = b_float.a < 0.01;
+    bool dIsTransparent = d_float.a < 0.01;
     
     if (aIsBlack || aIsTransparent) {
-        return b;
+        return d;
     }
     if (bIsTransparent) {
         return a;
@@ -792,10 +793,39 @@ uint admix2d(uint a, uint b) {
     float4 result;
     if (rgbDist < 1.0) {
         // 近距离：线性混合 RGB 和 Alpha
-        result = (a_float + b_float) * 0.5;
+        result = (a_float + d_float) * 0.5;
     } else {
-        // 远距离：返回 b
-        result = b_float;
+        // 远距离：返回 d
+        result = d_float;
+    }
+    
+    // 重新打包为 uint
+    return packUnorm4x8(result);
+}*/
+
+uint admix2d(uint a, uint d) {
+    float4 a_float = unpackUnorm4x8(a);
+    float4 b_float = unpackUnorm4x8(d);
+    float3 diff_rgb = a_float.rgb - d_float.rgb;
+    float rgbDist = dot(diff_rgb, diff_rgb);
+    
+    // 合并条件判断（减少分支）
+    bool aIsBlack = dot(a_float.rgb, a_float.rgb) < 0.01;
+    bool aIsTransparent = a_float.a < 0.01;
+    bool dIsTransparent = d_float.a < 0.01;
+    
+    if (aIsBlack) {
+        return d;
+    }
+    
+    // 根据距离决定混合方式
+    float4 result;
+    if (rgbDist < 1.0) {
+        // 近距离：线性混合 RGB 和 Alpha
+        result = (a_float + d_float) * 0.5;
+    } else {
+        // 远距离：返回 d
+        result = d_float;
     }
     
     // 重新打包为 uint
