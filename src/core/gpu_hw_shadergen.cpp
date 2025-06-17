@@ -805,7 +805,7 @@ uint admix2d(uint a, uint d) {
 
 uint admix2d(uint a, uint d) {
     float4 a_float = unpackUnorm4x8(a);
-    float4 b_float = unpackUnorm4x8(d);
+    float4 d_float = unpackUnorm4x8(d);
     float3 diff_rgb = a_float.rgb - d_float.rgb;
     float rgbDist = dot(diff_rgb, diff_rgb);
     
