@@ -742,11 +742,8 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
      */
     ss << R"(
 uint luma(uint C) {
-    uint alpha = (C >> 24) & 0xFFu;  // 简化位运算
-    if (alpha == 0u) return 1530u; // 节省计算过程，并确保全透明像素输出最高值1530
-    uint rgbSum = ((C >> 16) & 0xFFu) + ((C >> 8) & 0xFFu) + (C & 0xFFu);
-    float factor = 1.0f + (255.0f - alpha) * 0.00392157f; // 除以255的乘法替代
-    return (uint)(rgbSum * factor);
+    uint alpha = (C & 0xFF000000u) >> 24;
+    return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu) + 1u) * (256u - alpha);
 }
 
 bool all_eq2(uint B, uint A0, uint A1) {
