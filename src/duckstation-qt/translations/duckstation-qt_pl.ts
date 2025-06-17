@@ -1892,7 +1892,7 @@ Nieprzeczytane wiadomości: {}</translation>
     </message>
 </context>
 <context>
-    <name>AutoUpdaterWindow</name>
+    <name>AutoUpdaterDialog</name>
     <message>
         <location filename="../autoupdaterdialog.ui" line="17"/>
         <location filename="../autoupdaterdialog.cpp" line="337"/>

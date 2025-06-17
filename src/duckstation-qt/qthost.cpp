@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "qthost.h"
-#include "autoupdaterwindow.h"
+#include "autoupdaterdialog.h"
 #include "displaywidget.h"
 #include "logwindow.h"
 #include "mainwindow.h"
@@ -814,32 +814,6 @@ void EmuThread::stopFullscreenUI()
     m_is_fullscreen_ui_started = false;
     emit fullscreenUIStartedOrStopped(false);
   }
-}
-
-void EmuThread::exitFullscreenUI()
-{
-  if (!isCurrentThread())
-  {
-    QMetaObject::invokeMethod(this, &EmuThread::exitFullscreenUI, Qt::QueuedConnection);
-    return;
-  }
-
-  const bool was_in_nogui_mode = std::exchange(s_nogui_mode, false);
-
-  // force a return to main window before exiting, otherwise qt will terminate the application
-  if (!m_is_rendering_to_main)
-  {
-    m_is_fullscreen = false;
-    m_is_rendering_to_main = true;
-    GPUThread::UpdateDisplayWindow(false);
-  }
-
-  // then stop as normal
-  stopFullscreenUI();
-
-  // if we were in nogui mode, the game list won't have been populated yet. do it now.
-  if (was_in_nogui_mode)
-    g_main_window->refreshGameList(false);
 }
 
 void EmuThread::bootSystem(std::shared_ptr<SystemBootParameters> params)
@@ -2426,19 +2400,13 @@ bool Host::ResourceFileExists(std::string_view filename, bool allow_override)
 std::optional<DynamicHeapArray<u8>> Host::ReadResourceFile(std::string_view filename, bool allow_override, Error* error)
 {
   const std::string path = QtHost::GetResourcePath(filename, allow_override);
-  const std::optional<DynamicHeapArray<u8>> ret = FileSystem::ReadBinaryFile(path.c_str(), error);
-  if (!ret.has_value())
-    Error::AddPrefixFmt(error, "Failed to read resource file '{}': ", filename);
-  return ret;
+  return FileSystem::ReadBinaryFile(path.c_str(), error);
 }
 
 std::optional<std::string> Host::ReadResourceFileToString(std::string_view filename, bool allow_override, Error* error)
 {
   const std::string path = QtHost::GetResourcePath(filename, allow_override);
-  const std::optional<std::string> ret = FileSystem::ReadFileToString(path.c_str(), error);
-  if (!ret.has_value())
-    Error::AddPrefixFmt(error, "Failed to read resource file '{}': ", filename);
-  return ret;
+  return FileSystem::ReadFileToString(path.c_str(), error);
 }
 
 std::optional<std::time_t> Host::GetResourceFileTimestamp(std::string_view filename, bool allow_override)
@@ -2644,7 +2612,7 @@ void Host::RequestExitApplication(bool allow_confirm)
 
 void Host::RequestExitBigPicture()
 {
-  g_emu_thread->exitFullscreenUI();
+  g_emu_thread->stopFullscreenUI();
 }
 
 std::optional<WindowInfo> Host::GetTopLevelWindowInfo()
@@ -2920,7 +2888,7 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
       }
       else if (CHECK_ARG("-updatecleanup"))
       {
-        s_cleanup_after_update = AutoUpdaterWindow::isSupported();
+        s_cleanup_after_update = AutoUpdaterDialog::isSupported();
         continue;
       }
       else if (CHECK_ARG("--"))
@@ -3041,13 +3009,13 @@ int main(int argc, char* argv[])
 
   // Remove any previous-version remanants.
   if (s_cleanup_after_update)
-    AutoUpdaterWindow::cleanupAfterUpdate();
+    AutoUpdaterDialog::cleanupAfterUpdate();
 
   // Set theme before creating any windows.
   QtHost::UpdateApplicationTheme();
 
   // Build warning.
-  AutoUpdaterWindow::warnAboutUnofficialBuild();
+  AutoUpdaterDialog::warnAboutUnofficialBuild();
 
   // Start logging early.
   LogWindow::updateSettings();

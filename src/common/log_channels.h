@@ -4,6 +4,7 @@
 #define ENUMERATE_LOG_CHANNELS(X)                                                                                      \
   X(Achievements)                                                                                                      \
   X(AudioStream)                                                                                                       \
+  X(AutoUpdaterDialog)                                                                                                 \
   X(BIOS)                                                                                                              \
   X(Bus)                                                                                                               \
   X(CDImage)                                                                                                           \

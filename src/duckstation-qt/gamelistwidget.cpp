@@ -350,6 +350,17 @@ void GameListModel::invalidateCoverForPath(const std::string& path)
   emit dataChanged(mi, mi, {Qt::DecorationRole});
 }
 
+QString GameListModel::formatTimespan(time_t timespan)
+{
+  // avoid an extra string conversion
+  const u32 hours = static_cast<u32>(timespan / 3600);
+  const u32 minutes = static_cast<u32>((timespan % 3600) / 60);
+  if (hours > 0)
+    return qApp->translate("GameList", "%n hours", "", hours);
+  else
+    return qApp->translate("GameList", "%n minutes", "", minutes);
+}
+
 const QPixmap& GameListModel::getIconPixmapForEntry(const GameList::Entry* ge) const
 {
   // We only do this for discs/disc sets for now.
@@ -558,7 +569,7 @@ QVariant GameListModel::data(const QModelIndex& index, int role, const GameList:
           if (ge->total_played_time == 0)
             return {};
           else
-            return QtUtils::StringViewToQString(GameList::FormatTimespan(ge->total_played_time, true));
+            return formatTimespan(ge->total_played_time);
         }
 
         case Column_LastPlayed:
@@ -571,21 +582,6 @@ QVariant GameListModel::data(const QModelIndex& index, int role, const GameList:
           else
             return {};
         }
-      }
-    }
-
-    case Qt::TextAlignmentRole:
-    {
-      switch (index.column())
-      {
-        case Column_FileSize:
-        case Column_UncompressedSize:
-          return (Qt::AlignRight | Qt::AlignVCenter).toInt();
-
-        case Column_Serial:
-        case Column_Year:
-        case Column_Players:
-          return (Qt::AlignCenter | Qt::AlignVCenter).toInt();
 
         default:
           return {};
@@ -606,14 +602,20 @@ QVariant GameListModel::data(const QModelIndex& index, int role, const GameList:
       switch (index.column())
       {
         case Column_Icon:
+        {
           return getIconPixmapForEntry(ge);
+        }
 
         case Column_Region:
+        {
           return getFlagPixmapForEntry(ge);
+        }
 
         case Column_Compatibility:
+        {
           return m_compatibility_pixmaps[static_cast<u32>(ge->dbentry ? ge->dbentry->compatibility :
                                                                         GameDatabase::CompatibilityRating::Unknown)];
+        }
 
         case Column_Cover:
         {
@@ -626,11 +628,16 @@ QVariant GameListModel::data(const QModelIndex& index, int role, const GameList:
           const_cast<GameListModel*>(this)->loadOrGenerateCover(ge);
           return *m_cover_pixmap_cache.Insert(ge->path, m_loading_pixmap);
         }
+        break;
+
+        default:
+          return {};
       }
+
+      default:
+        return {};
     }
   }
-
-  return {};
 }
 
 QVariant GameListModel::headerData(int section, Qt::Orientation orientation, int role) const
@@ -1605,7 +1612,7 @@ void GameListListView::resizeColumnsToFit()
 {
   QtUtils::ResizeColumnsForTableView(this, {
                                              45,  // type
-                                             95,  // serial
+                                             80,  // code
                                              -1,  // title
                                              -1,  // file title
                                              200, // developer
@@ -1632,7 +1639,7 @@ void GameListListView::loadColumnVisibilitySettings()
 {
   static constexpr std::array<bool, GameListModel::Column_Count> DEFAULT_VISIBILITY = {{
     true,  // type
-    true,  // serial
+    true,  // code
     true,  // title
     false, // file title
     false, // developer

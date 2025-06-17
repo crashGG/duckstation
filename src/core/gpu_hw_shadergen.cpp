@@ -727,10 +727,9 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
 
 )";
   }
-  else if (texture_filter == GPUTextureFilter::MMPX || texture_filter == GPUTextureFilter::MMPXEnhanced)
+  else if (texture_filter == GPUTextureFilter::MMPX)
   {
     DefineMacro(ss, "TEXTURE_ALPHA_BLENDING", false);
-    DefineMacro(ss, "MMPX_ENHANCED", (texture_filter == GPUTextureFilter::MMPXEnhanced));
 
     ss << "#define src(xoffs, yoffs) packUnorm4x8(SampleFromVRAM(texpage, clamp(bcoords + float2((xoffs), (yoffs)), "
           "uv_limits.xy, uv_limits.zw)))\n";
@@ -743,11 +742,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
     ss << R"(
 uint luma(uint C) {
     uint alpha = (C & 0xFF000000u) >> 24;
-#if MMPX_ENHANCED
-    return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu)) + (255u - alpha) * 3;
-#else
     return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu) + 1u) * (256u - alpha);
-#endif
 }
 
 bool all_eq2(uint B, uint A0, uint A1) {
@@ -774,117 +769,6 @@ bool none_eq4(uint B, uint A0, uint A1, uint A2, uint A3) {
     return B != A0 && B != A1 && B != A2 && B != A3;
 }
 
-#if MMPX_ENHANCED
-
-// Calculate the RGB distance between two ABGR8 colors
-float rgb_distance(uint a, uint b)
-{
-    vec4 ca = unpackUnorm4x8(a);
-    vec4 cb = unpackUnorm4x8(b);
-    return distance(ca.rgb, cb.rgb);
-}
-
-// Calculate the luminance difference between two ABGR8 colors and normalize it
-float luma_distance(uint a, uint b)
-{
-    return abs(int(luma(a)) - int(luma(b))) * 0.0006535948f;  // Multiplicative replacement for division by 1530
-}
-
-/*=============================================================================
-Helper function for 4-pixel intersection pattern matching: Scores the number of 
-matches for specific morphological positions. Three morphological conditions 
-need to be met with a total score of 6.
-                ┌───┬───┬───┐                ┌───┬───┬───┐
-                │ A │ B │ C │                │ A │ B │ 1 │
-                ├───┼───┼───┤                ├───┼───┼───┤
-                │ D │ E │ F │       =>   L   │ B │ A │ 2 │
-                ├───┼───┼───┤                ├───┼───┼───┤
-                │ G │ H │ I │                │ 5 │ 4 │ 3 │
-                └───┴───┴───┘                └───┴───┴───┘
-=============================================================================*/
-
-bool countPatternMatches(uint LA, uint LB, uint L1, uint L2, uint L3, uint L4, uint L5) {
-
-    int score1 = 0; // Diagonal pattern 1
-    int score2 = 0; // Diagonal pattern 2
-    int score3 = 0; // Horizontal/vertical line pattern
-    int scoreBonus = 0;
-    
-    // Jointly judge the visual difference between two pixels using RGB distance and luminance distance
-    float pixelDist = rgb_distance(LA, LB)*0.356822 + luma_distance(LA, LB)*0.382; // The ratio is the golden ratio
-
-    // Increase details for very similar colors and reduce details for highly contrasting colors (font edges).
-    if (pixelDist < 0.12) { // Colors are quite similar
-        scoreBonus += 1;
-    } else if (pixelDist > 0.9) { // Black and white contrast
-        scoreBonus -= 1;
-    } 
-
-    // Diagonal patterns use a penalty system: intersections deduct points, meeting conditions adds points back
-    // 1. Diagonal pattern ╲ (Condition: B = 2 or 4)
-    if (LB == L2 || LB == L4) {
-        score1 -= int(LB == L2 && LA == L1) * 1;    	// A-1, B-2 form an intersection, deduct points
-        score1 -= int(LB == L4 && LA == L5) * 1;   		// A-5, B-4 form an intersection, deduct points
-
-        // If the following triangular patterns are met, they can offset the intersection penalties
-        score1 += int(LB == L1 && L1 == L2) * 1;   		// B-1-2 form a triangular pattern, add points
-        score1 += int(LB == L4 && L4 == L5) * 1;   		// B-4-5 form a triangular pattern, add points
-        score1 += int(L2 == L3 && L3 == L4) * 1;   		// 2-3-4 form a triangular pattern, add points
-        
-        score1 += scoreBonus + 6;
-    } 
-
-    // 2. Diagonal pattern ╱ (Condition: A = 1 or 5)
-    if (LA == L1 || LA == L5) {
-        score2 -= int(LB == L2 && LA == L1) * 1;    	// A-1, B-2 intersection, deduct points
-        score2 -= int(LB == L4 && LA == L5) * 1;   		// A-5, B-4 intersection, deduct points
-        score2 -= int(LA == L3) * 1;    					// A-3 forms an intersection, deduct points				
-
-        // If the following triangular patterns are met, they can offset the intersection penalties
-        score2 += int(LB == L1 && L1 == L2) * 1;   		// B-1-2 form a triangular pattern, add points
-        score2 += int(LB == L4 && L4 == L5) * 1;   		// B-4-5 form a triangular pattern, add points
-        score2 += int(L2 == L3 && L3 == L4) * 1;   		// 2-3-4 form a triangular pattern, add points
-    
-        score2 += scoreBonus + 6;
-    } 
-
-    // 3. Horizontal/vertical line pattern (Condition: horizontal continuity) uses a reward system, only pass if conditions are met
-    if (LA == L2 || LB == L1 || LA == L4 || LB == L5 || (L1 == L2 && L2 == L3) || (L3 == L4 && L4 == L5)) {
-        score3 += int(LA == L2);    	// A same as 2	+1
-        score3 += int(LB == L1);    	// B same as 1	+1
-        score3 += int(L3 == L4);    	// 3 same as 4	+1
-        score3 += int(L4 == L5);    	// 4 same as 5	+1
-        score3 += int(L3 == L4 && L4 == L5); // 3-4-5 continuous
-
-        score3 += int(LB == L5);    	// B same as 5	+1
-        score3 += int(LA == L4);    	// A same as 4	+1
-        score3 += int(L2 == L3);    	// 2 same as 3	+1
-        score3 += int(L1 == L2);    	// 1 same as 2	+1
-        score3 += int(L1 == L2 && L2 == L3); // 1-2-3 continuous
-
-        // A x 4 square	
-        score3 += int(LA == L2 && L2 == L3 && L3 == L4) * 2;
-
-        // Patch for the previous rule to avoid bubbles in large cross-shaped patterns. 
-        // Some games utilize single-sided patterns, so it's best to extend to bilateral judgment (WIP)
-        score3 -= int(LB == L1 && L1 == L5 && LA == L2 && L2 == L4)*3; 
-
-        score3 -= int(LA == L1 && LA == L5); // Deduct points if L1 and L5 are both A to avoid over-scoring 
-                                             // and the pattern turning into a diagonal pattern.
-        
-        // Bonus score
-        score3 += scoreBonus;	// Experience: Even for very similar colors, don't add too many points here, 
-                              // as some Z-shaped intersections may produce bubbles
-    } 
-
-    // Take the maximum of the four scores
-    int score = max(max(score1, score2), score3);
-    
-    return score < 6; // Need to reach 6 points
-}
-
-#endif
-
 void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limits, out float4 texcol, out float ialpha)
 {
   float2 bcoords = floor(coords);
@@ -900,69 +784,46 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
     uint Q = src(-2, +0), R = src(+2, +0);
     uint Bl = luma(B), Dl = luma(D), El = luma(E), Fl = luma(F), Hl = luma(H);
 
-#if MMPX_ENHANCED
-    if (
-      // Check for "convex" patterns to avoid single-pixel spurs on long line edges
-      (A == B && B == C && E == H && A != D && C != F && rgb_distance(D, F) < 0.2 && rgb_distance(B, E) > 0.6) ||
-      (A == D && D == G && E == F && A != B && G != H && rgb_distance(B, H) < 0.2 && rgb_distance(D, E) > 0.6) ||
-      (C == F && F == I && E == D && B != C && H != I && rgb_distance(B, H) < 0.2 && rgb_distance(E, F) > 0.6) ||
-      (G == H && H == I && B == E && D != G && F != I && rgb_distance(D, F) < 0.2 && rgb_distance(E, H) > 0.6) ||
+    // 1:1 slope rules
+    if ((D == B && D != H && D != F) && (El >= Dl || E == A) && any_eq3(E, A, C, G) && ((El < Dl) || A != D || E != P || E != Q)) J = D;
+    if ((B == F && B != D && B != H) && (El >= Bl || E == C) && any_eq3(E, A, C, I) && ((El < Bl) || C != B || E != P || E != R)) K = B;
+    if ((H == D && H != F && H != B) && (El >= Hl || E == G) && any_eq3(E, A, G, I) && ((El < Hl) || G != H || E != S || E != Q)) L = H;
+    if ((F == H && F != B && F != D) && (El >= Fl || E == I) && any_eq3(E, C, G, I) && ((El < Fl) || I != H || E != R || E != S)) M = F;
 
-      // Check each 4-pixel intersection in a "grid" pattern and pass five surrounding pixels for pattern judgment
-      (A == E && B == D && A != B && countPatternMatches(A, B, C, F, I, H, G)) ||
-      (C == E && B == F && C != B && countPatternMatches(C, B, A, D, G, H, I)) ||
-      (G == E && D == H && G != H && countPatternMatches(G, H, I, F, C, B, A)) ||
-      (I == E && F == H && I != H && countPatternMatches(I, H, G, D, A, B, C))
-    ) {
-      // Default to use center pixel E
-      // Fall through, J/K/L/M are already set to E. Setting the outputs here bugs out fxc.
-    } else {
-#endif
-      // Original MMPX logic
+    // Intersection rules
+    if ((E != F && all_eq4(E, C, I, D, Q) && all_eq2(F, B, H)) && (F != src(+3, +0))) K = M = F;
+    if ((E != D && all_eq4(E, A, G, F, R) && all_eq2(D, B, H)) && (D != src(-3, +0))) J = L = D;
+    if ((E != H && all_eq4(E, G, I, B, P) && all_eq2(H, D, F)) && (H != src(+0, +3))) L = M = H;
+    if ((E != B && all_eq4(E, A, C, H, S) && all_eq2(B, D, F)) && (B != src(+0, -3))) J = K = B;
+    if (Bl < El && all_eq4(E, G, H, I, S) && none_eq4(E, A, D, C, F)) J = K = B;
+    if (Hl < El && all_eq4(E, A, B, C, P) && none_eq4(E, D, G, I, F)) L = M = H;
+    if (Fl < El && all_eq4(E, A, D, G, Q) && none_eq4(E, B, C, I, H)) K = M = F;
+    if (Dl < El && all_eq4(E, C, F, I, R) && none_eq4(E, B, A, G, H)) J = L = D;
 
-      // 1:1 slope rules
-      if ((D == B && D != H && D != F) && (El >= Dl || E == A) && any_eq3(E, A, C, G) && ((El < Dl) || A != D || E != P || E != Q)) J = D;
-      if ((B == F && B != D && B != H) && (El >= Bl || E == C) && any_eq3(E, A, C, I) && ((El < Bl) || C != B || E != P || E != R)) K = B;
-      if ((H == D && H != F && H != B) && (El >= Hl || E == G) && any_eq3(E, A, G, I) && ((El < Hl) || G != H || E != S || E != Q)) L = H;
-      if ((F == H && F != B && F != D) && (El >= Fl || E == I) && any_eq3(E, C, G, I) && ((El < Fl) || I != H || E != R || E != S)) M = F;
+    // 2:1 slope rules
+    if (H != B) {
+      if (H != A && H != E && H != C) {
+        if (all_eq3(H, G, F, R) && none_eq2(H, D, src(+2, -1))) L = M;
+        if (all_eq3(H, I, D, Q) && none_eq2(H, F, src(-2, -1))) M = L;
+      }
 
-      // Intersection rules
-      if ((E != F && all_eq4(E, C, I, D, Q) && all_eq2(F, B, H)) && (F != src(+3, +0))) K = M = F;
-      if ((E != D && all_eq4(E, A, G, F, R) && all_eq2(D, B, H)) && (D != src(-3, +0))) J = L = D;
-      if ((E != H && all_eq4(E, G, I, B, P) && all_eq2(H, D, F)) && (H != src(+0, +3))) L = M = H;
-      if ((E != B && all_eq4(E, A, C, H, S) && all_eq2(B, D, F)) && (B != src(+0, -3))) J = K = B;
-      if (Bl < El && all_eq4(E, G, H, I, S) && none_eq4(E, A, D, C, F)) J = K = B;
-      if (Hl < El && all_eq4(E, A, B, C, P) && none_eq4(E, D, G, I, F)) L = M = H;
-      if (Fl < El && all_eq4(E, A, D, G, Q) && none_eq4(E, B, C, I, H)) K = M = F;
-      if (Dl < El && all_eq4(E, C, F, I, R) && none_eq4(E, B, A, G, H)) J = L = D;
+      if (B != I && B != G && B != E) {
+        if (all_eq3(B, A, F, R) && none_eq2(B, D, src(+2, +1))) J = K;
+        if (all_eq3(B, C, D, Q) && none_eq2(B, F, src(-2, +1))) K = J;
+      }
+    } // H !== B
 
-      // 2:1 slope rules
-      if (H != B) {
-        if (H != A && H != E && H != C) {
-          if (all_eq3(H, G, F, R) && none_eq2(H, D, src(+2, -1))) L = M;
-          if (all_eq3(H, I, D, Q) && none_eq2(H, F, src(-2, -1))) M = L;
-        }
+    if (F != D) {
+      if (D != I && D != E && D != C) {
+        if (all_eq3(D, A, H, S) && none_eq2(D, B, src(+1, +2))) J = L;
+        if (all_eq3(D, G, B, P) && none_eq2(D, H, src(+1, -2))) L = J;
+      }
 
-        if (B != I && B != G && B != E) {
-          if (all_eq3(B, A, F, R) && none_eq2(B, D, src(+2, +1))) J = K;
-          if (all_eq3(B, C, D, Q) && none_eq2(B, F, src(-2, +1))) K = J;
-        }
-      } // H !== B
-
-      if (F != D) {
-        if (D != I && D != E && D != C) {
-          if (all_eq3(D, A, H, S) && none_eq2(D, B, src(+1, +2))) J = L;
-          if (all_eq3(D, G, B, P) && none_eq2(D, H, src(+1, -2))) L = J;
-        }
-
-        if (F != E && F != A && F != G) {
-          if (all_eq3(F, C, H, S) && none_eq2(F, B, src(-1, +2))) K = M;
-          if (all_eq3(F, I, B, P) && none_eq2(F, H, src(-1, -2))) M = K;
-        }
-      } // F !== D
-#if MMPX_ENHANCED
-    }
-#endif
+      if (F != E && F != A && F != G) {
+        if (all_eq3(F, C, H, S) && none_eq2(F, B, src(-1, +2))) K = M;
+        if (all_eq3(F, I, B, P) && none_eq2(F, H, src(-1, -2))) M = K;
+      }
+    } // F !== D
   } // not constant
 
   // select quadrant based on fractional part of texture coordinates
@@ -1078,10 +939,10 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
 
 std::string GPU_HW_ShaderGen::GenerateBatchFragmentShader(
   GPU_HW::BatchRenderMode render_mode, GPUTransparencyMode transparency, GPU_HW::BatchTextureMode texture_mode,
-  GPUTextureFilter texture_filtering, bool is_blended_texture_filtering, bool upscaled, bool msaa,
-  bool per_sample_shading, bool uv_limits, bool force_round_texcoords, bool true_color, bool dithering,
-  bool scaled_dithering, bool disable_color_perspective, bool interlacing, bool scaled_interlacing, bool check_mask,
-  bool write_mask_as_depth, bool use_rov, bool use_rov_depth, bool rov_depth_test, bool rov_depth_write) const
+  GPUTextureFilter texture_filtering, bool upscaled, bool msaa, bool per_sample_shading, bool uv_limits,
+  bool force_round_texcoords, bool true_color, bool dithering, bool scaled_dithering, bool disable_color_perspective,
+  bool interlacing, bool scaled_interlacing, bool check_mask, bool write_mask_as_depth, bool use_rov,
+  bool use_rov_depth, bool rov_depth_test, bool rov_depth_write) const
 {
   DebugAssert(!true_color || !dithering); // Should not be doing dithering+true color.
 
@@ -1096,7 +957,7 @@ std::string GPU_HW_ShaderGen::GenerateBatchFragmentShader(
   const bool use_dual_source = (!shader_blending && !use_rov && m_supports_dual_source_blend &&
                                 ((render_mode != GPU_HW::BatchRenderMode::TransparencyDisabled &&
                                   render_mode != GPU_HW::BatchRenderMode::OnlyOpaque) ||
-                                 is_blended_texture_filtering));
+                                 texture_filtering != GPUTextureFilter::Nearest));
 
   std::stringstream ss;
   WriteHeader(ss, use_rov, shader_blending && !use_rov, use_dual_source);

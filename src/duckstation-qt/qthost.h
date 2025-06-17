@@ -186,7 +186,6 @@ public Q_SLOTS:
   void closeInputSources();
   void startFullscreenUI();
   void stopFullscreenUI();
-  void exitFullscreenUI();
   void refreshAchievementsAllProgress();
   void bootSystem(std::shared_ptr<SystemBootParameters> params);
   void resumeSystemFromMostRecentState();
@@ -392,6 +391,10 @@ bool SaveGameSettings(SettingsInterface* sif, bool delete_if_empty);
 
 /// Downloads the specified URL to the provided path.
 bool DownloadFile(QWidget* parent, const QString& title, std::string url, const char* path);
+
+/// Downloads the specified URL, and extracts the specified file from a zip to a provided path.
+bool DownloadFileFromZip(QWidget* parent, const QString& title, std::string url, const char* zip_filename,
+                         const char* output_path);
 
 /// Thread-safe settings access.
 void QueueSettingsSave();

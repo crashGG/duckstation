@@ -761,7 +761,7 @@ void GameList::PopulateEntryAchievements(Entry* entry, const Achievements::Progr
 void GameList::UpdateAchievementData(const std::span<u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
                                      u32 num_unlocked_hardcore)
 {
-  std::unique_lock lock(s_mutex);
+  std::unique_lock<std::recursive_mutex> lock(s_mutex);
   llvm::SmallVector<u32, 32> changed_indices;
 
   for (size_t i = 0; i < s_entries.size(); i++)
@@ -801,7 +801,7 @@ void GameList::UpdateAllAchievementData()
       WARNING_LOG("Failed to load achievements progress: {}", error.GetDescription());
   }
 
-  std::unique_lock lock(s_mutex);
+  std::unique_lock<std::recursive_mutex> lock(s_mutex);
 
   // this is pretty jank, but the frontend should collapse it into a single update
   std::vector<u32> changed_indices;
@@ -856,7 +856,7 @@ void GameList::UpdateAllAchievementData()
 
 std::unique_lock<std::recursive_mutex> GameList::GetLock()
 {
-  return std::unique_lock(s_mutex);
+  return std::unique_lock<std::recursive_mutex>(s_mutex);
 }
 
 const GameList::Entry* GameList::GetEntryByIndex(u32 index)
@@ -1437,7 +1437,7 @@ void GameList::AddPlayedTimeForSerial(const std::string& serial, std::time_t las
   VERBOSE_LOG("Add {} seconds play time to {} -> now {}", static_cast<unsigned>(add_time), serial.c_str(),
               static_cast<unsigned>(pt.total_played_time));
 
-  std::unique_lock lock(s_mutex);
+  std::unique_lock<std::recursive_mutex> lock(s_mutex);
   const GameDatabase::Entry* dbentry = GameDatabase::GetEntryForSerial(serial);
   llvm::SmallVector<u32, 32> changed_indices;
 
@@ -1476,7 +1476,7 @@ void GameList::ClearPlayedTimeForSerial(const std::string& serial)
 
   UpdatePlayedTimeFile(GetPlayedTimeFile(), serial, 0, 0);
 
-  std::unique_lock lock(s_mutex);
+  std::unique_lock<std::recursive_mutex> lock(s_mutex);
   for (GameList::Entry& entry : s_entries)
   {
     if (entry.serial != serial)
@@ -1487,48 +1487,12 @@ void GameList::ClearPlayedTimeForSerial(const std::string& serial)
   }
 }
 
-void GameList::ClearPlayedTimeForEntry(const GameList::Entry* entry)
-{
-  std::unique_lock lock(s_mutex);
-  std::vector<std::string> serials;
-
-  if (entry->IsDiscSet())
-  {
-    for (const GameList::Entry* member : GetDiscSetMembers(entry->path))
-    {
-      if (!member->serial.empty())
-        serials.push_back(member->serial);
-    }
-  }
-  else
-  {
-    if (!entry->serial.empty())
-      serials.push_back(entry->serial);
-  }
-
-  auto played_time_file = GetPlayedTimeFile();
-  for (const auto& serial : serials)
-  {
-    VERBOSE_LOG("Resetting played time for {}", serial);
-    UpdatePlayedTimeFile(played_time_file, serial, 0, 0);
-  }
-
-  for (GameList::Entry& list_entry : s_entries)
-  {
-    if (std::find(serials.begin(), serials.end(), list_entry.serial) == serials.end())
-      continue;
-
-    list_entry.last_played_time = 0;
-    list_entry.total_played_time = 0;
-  }
-}
-
 std::time_t GameList::GetCachedPlayedTimeForSerial(const std::string& serial)
 {
   if (serial.empty())
     return 0;
 
-  std::unique_lock lock(s_mutex);
+  std::unique_lock<std::recursive_mutex> lock(s_mutex);
   for (GameList::Entry& entry : s_entries)
   {
     if (entry.serial == serial)
@@ -1602,11 +1566,9 @@ TinyString GameList::FormatTimespan(std::time_t timespan, bool long_format)
   else
   {
     if (hours > 0)
-      ret.assign(TRANSLATE_PLURAL_SSTR("GameList", "%n hours", "", hours));
-    else if (minutes > 0)
-      ret.assign(TRANSLATE_PLURAL_SSTR("GameList", "%n minutes", "", minutes));
+      ret.assign(TRANSLATE_PLURAL_STR("GameList", "%n hours", "", hours));
     else
-      ret.assign(TRANSLATE_PLURAL_SSTR("GameList", "%n seconds", "", seconds));
+      ret.assign(TRANSLATE_PLURAL_STR("GameList", "%n minutes", "", minutes));
   }
 
   return ret;

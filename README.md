@@ -94,7 +94,7 @@ Once downloaded and extracted, you can launch the emulator with `duckstation-qt-
 
 ### Linux
 
-DuckStation is provided for x86_64/ARM32/ARM64 Linux in AppImage (recommended) and Flatpak (not recommended) formats.
+DuckStation is provided for x86_64/ARM32/ARM64 Linux in AppImage and Flatpak formats. The release on [Flathub](https://flathub.org/apps/org.duckstation.DuckStation) is official, and synchronized with the latest rolling/stable release on GitHub.
 
 #### AppImage
 
@@ -104,10 +104,6 @@ The AppImages require a distribution equivalent to Ubuntu 22.04 or newer to run.
  - Run `chmod a+x` on the downloaded AppImage -- following this step, the AppImage can be run like a typical executable.
 
 #### Flatpak
-
-Due to various Flatpak limitations and Flathub randomly breaking regularly, **the Flatpak package is not recommended**. We recommend that you use the AppImage instead.
-
-There appears to be little interest from users in keeping the Flatpak maintained. If you are a user and using the Flatpak, please let us know, since we are considering dropping it.
 
  - Go to https://github.com/stenzek/duckstation/releases/tag/latest, and download `duckstation-x64.flatpak`.
  - Run `flatpak install ./duckstation-x64.flatpak`.
@@ -232,7 +228,7 @@ If you wish to use a "portable" build, where the user directory is the same as w
 ## Bindings for Qt frontend
 Your keyboard or game controller can be used to simulate a variety of PlayStation controllers. Controller input is supported through DInput, XInput, and SDL backends and can be changed through `Settings -> Controllers`.
 
-To bind your input device, go to `Settings -> Controllers`, and select the virtual controller you want to map. Automatic mapping handles the majority of controllers. However, if you need to manually bind a controller, click the box below the button/axis name, and press the key or button on your input device that you wish to bind to.
+To bind your input device, go to `Settings -> Controllers`, and select the virtual controller you want to map. Automatic mapping handles the majority of ocntrollers. However, if you need to manually bind a controller, click the box below the button/axis name, and press the key or button on your input device that you wish to bind to.
 
 ## SDL Game Controller Database
 DuckStation releases ship with a database of game controller mappings for the SDL controller backend, courtesy of https://github.com/mdqinc/SDL_GameControllerDB. The included `gamecontrollerdb.txt` file can be found in the `resources` subdirectory of the DuckStation program directory.
