@@ -4,7 +4,7 @@
 #include "mainwindow.h"
 #include "aboutdialog.h"
 #include "achievementlogindialog.h"
-#include "autoupdaterdialog.h"
+#include "autoupdaterwindow.h"
 #include "coverdownloaddialog.h"
 #include "debuggerwindow.h"
 #include "displaywidget.h"
@@ -815,6 +815,7 @@ void MainWindow::destroySubWindows()
   QtUtils::CloseAndDeleteWindow(m_memory_scanner_window);
   QtUtils::CloseAndDeleteWindow(m_debugger_window);
   QtUtils::CloseAndDeleteWindow(m_memory_card_editor_window);
+  QtUtils::CloseAndDeleteWindow(m_auto_updater_dialog);
   QtUtils::CloseAndDeleteWindow(m_controller_settings_window);
   QtUtils::CloseAndDeleteWindow(m_input_profile_editor_window);
   QtUtils::CloseAndDeleteWindow(m_settings_window);
@@ -863,14 +864,20 @@ void MainWindow::populateGameListContextMenu(const GameList::Entry* entry, QWidg
         }
 
         action->setDisabled(s_achievements_hardcore_mode);
-        connect(action, &QAction::triggered,
-                [this, entry, path = std::move(ssi.path)]() { startFile(entry->path, std::move(path), std::nullopt); });
+        connect(action, &QAction::triggered, [this, game_path = entry->path, path = std::move(ssi.path)]() mutable {
+          startFile(std::move(game_path), std::move(path), std::nullopt);
+        });
       }
     }
   }
 
   QAction* open_memory_cards_action = menu->addAction(tr("Edit Memory Cards..."));
-  connect(open_memory_cards_action, &QAction::triggered, [entry]() {
+  connect(open_memory_cards_action, &QAction::triggered, [path = entry->path]() {
+    const auto lock = GameList::GetLock();
+    const GameList::Entry* entry = GameList::GetEntryForPath(path);
+    if (!entry)
+      return;
+
     QString paths[2];
     for (u32 i = 0; i < 2; i++)
       paths[i] = QString::fromStdString(System::GetGameMemoryCardPath(entry->serial, entry->path, i));
@@ -885,17 +892,17 @@ void MainWindow::populateGameListContextMenu(const GameList::Entry* entry, QWidg
     delete_save_states_action->setEnabled(has_any_states);
     if (has_any_states)
     {
-      connect(delete_save_states_action, &QAction::triggered, [parent_window, entry] {
+      connect(delete_save_states_action, &QAction::triggered, [parent_window, serial = entry->serial] {
         if (QMessageBox::warning(
               parent_window, tr("Confirm Save State Deletion"),
               tr("Are you sure you want to delete all save states for %1?\n\nThe saves will not be recoverable.")
-                .arg(QString::fromStdString(entry->serial)),
+                .arg(QString::fromStdString(serial)),
               QMessageBox::Yes, QMessageBox::No) != QMessageBox::Yes)
         {
           return;
         }
 
-        System::DeleteSaveStates(entry->serial, true);
+        System::DeleteSaveStates(serial, true);
       });
     }
   }
@@ -1047,7 +1054,7 @@ void MainWindow::onCheatsMenuAboutToShow()
 const GameList::Entry* MainWindow::resolveDiscSetEntry(const GameList::Entry* entry,
                                                        std::unique_lock<std::recursive_mutex>& lock)
 {
-  if (!entry || entry->type != GameList::EntryType::DiscSet)
+  if (!entry || !entry->IsDiscSet())
     return entry;
 
   // disc set... need to figure out the disc we want
@@ -1447,126 +1454,145 @@ void MainWindow::onGameListEntryActivated()
 
 void MainWindow::onGameListEntryContextMenuRequested(const QPoint& point)
 {
-  auto lock = GameList::GetLock();
-  const GameList::Entry* entry = m_game_list_widget->getSelectedEntry();
-
   QMenu menu;
-
-  // Hopefully this pointer doesn't disappear... it shouldn't.
-  if (entry)
   {
-    if (!entry->IsDiscSet())
+    const auto lock = GameList::GetLock();
+    const GameList::Entry* entry = m_game_list_widget->getSelectedEntry();
+
+    if (entry)
     {
-      connect(menu.addAction(tr("Properties...")), &QAction::triggered, [entry]() {
-        SettingsWindow::openGamePropertiesDialog(entry->path, entry->title, entry->serial, entry->hash, entry->region);
-      });
+      const QString qpath = QString::fromStdString(entry->path); // QString is CoW
 
-      connect(menu.addAction(tr("Open Containing Directory...")), &QAction::triggered, [this, entry]() {
-        const QFileInfo fi(QString::fromStdString(entry->path));
-        QtUtils::OpenURL(this, QUrl::fromLocalFile(fi.absolutePath()));
-      });
-
-      if (entry->IsDisc())
+      if (!entry->IsDiscSet())
       {
-        connect(menu.addAction(tr("Browse ISO...")), &QAction::triggered, [this, entry]() {
-          ISOBrowserWindow* ib = ISOBrowserWindow::createAndOpenFile(this, QString::fromStdString(entry->path));
-          if (ib)
-          {
-            ib->setAttribute(Qt::WA_DeleteOnClose);
-            ib->show();
-          }
+        connect(menu.addAction(tr("Properties...")), &QAction::triggered, [qpath]() {
+          const auto lock = GameList::GetLock();
+          const GameList::Entry* entry = GameList::GetEntryForPath(qpath.toStdString());
+          if (!entry)
+            return;
+
+          SettingsWindow::openGamePropertiesDialog(entry->path, entry->title, entry->serial, entry->hash,
+                                                   entry->region);
         });
-      }
 
-      connect(menu.addAction(tr("Set Cover Image...")), &QAction::triggered,
-              [this, entry]() { setGameListEntryCoverImage(entry); });
+        connect(menu.addAction(tr("Open Containing Directory...")), &QAction::triggered, [this, qpath]() {
+          const QFileInfo fi(qpath);
+          QtUtils::OpenURL(this, QUrl::fromLocalFile(fi.absolutePath()));
+        });
 
-      menu.addSeparator();
+        if (entry->IsDisc())
+        {
+          connect(menu.addAction(tr("Browse ISO...")), &QAction::triggered, [this, qpath]() {
+            ISOBrowserWindow* ib = ISOBrowserWindow::createAndOpenFile(this, qpath);
+            if (ib)
+            {
+              ib->setAttribute(Qt::WA_DeleteOnClose);
+              ib->show();
+            }
+          });
+        }
 
-      if (!s_system_valid)
-      {
-        populateGameListContextMenu(entry, this, &menu);
+        connect(menu.addAction(tr("Set Cover Image...")), &QAction::triggered, [this, qpath]() {
+          const auto lock = GameList::GetLock();
+          const GameList::Entry* entry = GameList::GetEntryForPath(qpath.toStdString());
+          if (entry)
+            setGameListEntryCoverImage(entry);
+        });
+
         menu.addSeparator();
 
-        connect(menu.addAction(tr("Default Boot")), &QAction::triggered,
-                [this, entry]() { g_emu_thread->bootSystem(getSystemBootParameters(entry->path)); });
-
-        connect(menu.addAction(tr("Fast Boot")), &QAction::triggered, [this, entry]() {
-          std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(entry->path);
-          boot_params->override_fast_boot = true;
-          g_emu_thread->bootSystem(std::move(boot_params));
-        });
-
-        connect(menu.addAction(tr("Full Boot")), &QAction::triggered, [this, entry]() {
-          std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(entry->path);
-          boot_params->override_fast_boot = false;
-          g_emu_thread->bootSystem(std::move(boot_params));
-        });
-
-        if (m_ui.menuDebug->menuAction()->isVisible())
+        if (!s_system_valid)
         {
-          connect(menu.addAction(tr("Boot and Debug")), &QAction::triggered, [this, entry]() {
-            openCPUDebugger();
+          populateGameListContextMenu(entry, this, &menu);
+          menu.addSeparator();
 
-            std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(entry->path);
-            boot_params->override_start_paused = true;
-            boot_params->disable_achievements_hardcore_mode = true;
+          connect(menu.addAction(tr("Default Boot")), &QAction::triggered,
+                  [this, qpath]() mutable { g_emu_thread->bootSystem(getSystemBootParameters(qpath.toStdString())); });
+
+          connect(menu.addAction(tr("Fast Boot")), &QAction::triggered, [this, qpath]() mutable {
+            std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(qpath.toStdString());
+            boot_params->override_fast_boot = true;
             g_emu_thread->bootSystem(std::move(boot_params));
+          });
+
+          connect(menu.addAction(tr("Full Boot")), &QAction::triggered, [this, qpath]() mutable {
+            std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(qpath.toStdString());
+            boot_params->override_fast_boot = false;
+            g_emu_thread->bootSystem(std::move(boot_params));
+          });
+
+          if (m_ui.menuDebug->menuAction()->isVisible())
+          {
+            connect(menu.addAction(tr("Boot and Debug")), &QAction::triggered, [this, qpath]() mutable {
+              openCPUDebugger();
+
+              std::shared_ptr<SystemBootParameters> boot_params = getSystemBootParameters(qpath.toStdString());
+              boot_params->override_start_paused = true;
+              boot_params->disable_achievements_hardcore_mode = true;
+              g_emu_thread->bootSystem(std::move(boot_params));
+            });
+          }
+        }
+        else
+        {
+          connect(menu.addAction(tr("Change Disc")), &QAction::triggered, [this, qpath]() {
+            g_emu_thread->changeDisc(qpath, false, true);
+            g_emu_thread->setSystemPaused(false);
+            switchToEmulationView();
           });
         }
       }
       else
       {
-        connect(menu.addAction(tr("Change Disc")), &QAction::triggered, [this, entry]() {
-          g_emu_thread->changeDisc(QString::fromStdString(entry->path), false, true);
-          g_emu_thread->setSystemPaused(false);
-          switchToEmulationView();
+        connect(menu.addAction(tr("Properties...")), &QAction::triggered, [disc_set_name = qpath]() {
+          // resolve path first
+          auto lock = GameList::GetLock();
+          const GameList::Entry* first_disc = GameList::GetFirstDiscSetMember(disc_set_name.toStdString());
+          if (first_disc)
+          {
+            SettingsWindow::openGamePropertiesDialog(first_disc->path, first_disc->title, first_disc->serial,
+                                                     first_disc->hash, first_disc->region);
+          }
         });
+
+        connect(menu.addAction(tr("Set Cover Image...")), &QAction::triggered, [this, qpath]() {
+          const auto lock = GameList::GetLock();
+          const GameList::Entry* entry = GameList::GetEntryForPath(qpath.toStdString());
+          if (!entry)
+            return;
+
+          setGameListEntryCoverImage(entry);
+        });
+
+        menu.addSeparator();
+
+        populateGameListContextMenu(entry, this, &menu);
+
+        menu.addSeparator();
+
+        connect(menu.addAction(tr("Select Disc")), &QAction::triggered, this, &MainWindow::onGameListEntryActivated);
       }
 
       menu.addSeparator();
 
       connect(menu.addAction(tr("Exclude From List")), &QAction::triggered,
-              [this, entry]() { getSettingsWindow()->getGameListSettingsWidget()->addExcludedPath(entry->path); });
+              [this, qpath]() { getSettingsWindow()->getGameListSettingsWidget()->addExcludedPath(qpath); });
 
-      connect(menu.addAction(tr("Reset Play Time")), &QAction::triggered,
-              [this, entry]() { clearGameListEntryPlayTime(entry); });
-    }
-    else
-    {
-      connect(menu.addAction(tr("Properties...")), &QAction::triggered, [disc_set_name = entry->path]() {
-        // resolve path first
-        auto lock = GameList::GetLock();
-        const GameList::Entry* first_disc = GameList::GetFirstDiscSetMember(disc_set_name);
-        if (first_disc)
-        {
-          SettingsWindow::openGamePropertiesDialog(first_disc->path, first_disc->title, first_disc->serial,
-                                                   first_disc->hash, first_disc->region);
-        }
+      connect(menu.addAction(tr("Reset Play Time")), &QAction::triggered, [this, qpath]() {
+        const auto lock = GameList::GetLock();
+        const GameList::Entry* entry = GameList::GetEntryForPath(qpath.toStdString());
+        if (!entry)
+          return;
+
+        clearGameListEntryPlayTime(entry);
       });
-
-      connect(menu.addAction(tr("Set Cover Image...")), &QAction::triggered,
-              [this, entry]() { setGameListEntryCoverImage(entry); });
-
-      menu.addSeparator();
-
-      populateGameListContextMenu(entry, this, &menu);
-
-      menu.addSeparator();
-
-      connect(menu.addAction(tr("Select Disc")), &QAction::triggered, this, &MainWindow::onGameListEntryActivated);
-
-      menu.addSeparator();
-
-      connect(menu.addAction(tr("Exclude From List")), &QAction::triggered,
-              [this, entry]() { getSettingsWindow()->getGameListSettingsWidget()->addExcludedPath(entry->path); });
     }
+
+    menu.addSeparator();
+
+    connect(menu.addAction(tr("Add Search Directory...")), &QAction::triggered,
+            [this]() { getSettingsWindow()->getGameListSettingsWidget()->addSearchDirectory(this); });
   }
-
-  menu.addSeparator();
-
-  connect(menu.addAction(tr("Add Search Directory...")), &QAction::triggered,
-          [this]() { getSettingsWindow()->getGameListSettingsWidget()->addSearchDirectory(this); });
 
   menu.exec(point);
 }
@@ -1628,7 +1654,7 @@ void MainWindow::clearGameListEntryPlayTime(const GameList::Entry* entry)
     return;
   }
 
-  GameList::ClearPlayedTimeForSerial(entry->serial);
+  GameList::ClearPlayedTimeForEntry(entry);
   m_game_list_widget->refresh(false);
 }
 
@@ -1688,16 +1714,17 @@ void MainWindow::setupAdditionalUi()
   onGameListLayoutChanged();
   updateDebugMenuVisibility();
 
-  m_shortcuts.open_file =
-    new QShortcut(Qt::ControlModifier | Qt::Key_O, this, this, &MainWindow::onStartFileActionTriggered);
-  m_shortcuts.game_list_refresh = new QShortcut(Qt::Key_F5, this, this, &MainWindow::onScanForNewGamesTriggered);
+  m_shortcuts.open_file = new QShortcut(QKeySequence::Open, this, this, &MainWindow::onStartFileActionTriggered);
+  m_shortcuts.game_list_refresh =
+    new QShortcut(QKeySequence::Refresh, this, this, &MainWindow::onScanForNewGamesTriggered);
   m_shortcuts.game_list_search = new QShortcut(this);
-  m_shortcuts.game_list_search->setKeys({Qt::ControlModifier | Qt::Key_F, Qt::Key_F3});
+  m_shortcuts.game_list_search->setKeys(QKeySequence::keyBindings(QKeySequence::Find) +
+                                        QKeySequence::keyBindings(QKeySequence::FindNext));
   connect(m_shortcuts.game_list_search, &QShortcut::activated, m_game_list_widget, &GameListWidget::focusSearchWidget);
   m_shortcuts.game_grid_zoom_in =
-    new QShortcut(Qt::ControlModifier | Qt::Key_Plus, this, this, &MainWindow::onViewGameGridZoomInActionTriggered);
+    new QShortcut(QKeySequence::ZoomIn, this, this, &MainWindow::onViewGameGridZoomInActionTriggered);
   m_shortcuts.game_grid_zoom_out =
-    new QShortcut(Qt::ControlModifier | Qt::Key_Minus, this, this, &MainWindow::onViewGameGridZoomOutActionTriggered);
+    new QShortcut(QKeySequence::ZoomOut, this, this, &MainWindow::onViewGameGridZoomOutActionTriggered);
 
   s_disable_window_rounded_corners = Host::GetBaseBoolSettingValue("Main", "DisableWindowRoundedCorners", false);
   if (s_disable_window_rounded_corners)
@@ -2938,7 +2965,7 @@ void MainWindow::onToolsOpenTextureDirectoryTriggered()
 
 void MainWindow::checkForUpdates(bool display_message)
 {
-  if (!AutoUpdaterDialog::isSupported())
+  if (!AutoUpdaterWindow::isSupported())
   {
     if (display_message)
     {
@@ -2948,7 +2975,7 @@ void MainWindow::checkForUpdates(bool display_message)
       mbox.setTextFormat(Qt::RichText);
 
       QString message;
-      if (!AutoUpdaterDialog::isOfficialBuild())
+      if (!AutoUpdaterWindow::isOfficialBuild())
       {
         message =
           tr("<p>Sorry, you are trying to update a DuckStation version which is not an official GitHub release. To "
@@ -2972,8 +2999,8 @@ void MainWindow::checkForUpdates(bool display_message)
   if (m_auto_updater_dialog)
     return;
 
-  m_auto_updater_dialog = new AutoUpdaterDialog(this);
-  connect(m_auto_updater_dialog, &AutoUpdaterDialog::updateCheckCompleted, this, &MainWindow::onUpdateCheckComplete);
+  m_auto_updater_dialog = new AutoUpdaterWindow();
+  connect(m_auto_updater_dialog, &AutoUpdaterWindow::updateCheckCompleted, this, &MainWindow::onUpdateCheckComplete);
   m_auto_updater_dialog->queueUpdateCheck(display_message);
 }
 
