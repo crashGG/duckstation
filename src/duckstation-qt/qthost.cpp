@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "qthost.h"
-#include "autoupdaterdialog.h"
+#include "autoupdaterwindow.h"
 #include "displaywidget.h"
 #include "logwindow.h"
 #include "mainwindow.h"
@@ -399,6 +399,81 @@ bool QtHost::DownloadFile(QWidget* parent, const QString& title, std::string url
   return true;
 }
 
+bool QtHost::DownloadFileFromZip(QWidget* parent, const QString& title, std::string url, const char* zip_filename,
+                                 const char* output_path)
+{
+  INFO_LOG("Download {} from {}, saving to {}.", zip_filename, url, output_path);
+
+  std::vector<u8> data;
+  if (!DownloadFile(parent, title, std::move(url), &data).value_or(false) || data.empty())
+    return false;
+
+  const unzFile zf = MinizipHelpers::OpenUnzMemoryFile(data.data(), data.size());
+  if (!zf)
+  {
+    QMessageBox::critical(parent, qApp->translate("QtHost", "Error"),
+                          qApp->translate("QtHost", "Failed to open downloaded zip file."));
+    return false;
+  }
+
+  const ScopedGuard zf_guard = [&zf]() { unzClose(zf); };
+
+  if (unzLocateFile(zf, zip_filename, 0) != UNZ_OK || unzOpenCurrentFile(zf) != UNZ_OK)
+  {
+    QMessageBox::critical(
+      parent, qApp->translate("QtHost", "Error"),
+      qApp->translate("QtHost", "Failed to locate '%1' in zip.").arg(QString::fromUtf8(zip_filename)));
+    return false;
+  }
+
+  // Directory may not exist. Create it.
+  Error error;
+  FileSystem::ManagedCFilePtr output_file;
+  const std::string directory(Path::GetDirectory(output_path));
+  if ((!directory.empty() && !FileSystem::DirectoryExists(directory.c_str()) &&
+       !FileSystem::CreateDirectory(directory.c_str(), true)) ||
+      !(output_file = FileSystem::OpenManagedCFile(output_path, "wb", &error)))
+  {
+    QMessageBox::critical(parent, qApp->translate("QtHost", "Error"),
+                          qApp->translate("QtHost", "Failed to open '%1': %2.")
+                            .arg(QString::fromUtf8(output_path))
+                            .arg(QString::fromStdString(error.GetDescription())));
+    return false;
+  }
+
+  static constexpr size_t CHUNK_SIZE = 4096;
+  char chunk[CHUNK_SIZE];
+  for (;;)
+  {
+    int size = unzReadCurrentFile(zf, chunk, CHUNK_SIZE);
+    if (size < 0)
+    {
+      QMessageBox::critical(
+        parent, qApp->translate("QtHost", "Error"),
+        qApp->translate("QtHost", "Failed to read '%1' from zip.").arg(QString::fromUtf8(zip_filename)));
+      output_file.reset();
+      FileSystem::DeleteFile(output_path);
+      return false;
+    }
+    else if (size == 0)
+    {
+      break;
+    }
+
+    if (std::fwrite(chunk, size, 1, output_file.get()) != 1)
+    {
+      QMessageBox::critical(parent, qApp->translate("QtHost", "Error"),
+                            qApp->translate("QtHost", "Failed to write to '%1'.").arg(QString::fromUtf8(output_path)));
+
+      output_file.reset();
+      FileSystem::DeleteFile(output_path);
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool QtHost::InitializeConfig(std::string settings_filename)
 {
   if (!SetCriticalFolders())
@@ -739,6 +814,32 @@ void EmuThread::stopFullscreenUI()
     m_is_fullscreen_ui_started = false;
     emit fullscreenUIStartedOrStopped(false);
   }
+}
+
+void EmuThread::exitFullscreenUI()
+{
+  if (!isCurrentThread())
+  {
+    QMetaObject::invokeMethod(this, &EmuThread::exitFullscreenUI, Qt::QueuedConnection);
+    return;
+  }
+
+  const bool was_in_nogui_mode = std::exchange(s_nogui_mode, false);
+
+  // force a return to main window before exiting, otherwise qt will terminate the application
+  if (!m_is_rendering_to_main)
+  {
+    m_is_fullscreen = false;
+    m_is_rendering_to_main = true;
+    GPUThread::UpdateDisplayWindow(false);
+  }
+
+  // then stop as normal
+  stopFullscreenUI();
+
+  // if we were in nogui mode, the game list won't have been populated yet. do it now.
+  if (was_in_nogui_mode)
+    g_main_window->refreshGameList(false);
 }
 
 void EmuThread::bootSystem(std::shared_ptr<SystemBootParameters> params)
@@ -2325,13 +2426,19 @@ bool Host::ResourceFileExists(std::string_view filename, bool allow_override)
 std::optional<DynamicHeapArray<u8>> Host::ReadResourceFile(std::string_view filename, bool allow_override, Error* error)
 {
   const std::string path = QtHost::GetResourcePath(filename, allow_override);
-  return FileSystem::ReadBinaryFile(path.c_str(), error);
+  const std::optional<DynamicHeapArray<u8>> ret = FileSystem::ReadBinaryFile(path.c_str(), error);
+  if (!ret.has_value())
+    Error::AddPrefixFmt(error, "Failed to read resource file '{}': ", filename);
+  return ret;
 }
 
 std::optional<std::string> Host::ReadResourceFileToString(std::string_view filename, bool allow_override, Error* error)
 {
   const std::string path = QtHost::GetResourcePath(filename, allow_override);
-  return FileSystem::ReadFileToString(path.c_str(), error);
+  const std::optional<std::string> ret = FileSystem::ReadFileToString(path.c_str(), error);
+  if (!ret.has_value())
+    Error::AddPrefixFmt(error, "Failed to read resource file '{}': ", filename);
+  return ret;
 }
 
 std::optional<std::time_t> Host::GetResourceFileTimestamp(std::string_view filename, bool allow_override)
@@ -2537,7 +2644,7 @@ void Host::RequestExitApplication(bool allow_confirm)
 
 void Host::RequestExitBigPicture()
 {
-  g_emu_thread->stopFullscreenUI();
+  g_emu_thread->exitFullscreenUI();
 }
 
 std::optional<WindowInfo> Host::GetTopLevelWindowInfo()
@@ -2813,7 +2920,7 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
       }
       else if (CHECK_ARG("-updatecleanup"))
       {
-        s_cleanup_after_update = AutoUpdaterDialog::isSupported();
+        s_cleanup_after_update = AutoUpdaterWindow::isSupported();
         continue;
       }
       else if (CHECK_ARG("--"))
@@ -2934,13 +3041,13 @@ int main(int argc, char* argv[])
 
   // Remove any previous-version remanants.
   if (s_cleanup_after_update)
-    AutoUpdaterDialog::cleanupAfterUpdate();
+    AutoUpdaterWindow::cleanupAfterUpdate();
 
   // Set theme before creating any windows.
   QtHost::UpdateApplicationTheme();
 
   // Build warning.
-  AutoUpdaterDialog::warnAboutUnofficialBuild();
+  AutoUpdaterWindow::warnAboutUnofficialBuild();
 
   // Start logging early.
   LogWindow::updateSettings();
