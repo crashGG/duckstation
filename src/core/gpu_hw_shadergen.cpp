@@ -742,7 +742,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
     ss << R"(
 uint luma(uint C) {
     uint alpha = (C & 0xFF000000u) >> 24;
-    return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu)) + (255u - alpha) * 3;
+    return (((C & 0x00FF0000u) >> 16) + ((C & 0x0000FF00u) >> 8) + (C & 0x000000FFu) + 1u) * (256u - alpha);
 }
 
 bool all_eq2(uint B, uint A0, uint A1) {
@@ -777,44 +777,11 @@ float rgb_distance(uint a, uint b)
     return distance(ca.rgb, cb.rgb);
 }
 
-// 计算两个ABGR8颜色之间的亮度差并归一
+// 计算两个ABGR8颜色之间的亮度差并归一,实测luma值在0.001~0.9998 之间
 float luma_distance(uint a, uint b)
 {
-    return abs(int(luma(a)) - int(luma(b))) * 0.0006535948f;  // 除以 255x6 的乘法替代
+    return abs(luma(a) - luma(b)) * 0.00000509f;  // 除以(255.0 * 256.0)的乘法替代;
 }
-
-//二段弱式混合，混/无 
-uint admix2d(uint a, uint b) {
-    float4 a_float = unpackUnorm4x8(a);
-    float4 b_float = unpackUnorm4x8(b);
-    float3 diff_rgb = a_float.rgb - b_float.rgb;
-    float rgbDist = dot(diff_rgb, diff_rgb);
-    
-    // 合并条件判断（减少分支）
-    bool aIsBlack = dot(a_float.rgb, a_float.rgb) < 0.01;
-    bool aIsTransparent = a_float.a < 0.01;
-    bool bIsTransparent = b_float.a < 0.01;
-    
-    if (aIsBlack || aIsTransparent) {
-        return b;
-    }
-    if (bIsTransparent) {
-        return a;
-    }  
-    // 根据距离决定混合方式
-    float4 result;
-    if (rgbDist < 1.0) {
-        // 近距离：线性混合 RGB 和 Alpha
-        result = (a_float + b_float) * 0.5;
-    } else {
-        // 远距离：返回 b
-        result = b_float;
-    }
-    
-    // 重新打包为 uint
-    return packUnorm4x8(result);
-}
-
 
 /*=============================================================================
 4像素交叉判定的辅助函数：对形态特定位置匹配数量进行打分。3个形态条件判定，需要满足6分。
@@ -906,7 +873,6 @@ bool countPatternMatches(uint LA, uint LB, uint L1, uint L2, uint L3, uint L4, u
 
 void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limits, out float4 texcol, out float ialpha)
 {
-
   float2 bcoords = floor(coords);
 
   uint A = src(-1, -1), B = src(+0, -1), C = src(+1, -1);
@@ -915,26 +881,62 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
 
   uint J = E, K = E, L = E, M = E;
 
-  // 默认使用中心像素E，显式初始化
-  uint res = E;
-  ialpha = float(res != 0u);
-  texcol = unpackUnorm4x8(res);
-  
-  if (((A ^ E) | (B ^ E) | (C ^ E) | (D ^ E) | (F ^ E) | (G ^ E) | (H ^ E) | (I ^ E)) == 0u) return;
-
+  if (((A ^ E) | (B ^ E) | (C ^ E) | (D ^ E) | (F ^ E) | (G ^ E) | (H ^ E) | (I ^ E)) != 0u) {
     uint P = src(+0, -2), S = src(+0, +2);
     uint Q = src(-2, +0), R = src(+2, +0);
     uint Bl = luma(B), Dl = luma(D), El = luma(E), Fl = luma(F), Hl = luma(H);
 
+    // 提取公共输出逻辑
+    auto sendDefaultColor = [&]() {
+      uint res = E;  // 直接使用中心像素E
+      ialpha = float(res != 0u);
+      texcol = unpackUnorm4x8(res);
+      return;
+    };
 	
+// 以"凸"字形态检查避免长直线边缘的单像素毛刺棘突
+    if (A == B && B == C && E == H && A != D && C != F && rgb_distance(D, F) < 0.2 && rgb_distance(B, E) > 0.6) {
+      sendDefaultColor();
+      return;
+    }
+
+    if (A == D && D == G && E == F && A != B && G != H && rgb_distance(B, H) < 0.2 && rgb_distance(D, E) > 0.6) {
+      sendDefaultColor();
+      return;
+    }
+
+    if (C == F && F == I && E == D && B != C && H != I && rgb_distance(B, H) < 0.2 && rgb_distance(E, F) > 0.6) {
+      sendDefaultColor();
+      return;
+    }
+
+    if (G == H && H == I && B == E && D != G && F != I && rgb_distance(D, F) < 0.2 && rgb_distance(E, H) > 0.6) {
+      sendDefaultColor();
+      return;
+    }
+
     // 以"田"字检查每4像素交叉的状态,并传输周围五个像素做形态判断
-    if (A == E && B == D && A != B && countPatternMatches(A, B, C, F, I, H, G)) return;
-    if (C == E && B == F && C != B && countPatternMatches(C, B, A, D, G, H, I)) return;
-    if (G == E && D == H && G != H && countPatternMatches(G, H, I, F, C, B, A)) return;
-    if (I == E && F == H && I != H && countPatternMatches(I, H, G, D, A, B, C)) return;
+    if (A == E && B == D && A != B && countPatternMatches(A, B, C, F, I, H, G)) {
+      sendDefaultColor();
+      return;
+    }
 
+    if (C == E && B == F && C != B && countPatternMatches(C, B, A, D, G, H, I)) {
+      sendDefaultColor();
+      return;
+    }
 
-    // main mmpx逻辑
+    if (G == E && D == H && G != H && countPatternMatches(G, H, I, F, C, B, A)) {
+      sendDefaultColor();
+      return;
+    }
+
+    if (I == E && F == H && I != H && countPatternMatches(I, H, G, D, A, B, C)) {
+      sendDefaultColor();
+      return;
+    }
+
+    // 原版mmpx逻辑
 
     // 1:1 slope rules
     if ((D == B && D != H && D != F) && (El >= Dl || E == A) && any_eq3(E, A, C, G) && ((El < Dl) || A != D || E != P || E != Q)) J = D;
@@ -947,10 +949,10 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
     if ((E != D && all_eq4(E, A, G, F, R) && all_eq2(D, B, H)) && (D != src(-3, +0))) J = L = D;
     if ((E != H && all_eq4(E, G, I, B, P) && all_eq2(H, D, F)) && (H != src(+0, +3))) L = M = H;
     if ((E != B && all_eq4(E, A, C, H, S) && all_eq2(B, D, F)) && (B != src(+0, -3))) J = K = B;
-    if (Bl < El && all_eq4(E, G, H, I, S) && none_eq4(E, A, D, C, F)) {J=admix2d(B,J); K=admix2d(B,K);}
-    if (Hl < El && all_eq4(E, A, B, C, P) && none_eq4(E, D, G, I, F)) {L=admix2d(H,L); M=admix2d(H,M);}
-    if (Fl < El && all_eq4(E, A, D, G, Q) && none_eq4(E, B, C, I, H)) {K=admix2d(F,K); M=admix2d(F,M);}
-    if (Dl < El && all_eq4(E, C, F, I, R) && none_eq4(E, B, A, G, H)) {J=admix2d(D,J); L=admix2d(D,L);}
+    if (Bl < El && all_eq4(E, G, H, I, S) && none_eq4(E, A, D, C, F)) J = K = B;
+    if (Hl < El && all_eq4(E, A, B, C, P) && none_eq4(E, D, G, I, F)) L = M = H;
+    if (Fl < El && all_eq4(E, A, D, G, Q) && none_eq4(E, B, C, I, H)) K = M = F;
+    if (Dl < El && all_eq4(E, C, F, I, R) && none_eq4(E, B, A, G, H)) J = L = D;
 
     // 2:1 slope rules
     if (H != B) {
@@ -976,11 +978,11 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
         if (all_eq3(F, I, B, P) && none_eq2(F, H, src(-1, -2))) M = K;
       }
     } // F !== D
-
+  } // not constant
 
   // select quadrant based on fractional part of texture coordinates
   float2 fpart = frac(coords);
-  res = (fpart.x < 0.5f) ? ((fpart.y < 0.5f) ? J : L) : ((fpart.y < 0.5f) ? K : M);
+  uint res = (fpart.x < 0.5f) ? ((fpart.y < 0.5f) ? J : L) : ((fpart.y < 0.5f) ? K : M);
 
   ialpha = float(res != 0u);
   texcol = unpackUnorm4x8(res);
