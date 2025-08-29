@@ -862,25 +862,17 @@ uint luma(uint C) {
 }
 //
 
-uvec4 extractPIX(uint color) {
-    uint r = (color >> 0) & 0xFFu;
-    uint g = (color >> 8) & 0xFFu;
-    uint b = (color >> 16) & 0xFFu;
-    uint a = (color >> 24) & 0xFFu;
-    return uvec4(r, g, b, a);
-}
-
-// Approximate RGB equality (Euclidean distance threshold ≈0.00932276) and alpha difference <14.59% (≈37.2/255)
-bool same(uint B, uint A0) {
-    uvec4 b_pix = extractPIX(B);
-    uvec4 a0_pix = extractPIX(A0);
+bool same(uint C1, uint C2) {
+    vec4 rgbaC1 = unpackUnorm4x8(C1);
+    vec4 rgbaC2 = unpackUnorm4x8(C2);
     
     // Sum of squared RGB differences
-    ivec3 diff = ivec3(b_pix.rgb) - ivec3(a0_pix.rgb);
-    uint alphaDiff = abs(int(b_pix.a) - int(a0_pix.a));
+	float rgbDist = dot(rgbaC1.rgb - rgbaC2.rgb, rgbaC1.rgb - rgbaC2.rgb);
+	// Sum of alpha differences
+    float alphaDiff = abs(rgbaC1.a - rgbaC2.a);
     
-    bool alphaDiffCheck = alphaDiff < 38u; // 5.57% ≈14.21, 14.59%≈37.2
-    return dot(diff, diff) < 606u && alphaDiffCheck;
+    // 5.57% ≈14.21, 14.59%≈37.2
+    return rgbDist < 0.0031065 && alphaDiff < 0.1459;
 }
 
 // Full RGBA equality
