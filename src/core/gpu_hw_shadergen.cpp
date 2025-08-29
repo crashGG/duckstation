@@ -1286,7 +1286,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
   float2 fpart = frac(coords);
   float4 res = (fpart.x < 0.5f) ? ((fpart.y < 0.5f) ? J : L) : ((fpart.y < 0.5f) ? K : M);
 
-  ialpha = float(res.a != 0.0f);
+  ialpha = float(res.x + res.y + res.z + res.w > 0.001f);
   //ialpha = 1.0f;
   texcol = res;
   }
