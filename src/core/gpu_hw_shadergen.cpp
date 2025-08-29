@@ -1152,10 +1152,10 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
 
 
         // Rule 2: K-pattern (Scorpion tail)
-   if (notsame(E,F) && same_E_C&&same_E_I&&fullsame(E,D)&&fullsame(D,Q) && fullsame(F,B)&&fullsame(B,H) && notsame(F,src(srcX+3,srcY)) ) {K=admixK(F,K); M=admixK(F,M);}
-   if (notsame(E,D) && same_E_A&&same_E_G&&fullsame(E,F)&&fullsame(F,R) && fullsame(D,B)&&fullsame(B,H) && notsame(D,src(srcX-3,srcY)) ) {J=admixK(D,J); L=admixK(D,L);}
-   if (notsame(E,H) && same_E_G&&same_E_I&&fullsame(E,B)&&fullsame(B,P) && fullsame(H,D)&&fullsame(D,F) && notsame(H,src(srcX,srcY+3)) ) {L=admixK(H,L); M=admixK(H,M);}
-   if (notsame(E,B) && same_E_A&&same_E_C&&fullsame(E,H)&&fullsame(H,S) && fullsame(B,D)&&fullsame(D,F) && notsame(B,src(srcX,srcY-3)) ) {J=admixK(B,J); K=admixK(B,K);}
+   if (notsame(E,F) && same_E_C&&same_E_I&&fullsame(E,D)&&fullsame(D,Q) && fullsame(F,B)&&fullsame(B,H) && notsame(F,src(+3,+0))) {K=admixK(F,K); M=admixK(F,M);}
+   if (notsame(E,D) && same_E_A&&same_E_G&&fullsame(E,F)&&fullsame(F,R) && fullsame(D,B)&&fullsame(B,H) && notsame(D,src(-3,+0))) {J=admixK(D,J); L=admixK(D,L);}
+   if (notsame(E,H) && same_E_G&&same_E_I&&fullsame(E,B)&&fullsame(B,P) && fullsame(H,D)&&fullsame(D,F) && notsame(H,src(+0,+3))) {L=admixK(H,L); M=admixK(H,M);}
+   if (notsame(E,B) && same_E_A&&same_E_C&&fullsame(E,H)&&fullsame(H,S) && fullsame(B,D)&&fullsame(D,F) && notsame(B,src(+0,-3))) {J=admixK(B,J); K=admixK(B,K);}
 
 
         // Rule 3: Cross pattern (Weak blend for anti-aliasing)
@@ -1180,7 +1180,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //               Ⓐ B C .
          //             Q D 🄴 🅵 🆁
          //               🅶 🅷 I
-         if (none_eq2(H,D,src(srcX+2,srcY-1))) {
+         if (none_eq2(H,D,src(+2,-1))) {
 			 // Extend the original rule: incorporate the comparison of adjacent pixels in the third step to ensure that secondary mixing does not occur.
 			 if (full_eq3(H,G,F,R)) L=admixL(M,L,H);
 			 
@@ -1193,7 +1193,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //             . A B Ⓒ
          //             🆀 🅳 🄴 F R
          //               G 🅷 🅸
-         if (none_eq2(H,F,src(srcX-2,srcY-1))) {
+         if (none_eq2(H,F,src(-2,-1))) {
 
 			 if (full_eq3(H,I,D,Q)) M=admixL(L,M,H);
 				// D -> L
@@ -1210,7 +1210,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //               🅰️🅱C
          //             Q D 🄴 🅵 🆁
          //               Ⓖ H I .
-         if (none_eq2(B,D,src(srcX+2,srcY+1))) {
+         if (none_eq2(B,D,src(+2,+1))) {
 
 			 if (full_eq3(B,A,F,R)) J=admixL(K,J,B);
 				// F -> K
@@ -1221,7 +1221,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //               A 🅱🅲
          //             🆀 🅳 🄴 F R
          //             . G H Ⓘ 
-         if (none_eq2(B,F,src(srcX-2,srcY+1))) {
+         if (none_eq2(B,F,src(-2,+1))) {
 			 
 			 if (full_eq3(B,C,D,Q)) K=admixL(J,K,B);
 				// D -> J
@@ -1241,7 +1241,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //             Q 🅳 🄴 F R
          //               G 🅷 I
          //                 🆂 .
-         if (none_eq2(D,B,src(srcX+1,srcY+2))) {
+         if (none_eq2(D,B,src(+1,+2))) {
 			 
 			 if (full_eq3(D,A,H,S)) J=admixL(L,J,D);
 			 		 // H -> L
@@ -1252,7 +1252,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //               A 🅱C
          //             Q 🅳 🄴 F R
          //               🅶 H Ⓘ
-         if (none_eq2(D,H,src(srcX+1,srcY-2))) {
+         if (none_eq2(D,H,src(+1,-2))) {
 			 
 			 if (full_eq3(D,G,B,P)) L=admixL(J,L,D);
 			 		 // B -> J
@@ -1268,7 +1268,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //             Q D 🄴 🅵 R 
          //               G 🅷 I   
          //               . 🆂   
-         if (none_eq2(F,B,src(srcX-1,srcY+2))) {
+         if (none_eq2(F,B,src(-1,+2))) {
 			 
 			 if (full_eq3(F,C,H,S)) K=admixL(M,K,F);
 			 		 // H -> M
@@ -1279,7 +1279,7 @@ void FilteredSampleFromVRAM(TEXPAGE_VALUE texpage, float2 coords, float4 uv_limi
          //               A 🅱C
          //             Q D 🄴 🅵 R
          //               Ⓖ H 🅸
-         if (none_eq2(F,H,src(srcX-1,srcY-2))) {
+         if (none_eq2(F,H,src(-1,-2))) {
 			 
 			 if (full_eq3(F,I,B,P)) M=admixL(K,M,F);
 			 		 // B -> K
