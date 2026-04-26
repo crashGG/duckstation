@@ -153,7 +153,7 @@ bool HasRichPresence();
 const std::string& GetRichPresenceString();
 
 /// Returns the URL for the current icon of the game
-const std::string& GetCurrentGameIconURL();
+const std::string& GetCurrentGameBadgeURL();
 
 /// Returns the RetroAchievements title for the current game.
 /// Should be called with the lock held.

@@ -248,7 +248,7 @@ struct State
 
   std::string game_path;
   std::string game_title;
-  std::string game_icon_url;
+  std::string game_badge_url;
   rc_client_user_game_summary_t game_summary = {};
 
   rc_client_async_handle_t* login_request = nullptr;
@@ -571,9 +571,9 @@ const std::string& Achievements::GetCurrentGamePath()
   return s_state.game_path;
 }
 
-const std::string& Achievements::GetCurrentGameIconURL()
+const std::string& Achievements::GetCurrentGameBadgeURL()
 {
-  return s_state.game_icon_url;
+  return s_state.game_badge_url;
 }
 
 const std::string& Achievements::GetRichPresenceString()
@@ -1319,7 +1319,7 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
   s_state.has_achievements = has_achievements;
   s_state.has_leaderboards = has_leaderboards;
   s_state.has_rich_presence = rc_client_has_rich_presence(client);
-  s_state.game_icon_url =
+  s_state.game_badge_url =
     info->badge_url ? std::string(info->badge_url) : GetImageURL(info->badge_name, RC_IMAGE_TYPE_GAME);
   if (info->badge_name)
     GameList::UpdateAchievementBadgeName(info->id, info->badge_name);
@@ -1361,7 +1361,7 @@ void Achievements::ClearGameInfo()
 
   s_state.game_id = 0;
   s_state.game_title = {};
-  s_state.game_icon_url = {};
+  s_state.game_badge_url = {};
   s_state.reload_game_on_reset = false;
   s_state.has_achievements = false;
   s_state.has_leaderboards = false;
@@ -1411,7 +1411,7 @@ void Achievements::DisplayAchievementSummary()
     FullscreenUI::AddAchievementNotification("AchievementsSummary",
                                              IsHardcoreModeActive() ? ACHIEVEMENT_SUMMARY_NOTIFICATION_TIME_HC :
                                                                       ACHIEVEMENT_SUMMARY_NOTIFICATION_TIME,
-                                             s_state.game_icon_url, s_state.game_title, std::string(summary),
+                                             s_state.game_badge_url, s_state.game_title, std::string(summary),
                                              RA_LOGO_ICON_NAME, FullscreenUI::AchievementNotificationNoteType::Image);
 
     if (s_state.game_summary.num_unsupported_achievements > 0)
@@ -1520,7 +1520,7 @@ void Achievements::HandleGameCompleteEvent(const rc_client_event_t* event)
       TRANSLATE_PLURAL_STR("Achievements", "%n points", "Achievement points", s_state.game_summary.points_unlocked));
 
     FullscreenUI::AddAchievementNotification(
-      "achievement_mastery", GAME_COMPLETE_NOTIFICATION_TIME, s_state.game_icon_url, s_state.game_title,
+      "achievement_mastery", GAME_COMPLETE_NOTIFICATION_TIME, s_state.game_badge_url, s_state.game_title,
       std::move(message), ICON_EMOJI_TROPHY, FullscreenUI::AchievementNotificationNoteType::IconText);
   }
 }
@@ -1555,7 +1555,7 @@ void Achievements::HandleLeaderboardStartedEvent(const rc_client_event_t* event)
   {
     FullscreenUI::AddAchievementNotification(
       fmt::format("leaderboard_{}", event->leaderboard->id), LEADERBOARD_STARTED_NOTIFICATION_TIME,
-      s_state.game_icon_url, std::string(event->leaderboard->title),
+      s_state.game_badge_url, std::string(event->leaderboard->title),
       TRANSLATE_STR("Achievements", "Leaderboard attempt started."), ICON_EMOJI_RED_FLAG,
       FullscreenUI::AchievementNotificationNoteType::IconText);
   }
@@ -1569,7 +1569,7 @@ void Achievements::HandleLeaderboardFailedEvent(const rc_client_event_t* event)
   {
     FullscreenUI::AddAchievementNotification(
       fmt::format("leaderboard_{}", event->leaderboard->id), LEADERBOARD_FAILED_NOTIFICATION_TIME,
-      s_state.game_icon_url, std::string(event->leaderboard->title),
+      s_state.game_badge_url, std::string(event->leaderboard->title),
       TRANSLATE_STR("Achievements", "Leaderboard attempt failed."), ICON_EMOJI_CROSS_MARK_BUTTON,
       FullscreenUI::AchievementNotificationNoteType::IconText);
   }
@@ -1608,7 +1608,7 @@ void Achievements::HandleLeaderboardSubmittedEvent(const rc_client_event_t* even
 
     FullscreenUI::AddAchievementNotification(
       fmt::format("leaderboard_{}", event->leaderboard->id),
-      static_cast<float>(g_settings.achievements_leaderboard_duration), s_state.game_icon_url,
+      static_cast<float>(g_settings.achievements_leaderboard_duration), s_state.game_badge_url,
       std::string(event->leaderboard->title), std::move(message),
       g_settings.achievements_spectator_mode ? std::string(ICON_EMOJI_CHART_UPWARDS_TREND) : std::string(),
       g_settings.achievements_spectator_mode ? FullscreenUI::AchievementNotificationNoteType::IconText :
@@ -1645,7 +1645,7 @@ void Achievements::HandleLeaderboardScoreboardEvent(const rc_client_event_t* eve
 
     FullscreenUI::AddAchievementNotification(
       fmt::format("leaderboard_{}", event->leaderboard->id),
-      static_cast<float>(g_settings.achievements_leaderboard_duration), s_state.game_icon_url,
+      static_cast<float>(g_settings.achievements_leaderboard_duration), s_state.game_badge_url,
       std::string(event->leaderboard->title), std::move(message), ICON_EMOJI_CHECKMARK_BUTTON,
       FullscreenUI::AchievementNotificationNoteType::IconText, LEADERBOARD_NOTIFICATION_MIN_WIDTH);
   }
@@ -1928,7 +1928,7 @@ void Achievements::LoadStateFromBuffer(std::span<const u8> data, std::unique_loc
   {
     // Fallback to game icon if we don't have a cover.
     std::string image = System::GetImageForLoadingScreen(System::GetGamePath());
-    FullscreenUI::OpenOrUpdateLoadingScreen(image.empty() ? s_state.game_icon_url : image,
+    FullscreenUI::OpenOrUpdateLoadingScreen(image.empty() ? s_state.game_badge_url : image,
                                             TRANSLATE_SV("Achievements", "Downloading achievements data..."));
 
     WaitForServerCallsWithYield(lock);

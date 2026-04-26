@@ -6578,8 +6578,8 @@ void System::UpdateRichPresence(bool update_session_time)
   if (Achievements::HasRichPresence())
     rp.state = (state_string = StringUtil::Ellipsise(Achievements::GetRichPresenceString(), 128)).c_str();
 
-  if (const std::string& icon_url = Achievements::GetCurrentGameIconURL(); !icon_url.empty())
-    rp.largeImageKey = icon_url.c_str();
+  if (const std::string& badge_url = Achievements::GetCurrentGameBadgeURL(); !badge_url.empty())
+    rp.largeImageKey = badge_url.c_str();
 
   dyn_libs::Discord_UpdatePresence(&rp);
 }
