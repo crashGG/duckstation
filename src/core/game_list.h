@@ -179,7 +179,7 @@ std::string GetGameIconPath(const GameList::Entry* entry);
 void ReloadMemcardTimestampCache();
 
 /// Updates game list with new achievement unlocks.
-void UpdateAchievementData(const std::span<u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
+void UpdateAchievementData(std::span<const u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
                            u32 num_unlocked_hardcore);
 void UpdateAllAchievementData();
 

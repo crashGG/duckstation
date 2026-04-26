@@ -855,7 +855,7 @@ void GameList::PopulateEntryAchievements(Entry* entry, const Achievements::Progr
   }
 }
 
-void GameList::UpdateAchievementData(const std::span<u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
+void GameList::UpdateAchievementData(std::span<const u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
                                      u32 num_unlocked_hardcore)
 {
   std::unique_lock lock(s_state.mutex);

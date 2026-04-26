@@ -2699,7 +2699,7 @@ void Achievements::FinishRefreshHashDatabase()
   s_state.fetch_hash_library_result = nullptr;
 
   // update game list, we might have some new games that weren't in the seed database
-  GameList::UpdateAllAchievementData();
+  Host::RunOnCoreThread(&GameList::UpdateAllAchievementData);
 }
 
 bool Achievements::RefreshAllProgressDatabase(ProgressCallback* progress, Error* error)
@@ -2753,7 +2753,7 @@ void Achievements::RefreshAllProgressCallback(int result, const char* error_mess
   BuildProgressDatabase(list);
   rc_client_destroy_all_user_progress(list);
 
-  GameList::UpdateAllAchievementData();
+  Host::RunOnCoreThread(&GameList::UpdateAllAchievementData);
 
   if (result_ud)
     result_ud->first = true;
@@ -3165,8 +3165,11 @@ void Achievements::UpdateProgressDatabase()
   // update the game list, this should be fairly quick
   if (s_state.game_hash.has_value())
   {
-    GameList::UpdateAchievementData(s_state.game_hash.value(), s_state.game_id, num_achievements, achievements_unlocked,
-                                    achievements_unlocked_hardcore);
+    Host::RunOnCoreThread([game_hash = s_state.game_hash.value(), game_id = s_state.game_id, num_achievements,
+                           achievements_unlocked, achievements_unlocked_hardcore]() {
+      GameList::UpdateAchievementData(game_hash, game_id, num_achievements, achievements_unlocked,
+                                      achievements_unlocked_hardcore);
+    });
   }
 
   // done asynchronously so we don't hitch on disk I/O
@@ -3289,7 +3292,7 @@ void Achievements::ClearProgressDatabase()
       ERROR_LOG("Failed to delete progress database: {}", error.GetDescription());
   }
 
-  GameList::UpdateAllAchievementData();
+  Host::RunOnCoreThread(&GameList::UpdateAllAchievementData);
 }
 
 Achievements::ProgressDatabase::ProgressDatabase() = default;
