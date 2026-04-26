@@ -94,8 +94,6 @@ using PlayedTimeMap = UnorderedStringMap<PlayedTimeEntry>;
 
 static_assert(std::is_same_v<decltype(Entry::hash), GameHash>);
 
-static bool ShouldLoadAchievementsProgress();
-
 static bool GetExeListEntry(const std::string& path, Entry* entry);
 static bool GetPsfListEntry(const std::string& path, Entry* entry);
 static bool GetDiscListEntry(const std::string& path, Entry* entry);
@@ -192,14 +190,9 @@ bool GameList::ShouldShowLocalizedTitles()
   return Core::GetBaseBoolSettingValue("UI", "GameListShowLocalizedTitles", true);
 }
 
-bool GameList::ShouldLoadAchievementsProgress()
-{
-  return Core::ContainsBaseSettingValue("Cheevos", "Token");
-}
-
 bool GameList::PreferAchievementGameBadgesForIcons()
 {
-  return (Core::GetBaseBoolSettingValue("UI", "GameListPreferAchievementGameBadgesForIcons", false));
+  return Core::GetBaseBoolSettingValue("UI", "GameListPreferAchievementGameBadgesForIcons", false);
 }
 
 bool GameList::IsScannableFilename(std::string_view path)
@@ -898,7 +891,7 @@ void GameList::UpdateAchievementData(const std::span<u8, 16> hash, u32 game_id, 
 void GameList::UpdateAllAchievementData()
 {
   Achievements::ProgressDatabase achievements_progress;
-  if (ShouldLoadAchievementsProgress())
+  if (Achievements::HasSavedCredentials())
   {
     Error error;
     if (!achievements_progress.Load(&error))
@@ -1119,7 +1112,7 @@ void GameList::Refresh(bool invalidate_cache, bool only_cache, ProgressCallback*
   custom_attributes_ini.Load();
 
   Achievements::ProgressDatabase achievements_progress;
-  if (ShouldLoadAchievementsProgress())
+  if (Achievements::HasSavedCredentials())
   {
     if (!achievements_progress.Load(&error))
       WARNING_LOG("Failed to load achievements progress: {}", error.GetDescription());
