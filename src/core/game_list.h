@@ -185,8 +185,6 @@ void UpdateAllAchievementData();
 
 /// Accesses achievement game badges. Assumes the lock is held.
 bool PreferAchievementGameBadgesForIcons();
-std::string GetAchievementGameBadgeURL(u32 game_id);
-void UpdateAchievementBadgeName(u32 game_id, std::string_view badge_name);
 
 } // namespace GameList
 

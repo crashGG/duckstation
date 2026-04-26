@@ -6389,7 +6389,7 @@ std::string System::GetImageForLoadingScreen(const std::string& game_path,
 
     if (fallback_to_achievement_game_icon && entry->achievements_game_id != 0)
     {
-      path = GameList::GetAchievementGameBadgeURL(entry->achievements_game_id);
+      path = Achievements::GetGameBadgeURL(entry->achievements_game_id);
       if (!path.empty())
         return path;
     }
