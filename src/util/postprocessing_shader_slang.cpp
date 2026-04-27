@@ -117,7 +117,6 @@ public:
 private:
   static std::optional<std::pair<std::string, std::string>> ReadShaderFile(std::string_view base_path,
                                                                            std::string_view path, Error* error);
-  static std::string_view StripCommentsAndWhitespace(std::string_view line);
 
   std::string_view GetCurrentFilename() const;
 
@@ -166,6 +165,8 @@ struct SlangShaderVertex
 
 } // namespace
 
+static std::string_view StripCommentsAndWhitespace(std::string_view line);
+
 } // namespace PostProcessing
 
 inline PostProcessing::SlangPresetParser::SlangPresetParser() = default;
@@ -205,8 +206,13 @@ inline bool PostProcessing::SlangPresetParser::Parse(std::string_view path, std:
   {
     line_number++;
 
-    const std::string_view clean_line = StringUtil::StripWhitespace(line);
-    if (clean_line.empty() || clean_line[0] == '#')
+    const std::string_view clean_line = StripCommentsAndWhitespace(line);
+    if (clean_line.empty())
+      continue;
+
+    // despite having c-style comments, presets can also use # as a comment, but #reference is a thing
+    // ughhhhhh what a mess
+    if (clean_line.starts_with('#'))
       continue;
 
     std::string_view key, value;
@@ -331,7 +337,7 @@ PostProcessing::SlangShaderPreprocessor::ReadShaderFile(std::string_view base_pa
   return result;
 }
 
-inline std::string_view PostProcessing::SlangShaderPreprocessor::StripCommentsAndWhitespace(std::string_view line)
+std::string_view PostProcessing::StripCommentsAndWhitespace(std::string_view line)
 {
   // TODO: Handle block comments, not just line comments
   std::string_view clean_line = StringUtil::StripWhitespace(line);
