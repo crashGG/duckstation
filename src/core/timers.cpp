@@ -392,6 +392,9 @@ void Timers::WriteRegister(u32 offset, u32 value)
       DEBUG_LOG("Timer {} write mode register 0x{:04X}", timer_index, value);
       cs.mode.bits = (value & WRITE_MASK) | (cs.mode.bits & ~WRITE_MASK);
 
+      // Interrupt is cleared after any mode write.
+      cs.mode.interrupt_request_n = true;
+
       // Why is this extra assignment here? MSVC compiler bugs it seems.
       // Without the copy in the local variable, when compiling with LTCG, it generates:
       //
