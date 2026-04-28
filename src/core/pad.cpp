@@ -480,7 +480,7 @@ bool Pad::DoState(StateWrapper& sw, bool is_memory_state)
     }
   }
 
-  if (sw.GetVersion() >= 50) [[unlikely]]
+  if (sw.GetVersion() >= 50) [[likely]]
   {
     for (u32 i = 0; i < NUM_MULTITAPS; i++)
     {
@@ -844,7 +844,7 @@ void Pad::DoTransfer(TickCount ticks_late)
   s_state.receive_buffer = data_in;
   s_state.receive_buffer_full = true;
   if (s_state.JOY_CTRL.RXINTEN)
-    TriggerIRQ("TX");
+    TriggerIRQ("RX");
 
   // device no longer active?
   if (!ack)
