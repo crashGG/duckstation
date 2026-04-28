@@ -3157,18 +3157,7 @@ bool System::LoadStateFromBuffer(const SaveStateBuffer& buffer, Error* error, bo
   // Updating game/loading settings can turn on hardcore mode. Catch this.
   Achievements::DisableHardcoreMode(true, true);
 
-  return LoadStateDataFromBuffer(buffer.state_data.cspan(0, buffer.state_size), buffer.version, error, update_display);
-}
-
-bool System::LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Error* error, bool update_display)
-{
-  if (IsShutdown()) [[unlikely]]
-  {
-    Error::SetStringView(error, "System is invalid.");
-    return 0;
-  }
-
-  StateWrapper sw(data, StateWrapper::Mode::Read, version);
+  StateWrapper sw(buffer.state_data.cspan(0, buffer.state_size), StateWrapper::Mode::Read, buffer.version);
   if (!DoState(sw, update_display))
   {
     Error::SetStringView(error, "Save state stream is corrupted.");
