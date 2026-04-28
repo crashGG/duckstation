@@ -995,6 +995,7 @@ bool Bus::InjectExecutable(std::span<const u8> buffer, bool set_pc, Error* error
     {
       Error::SetStringFmt(error, "Failed to upload {} bytes to memory at address 0x{:08X}.", data_load_size,
                           header.load_address);
+      return false;
     }
   }
 
