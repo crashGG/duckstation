@@ -847,9 +847,9 @@ u16 SPU::ReadRegister(u32 offset)
         const u32 voice_index = (offset - (0x1F801E00 - SPU_BASE)) / 4;
         GeneratePendingSamples();
         if (offset & 0x02)
-          return s_state.voices[voice_index].left_volume.current_level;
-        else
           return s_state.voices[voice_index].right_volume.current_level;
+        else
+          return s_state.voices[voice_index].left_volume.current_level;
       }
 
       DEV_LOG("Unknown SPU register read: offset 0x{:X} (address 0x{:08X})", offset, offset | SPU_BASE);
