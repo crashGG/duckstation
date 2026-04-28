@@ -747,7 +747,7 @@ void Pad::DoTransfer(TickCount ticks_late)
 {
   DEBUG_LOG("Transferring slot {}", s_state.JOY_CTRL.SLOT.GetValue());
 
-  const u8 device_index = s_state.multitaps[0].IsEnabled() ? 4u : s_state.JOY_CTRL.SLOT;
+  const u8 device_index = s_state.multitaps[s_state.JOY_CTRL.SLOT].IsEnabled() ? 4u : s_state.JOY_CTRL.SLOT;
   Controller* const controller = s_state.controllers[device_index].get();
   MemoryCard* const memory_card = s_state.memory_cards[device_index].get();
 
