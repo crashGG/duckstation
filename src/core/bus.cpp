@@ -1727,7 +1727,7 @@ void Bus::HWHandlers::MemCtrlWrite(PhysicalMemoryAddress address, u32 value)
 
   value = FIXUP_WORD_WRITE_VALUE(size, offset, value);
 
-  const u32 write_mask = (index == 8) ? COMDELAY::WRITE_MASK : MEMDELAY::WRITE_MASK;
+  const u32 write_mask = (index < 2) ? 0xFFFFFFFFu : ((index == 8) ? COMDELAY::WRITE_MASK : MEMDELAY::WRITE_MASK);
   const u32 new_value = (s_MEMCTRL.regs[index] & ~write_mask) | (value & write_mask);
   if (s_MEMCTRL.regs[index] != new_value)
   {
