@@ -526,8 +526,8 @@ void Bus::RecalculateMemoryTimings()
             s_MEMCTRL.spu_delay_size.data_bus_16bit ? 16 : 8, g_spu_access_time[0] + 1, g_spu_access_time[1] + 1,
             g_spu_access_time[2] + 1);
   TRACE_LOG("EXP1 Memory Timing: {} bit bus, byte={}, halfword={}, word={}",
-            s_MEMCTRL.spu_delay_size.data_bus_16bit ? 16 : 8, g_spu_access_time[0] + 1, g_spu_access_time[1] + 1,
-            g_spu_access_time[2] + 1);
+            s_MEMCTRL.exp1_delay_size.data_bus_16bit ? 16 : 8, g_exp1_access_time[0] + 1, g_exp1_access_time[1] + 1,
+            g_exp1_access_time[2] + 1);
 }
 
 void* Bus::GetFastmemBase(bool isc)
