@@ -861,7 +861,7 @@ u8* Bus::GetMemoryRegionPointer(MemoryRegion region)
       return (g_unprotected_ram + ((RAM_2MB_SIZE * 2) & g_ram_mask));
 
     case MemoryRegion::RAMMirror3:
-      return (g_unprotected_ram + ((RAM_8MB_SIZE * 3) & g_ram_mask));
+      return (g_unprotected_ram + ((RAM_2MB_SIZE * 3) & g_ram_mask));
 
     case MemoryRegion::EXP1:
       return nullptr;
