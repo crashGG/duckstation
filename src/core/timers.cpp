@@ -492,7 +492,7 @@ TickCount Timers::GetTicksUntilNextInterrupt()
   {
     const CounterState& cs = s_state.counters[i];
     if (!cs.counting_enabled || (i < 2 && cs.external_counting_enabled) ||
-        (!cs.mode.irq_at_target && !cs.mode.irq_on_overflow && (cs.mode.irq_repeat || !cs.irq_done)))
+        (!cs.mode.irq_at_target && !cs.mode.irq_on_overflow) || (!cs.mode.irq_repeat && cs.irq_done))
     {
       continue;
     }
