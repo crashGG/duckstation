@@ -1859,8 +1859,8 @@ bool VideoPresenter::LoadOverlaySettings()
   const bool image_changed = (s_locals.border_overlay_image_path != image_path);
   const bool changed =
     (image_changed ||
-     (!image_path.empty() && (alpha_blend == s_locals.border_overlay_alpha_blend ||
-                              destination_alpha_blend == s_locals.border_overlay_destination_alpha_blend)));
+     (!image_path.empty() && (alpha_blend != s_locals.border_overlay_alpha_blend ||
+                              destination_alpha_blend != s_locals.border_overlay_destination_alpha_blend)));
   if (image_changed)
     s_locals.border_overlay_image_path = std::move(image_path);
 
