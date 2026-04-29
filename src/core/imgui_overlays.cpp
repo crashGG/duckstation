@@ -724,7 +724,7 @@ void ImGuiManager::DrawFrameTimeOverlay(float& position_y, float scale, float ma
       }
 
       min = vmin.minv();
-      max = vmin.maxv();
+      max = vmax.maxv();
     }
 
     // add a little bit of space either side, so we're not constantly resizing
