@@ -394,7 +394,7 @@ bool System::PerformEarlyHardwareChecks(Error* error)
   if (runtime_host_page_size == 0)
   {
     Error::SetStringFmt(error, "Cannot determine size of page. Continuing with expectation of {} byte pages.",
-                        runtime_host_page_size);
+                        HOST_PAGE_SIZE);
   }
   else if (HOST_PAGE_SIZE != runtime_host_page_size)
   {
@@ -3658,7 +3658,7 @@ bool System::SaveStateBufferToFile(const SaveStateBuffer& buffer, std::FILE* fp,
   // re-write header
   if (std::fwrite(&header, sizeof(header), 1, fp) != 1 || std::fflush(fp) != 0)
   {
-    Error::SetErrno(error, "fwrite()/fflush() to rewrite header failed: {}", errno);
+    Error::SetErrno(error, "fwrite()/fflush() to rewrite header failed: ", errno);
     return false;
   }
 
@@ -6351,7 +6351,8 @@ bool System::ChangeGPUDump(std::string new_path)
   std::unique_ptr<GPUDump::Player> new_dump = GPUDump::Player::Open(std::move(new_path), &error);
   if (!new_dump)
   {
-    Host::ReportErrorAsync("Error", fmt::format(TRANSLATE_FS("Failed to change GPU dump: {}", error.GetDescription())));
+    Host::ReportErrorAsync(
+      "Error", fmt::format(TRANSLATE_FS("System", "Failed to change GPU dump: {}"), error.GetDescription()));
     return false;
   }
 
