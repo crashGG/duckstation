@@ -1008,10 +1008,10 @@ void VideoPresenter::DrawScreenQuad(const GSVector4i rect, const GSVector4 uv_re
       break;
 
     case DisplayRotation::Rotate180:
-      vertices[0].Set(xy.xy(), uv_rect.xwzw().xy());
-      vertices[1].Set(xy.zyzw().xy(), uv_rect.zw());
-      vertices[2].Set(xy.xwzw().xy(), uv_rect.xy());
-      vertices[3].Set(xy.zw(), uv_rect.zyzw().xy());
+      vertices[0].Set(xy.xy(), uv_rect.zw());
+      vertices[1].Set(xy.zyzw().xy(), uv_rect.xwzw().xy());
+      vertices[2].Set(xy.xwzw().xy(), uv_rect.zyzw().xy());
+      vertices[3].Set(xy.zw(), uv_rect.xy());
       break;
 
     case DisplayRotation::Rotate270:
