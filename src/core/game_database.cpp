@@ -1333,6 +1333,13 @@ bool GameDatabase::SaveToCache()
     writer.WriteU32(it.second);
   }
 
+  if (!writer.Flush(&error))
+  {
+    ERROR_LOG("Failed to write cache file: {}", error.GetDescription());
+    FileSystem::DiscardAtomicRenamedFile(file);
+    return false;
+  }
+
   return true;
 }
 
