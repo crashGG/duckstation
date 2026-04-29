@@ -873,7 +873,7 @@ D3D12DownloadTexture::~D3D12DownloadTexture()
     D3D12DownloadTexture::Unmap();
 
   if (m_buffer)
-    D3D12Device::GetInstance().DeferResourceDestruction(m_allocation.Get(), m_buffer.Get());
+    D3D12Device::GetInstance().DeferResourceDestruction(std::move(m_allocation), std::move(m_buffer));
 }
 
 std::unique_ptr<D3D12DownloadTexture> D3D12DownloadTexture::Create(u32 width, u32 height, GPUTextureFormat format,
