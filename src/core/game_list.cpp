@@ -1430,9 +1430,9 @@ bool GameList::ParsePlayedTimeLine(char* line, std::string_view& serial, PlayedT
 
   const std::string_view serial_tok(StringUtil::StripWhitespace(std::string_view(line, PLAYED_TIME_SERIAL_LENGTH)));
   const std::string_view total_played_time_tok(
-    StringUtil::StripWhitespace(std::string_view(line + PLAYED_TIME_SERIAL_LENGTH + 1, PLAYED_TIME_LAST_TIME_LENGTH)));
+    StringUtil::StripWhitespace(std::string_view(line + PLAYED_TIME_SERIAL_LENGTH + 1, PLAYED_TIME_TOTAL_TIME_LENGTH)));
   const std::string_view last_played_time_tok(StringUtil::StripWhitespace(std::string_view(
-    line + PLAYED_TIME_SERIAL_LENGTH + 1 + PLAYED_TIME_LAST_TIME_LENGTH + 1, PLAYED_TIME_TOTAL_TIME_LENGTH)));
+    line + PLAYED_TIME_SERIAL_LENGTH + 1 + PLAYED_TIME_TOTAL_TIME_LENGTH + 1, PLAYED_TIME_LAST_TIME_LENGTH)));
 
   const std::optional<u64> total_played_time(StringUtil::FromChars<u64>(total_played_time_tok));
   const std::optional<u64> last_played_time(StringUtil::FromChars<u64>(last_played_time_tok));
