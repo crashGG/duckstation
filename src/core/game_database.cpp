@@ -461,7 +461,7 @@ void GameDatabase::Entry::ApplySettings(Settings& settings, bool display_osd_mes
   {
     settings.display_line_end_offset = display_line_end_offset.value();
     if (display_osd_messages)
-      INFO_LOG("GameDB: Display line end offset set to {}.", settings.display_line_start_offset);
+      INFO_LOG("GameDB: Display line end offset set to {}.", settings.display_line_end_offset);
   }
   if (dma_max_slice_ticks.has_value())
   {
@@ -574,7 +574,7 @@ void GameDatabase::Entry::ApplySettings(Settings& settings, bool display_osd_mes
 
   if (HasTrait(Trait::DisableCDROMReadSpeedup))
   {
-    if (settings.cdrom_read_speedup != 1)
+    if (display_osd_messages && settings.cdrom_read_speedup != 1)
       append_message(TRANSLATE_SV("GameDatabase", "CD-ROM read speedup disabled."));
 
     settings.cdrom_read_speedup = 1;
@@ -582,7 +582,7 @@ void GameDatabase::Entry::ApplySettings(Settings& settings, bool display_osd_mes
 
   if (HasTrait(Trait::DisableCDROMSeekSpeedup))
   {
-    if (settings.cdrom_seek_speedup != 1)
+    if (display_osd_messages && settings.cdrom_seek_speedup != 1)
       append_message(TRANSLATE_SV("GameDatabase", "CD-ROM seek speedup disabled."));
 
     settings.cdrom_seek_speedup = 1;
