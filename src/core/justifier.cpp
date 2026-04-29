@@ -139,11 +139,6 @@ void Justifier::SetBindState(u32 index, float value)
     m_button_state |= u16(1) << s_button_indices[static_cast<u8>(index)];
 }
 
-bool Justifier::IsTriggerPressed() const
-{
-  return ((m_button_state & (1u << 15)) != 0);
-}
-
 void Justifier::ResetTransferState()
 {
   m_transfer_state = TransferState::Idle;
