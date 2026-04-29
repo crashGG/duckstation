@@ -51,11 +51,11 @@ const std::tuple<GLenum, GLenum, GLenum>& OpenGLTexture::GetPixelFormatMapping(G
       {GL_R32I, GL_RED_INTEGER, GL_INT},                                                        // R32I
       {GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT},                                              // R32U
       {GL_R32F, GL_RED, GL_FLOAT},                                                              // R32F
-      {GL_RG8, GL_RG_INTEGER, GL_UNSIGNED_BYTE},                                                // RG8
-      {GL_RG16F, GL_RG, GL_UNSIGNED_SHORT},                                                     // RG16
+      {GL_RG8, GL_RG, GL_UNSIGNED_BYTE},                                                        // RG8
+      {GL_RG16, GL_RG, GL_UNSIGNED_SHORT},                                                      // RG16
       {GL_RG16F, GL_RG, GL_HALF_FLOAT},                                                         // RG16F
       {GL_RG32F, GL_RG, GL_FLOAT},                                                              // RG32F
-      {GL_RGBA16, GL_RGBA, GL_UNSIGNED_BYTE},                                                   // RGBA16
+      {GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT},                                                  // RGBA16
       {GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},                                                     // RGBA16F
       {GL_RGBA32F, GL_RGBA, GL_FLOAT},                                                          // RGBA32F
       {GL_RGB10_A2, GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV},                                   // RGB10A2
@@ -88,10 +88,10 @@ const std::tuple<GLenum, GLenum, GLenum>& OpenGLTexture::GetPixelFormatMapping(G
       {GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT},                                              // R32U
       {GL_R32F, GL_RED, GL_FLOAT},                                                              // R32F
       {GL_RG8, GL_RG, GL_UNSIGNED_BYTE},                                                        // RG8
-      {GL_RG16F, GL_RG, GL_HALF_FLOAT},                                                         // RG16
+      {GL_RG16, GL_RG, GL_HALF_FLOAT},                                                          // RG16
       {GL_RG16F, GL_RG, GL_HALF_FLOAT},                                                         // RG16F
       {GL_RG32F, GL_RG, GL_FLOAT},                                                              // RG32F
-      {GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},                                                     // RGBA16
+      {GL_RGBA16, GL_RGBA, GL_HALF_FLOAT},                                                      // RGBA16
       {GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},                                                     // RGBA16F
       {GL_RGBA32F, GL_RGBA, GL_FLOAT},                                                          // RGBA32F
       {GL_RGB10_A2, GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV},                                   // RGB10A2
@@ -288,10 +288,9 @@ std::unique_ptr<OpenGLTexture> OpenGLTexture::Create(u32 width, u32 height, u32 
     }
   }
 
-  const GLenum gl_error = glGetError();
-  if (gl_error != GL_NO_ERROR)
+  if (const GLenum err = glGetError(); err != GL_NO_ERROR)
   {
-    Error::SetStringFmt(error, "Failed to create texture: 0x{:X}", gl_error);
+    Error::SetStringFmt(error, "Failed to create texture: 0x{:X}", err);
     glDeleteTextures(1, &id);
     return nullptr;
   }
@@ -547,9 +546,9 @@ std::unique_ptr<GPUSampler> OpenGLDevice::CreateSampler(const GPUSampler::Config
   GLuint sampler;
   glGetError();
   glGenSamplers(1, &sampler);
-  if (glGetError() != GL_NO_ERROR)
+  if (const GLenum err = glGetError(); err != GL_NO_ERROR)
   {
-    Error::SetStringFmt(error, "Failed to create sampler: {:X}", sampler);
+    Error::SetStringFmt(error, "Failed to create sampler: {:X}", err);
     return {};
   }
 
