@@ -4410,6 +4410,12 @@ void System::UpdateRunningGame(const std::string& path, CDImage* image, bool boo
 
   UpdateRichPresence(booting);
 
+  if (!s_state.running_game_title.empty())
+  {
+    INFO_LOG("Game: {} | {} | HASH-{:016X}", s_state.running_game_title, s_state.running_game_serial,
+             s_state.running_game_hash);
+  }
+
   if (!booting)
   {
     VideoThread::UpdateGameInfo(s_state.running_game_title, s_state.running_game_serial, s_state.running_game_path,
