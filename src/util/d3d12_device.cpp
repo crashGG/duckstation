@@ -235,7 +235,7 @@ bool D3D12Device::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateF
   }
 
   GPUDriverType driver_type = GPUDriverType::Unknown;
-  if (std::string adapter_name = D3DCommon::GetAdapterName(m_adapter.Get(), &driver_type); adapter_name.empty())
+  if (std::string adapter_name = D3DCommon::GetAdapterName(m_adapter.Get(), &driver_type); !adapter_name.empty())
     INFO_LOG("D3D Adapter: {}", adapter_name);
   SetDriverType(driver_type);
 
