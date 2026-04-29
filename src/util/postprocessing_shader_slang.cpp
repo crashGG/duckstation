@@ -2125,6 +2125,9 @@ bool PostProcessing::SlangShader::ResizeTargets(u32 source_width, u32 source_hei
       case ScaleType::Absolute:
         return static_cast<u32>(val);
 
+      case ScaleType::Original:
+        return static_cast<u32>(static_cast<float>(original_dim) * val);
+
         DefaultCaseIsUnreachable();
     }
   };
