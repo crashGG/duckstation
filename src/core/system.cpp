@@ -1435,7 +1435,7 @@ void System::SetDefaultSettings(SettingsInterface& si)
   si.SetUIntValue("MediaCapture", "VideoBitrate", Settings::DEFAULT_MEDIA_CAPTURE_VIDEO_BITRATE);
   si.SetStringValue("MediaCapture", "VideoCodec", "");
   si.SetBoolValue("MediaCapture", "VideoCodecUseArgs", false);
-  si.SetStringValue("MediaCapture", "AudioCodecArgs", "");
+  si.SetStringValue("MediaCapture", "VideoCodecArgs", "");
   si.SetBoolValue("MediaCapture", "AudioCapture", true);
   si.SetUIntValue("MediaCapture", "AudioBitrate", Settings::DEFAULT_MEDIA_CAPTURE_AUDIO_BITRATE);
   si.SetStringValue("MediaCapture", "AudioCodec", "");
@@ -5783,7 +5783,7 @@ bool System::StartMediaCapture(std::string path, bool capture_video, bool captur
         capture_video, Core::GetSmallStringSettingValue("MediaCapture", "VideoCodec"),
         Core::GetUIntSettingValue("MediaCapture", "VideoBitrate", Settings::DEFAULT_MEDIA_CAPTURE_VIDEO_BITRATE),
         Core::GetBoolSettingValue("MediaCapture", "VideoCodecUseArgs", false) ?
-          Core::GetStringSettingValue("MediaCapture", "AudioCodecArgs") :
+          Core::GetStringSettingValue("MediaCapture", "VideoCodecArgs") :
           std::string(),
         capture_audio, Core::GetSmallStringSettingValue("MediaCapture", "AudioCodec"),
         Core::GetUIntSettingValue("MediaCapture", "AudioBitrate", Settings::DEFAULT_MEDIA_CAPTURE_AUDIO_BITRATE),
