@@ -409,7 +409,7 @@ bool CDImagePPF::AddPatch(u64 offset, std::span<const u8> patch, std::span<const
       return true;
     }
 
-    const u32 bytes_to_patch = std::min(static_cast<u32>(patch.size()), RAW_SECTOR_SIZE - sector_offset);
+    const u32 bytes_to_patch = std::min(remaining_patch_size, RAW_SECTOR_SIZE - sector_offset);
 
     auto iter = m_replacement_map.find(sector_index);
     if (iter == m_replacement_map.end())
