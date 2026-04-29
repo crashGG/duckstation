@@ -264,7 +264,7 @@ std::unique_ptr<OpenGLTexture> OpenGLTexture::Create(u32 width, u32 height, u32 
         }
 
         if (data_ptr)
-          data_ptr += data_pitch * current_width;
+          data_ptr += data_pitch * current_height;
 
         current_width = (current_width > 1) ? (current_width / 2u) : current_width;
         current_height = (current_height > 1) ? (current_height / 2u) : current_height;
