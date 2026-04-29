@@ -621,11 +621,14 @@ inline bool PostProcessing::SlangShaderPreprocessor::HandleIncludeDirective(std:
     return false;
   }
 
-  if (!ParseFile(m_path, operand.substr(1, operand.size() - 2)))
-    return false;
+  m_include_depth++;
+
+  const bool result = ParseFile(m_path, operand.substr(1, operand.size() - 2));
+
+  m_include_depth--;
 
   m_needs_line_reset = true;
-  return true;
+  return result;
 }
 
 inline bool PostProcessing::SlangShaderPreprocessor::HandlePragmaDirective(std::string_view line)
