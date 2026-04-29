@@ -909,7 +909,7 @@ void VideoThread::ReconfigureOnThread(VideoThreadReconfigureCommand* cmd)
   {
     GPUBackendReadVRAMCommand read_cmd;
     read_cmd.type = VideoThreadCommandType::ReadVRAM;
-    read_cmd.size = sizeof(cmd);
+    read_cmd.size = sizeof(read_cmd);
     read_cmd.x = 0;
     read_cmd.y = 0;
     read_cmd.width = VRAM_WIDTH;
