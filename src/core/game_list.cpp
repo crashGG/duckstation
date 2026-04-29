@@ -1007,25 +1007,6 @@ const GameList::Entry* GameList::GetEntryBySerial(std::string_view serial)
   return fallback_entry;
 }
 
-const GameList::Entry* GameList::GetEntryBySerialAndHash(std::string_view serial, u64 hash)
-{
-  const Entry* fallback_entry = nullptr;
-
-  for (const Entry& entry : s_state.entries)
-  {
-    if (!entry.IsDiscSet() && entry.serial == serial && entry.hash == hash)
-    {
-      // prefer actual discs
-      if (!entry.IsDisc())
-        fallback_entry = fallback_entry ? fallback_entry : &entry;
-      else
-        return &entry;
-    }
-  }
-
-  return nullptr;
-}
-
 std::vector<const GameList::Entry*> GameList::GetDiscSetMembers(const GameDatabase::DiscSetEntry* dsentry,
                                                                 bool sort_by_most_recent)
 {
