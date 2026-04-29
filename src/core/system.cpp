@@ -3572,7 +3572,7 @@ bool System::SaveStateDataToBuffer(std::span<u8> data, size_t* data_size, Error*
   if (IsShutdown()) [[unlikely]]
   {
     Error::SetStringView(error, "System is invalid.");
-    return 0;
+    return false;
   }
 
   // back up and restore memory affected by cheats when saving state
@@ -4780,7 +4780,6 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
              g_settings.display_fine_crop_amount != old_settings.display_fine_crop_amount ||
              g_settings.display_alignment != old_settings.display_alignment ||
              g_settings.display_rotation != old_settings.display_rotation ||
-             g_settings.display_deinterlacing_mode != old_settings.display_deinterlacing_mode ||
              g_settings.gpu_pgxp_enable != old_settings.gpu_pgxp_enable ||
              g_settings.gpu_pgxp_texture_correction != old_settings.gpu_pgxp_texture_correction ||
              g_settings.gpu_pgxp_color_correction != old_settings.gpu_pgxp_color_correction ||
@@ -4831,7 +4830,6 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
              g_settings.display_show_latency_stats != old_settings.display_show_latency_stats ||
              g_settings.display_show_cpu_usage != old_settings.display_show_cpu_usage ||
              g_settings.display_show_gpu_usage != old_settings.display_show_gpu_usage ||
-             g_settings.display_show_latency_stats != old_settings.display_show_latency_stats ||
              g_settings.display_show_frame_times != old_settings.display_show_frame_times ||
              g_settings.display_show_status_indicators != old_settings.display_show_status_indicators ||
              g_settings.display_show_inputs != old_settings.display_show_inputs ||
