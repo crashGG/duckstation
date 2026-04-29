@@ -427,6 +427,8 @@ bool StartRecordingGPUDump(const char* path = nullptr, u32 num_frames = 1);
 void StopRecordingGPUDump();
 
 /// Returns the path that a new media capture would be saved to by default. Safe to call from any thread.
+std::string GetNewCapturePath(const std::string& directory, const std::string_view title, CaptureFileNameFormat format,
+                              std::string_view extension);
 std::string GetNewMediaCapturePath(const std::string_view title, const std::string_view container);
 
 /// Current media capture (if active).

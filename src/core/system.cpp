@@ -181,7 +181,6 @@ static void ClearRunningGame();
 static void DestroySystem();
 
 static void RecreateGPU(GPURenderer new_renderer);
-static std::string GetScreenshotPath(std::string_view extension);
 static bool StartMediaCapture(std::string path, bool capture_video, bool capture_audio, u32 video_width,
                               u32 video_height);
 static void StopMediaCapture(std::unique_ptr<MediaCapture> cap);
@@ -356,11 +355,6 @@ struct ALIGN_TO_CACHE_LINE StateVars
 static StateVars s_state;
 
 } // namespace System
-
-static TinyString GetTimestampStringForFileName()
-{
-  return TinyString::from_format("{:%Y-%m-%d-%H-%M-%S}", Common::LocalTime(std::time(nullptr)).value_or(std::tm{}));
-}
 
 bool System::PerformEarlyHardwareChecks(Error* error)
 {
@@ -1428,6 +1422,8 @@ void System::SetDefaultSettings(SettingsInterface& si)
 #ifndef __ANDROID__
   si.SetStringValue("MediaCapture", "Backend", MediaCapture::GetBackendName(Settings::DEFAULT_MEDIA_CAPTURE_BACKEND));
   si.SetStringValue("MediaCapture", "Container", Settings::DEFAULT_MEDIA_CAPTURE_CONTAINER);
+  si.SetStringValue("MediaCapture", "FileNameFormat",
+                    Settings::GetCaptureFileNameFormatName(Settings::DEFAULT_MEDIA_CAPTURE_FILENAME_FORMAT));
   si.SetBoolValue("MediaCapture", "VideoCapture", true);
   si.SetUIntValue("MediaCapture", "VideoWidth", Settings::DEFAULT_MEDIA_CAPTURE_VIDEO_WIDTH);
   si.SetUIntValue("MediaCapture", "VideoHeight", Settings::DEFAULT_MEDIA_CAPTURE_VIDEO_HEIGHT);
@@ -4836,8 +4832,6 @@ void System::CheckForSettingsChanges(const Settings& old_settings)
              g_settings.display_show_enhancements != old_settings.display_show_enhancements ||
              g_settings.display_auto_resize_window != old_settings.display_auto_resize_window ||
              g_settings.display_screenshot_mode != old_settings.display_screenshot_mode ||
-             g_settings.display_screenshot_format != old_settings.display_screenshot_format ||
-             g_settings.display_screenshot_quality != old_settings.display_screenshot_quality ||
              g_settings.display_osd_scale != old_settings.display_osd_scale ||
              g_settings.display_osd_margin != old_settings.display_osd_margin ||
              g_settings.display_osd_message_duration != old_settings.display_osd_message_duration ||
@@ -5624,27 +5618,82 @@ void System::UpdateVolume()
   SPU::GetOutputStream().SetOutputVolume(GetAudioOutputVolume());
 }
 
-std::string System::GetScreenshotPath(std::string_view extension)
+std::string System::GetNewCapturePath(const std::string& directory, const std::string_view title,
+                                      CaptureFileNameFormat format, std::string_view extension)
 {
-  const std::string sanitized_name = Path::SanitizeFileName(System::GetGameTitle());
-  std::string basename;
-  if (sanitized_name.empty())
-    basename = fmt::format("{}", GetTimestampStringForFileName());
-  else
-    basename = fmt::format("{} {}", sanitized_name, GetTimestampStringForFileName());
+  // don't calculate if unnecessary
+  std::string sanitized_title;
+  if (!title.empty() &&
+      (format == CaptureFileNameFormat::TitleAndTimestamp || format >= CaptureFileNameFormat::TimestampInFolder))
+  {
+    sanitized_title = Path::SanitizeFileName(title);
+  }
 
-  std::string path = fmt::format("{}" FS_OSPATH_SEPARATOR_STR "{}.{}", EmuFolders::Screenshots, basename, extension);
+  std::string path;
+  if (format >= CaptureFileNameFormat::TimestampInFolder && !sanitized_title.empty())
+  {
+    path = Path::Combine(directory, sanitized_title);
+
+    if (Error error; !FileSystem::EnsureDirectoryExists(path.c_str(), false, &error)) [[unlikely]]
+    {
+      WARNING_LOG("Failed to create capture subdirectory '{}': {}", path, error.GetDescription());
+      path = directory;
+    }
+  }
+  else
+  {
+    path = directory;
+  }
+
+  path += FS_OSPATH_SEPARATOR_CHARACTER;
+
+  if ((format == CaptureFileNameFormat::TitleAndTimestamp ||
+       format == CaptureFileNameFormat::TitleAndTimestampInFolder) &&
+      !sanitized_title.empty())
+  {
+    path += sanitized_title;
+    path += ' ';
+  }
+
+  fmt::format_to(std::back_inserter(path), "{:%Y-%m-%d-%H-%M-%S}",
+                 Common::LocalTime(std::time(nullptr)).value_or(std::tm{}));
+
+  if (!extension.empty())
+  {
+    path += '.';
+    path += extension;
+  }
 
   // handle quick screenshots to the same filename
   u32 next_suffix = 1;
   while (FileSystem::FileExists(path.c_str()))
   {
-    path =
-      fmt::format("{}" FS_OSPATH_SEPARATOR_STR "{} ({}).{}", EmuFolders::Screenshots, basename, next_suffix, extension);
+    // remove and re-add the extension
+    if (!extension.empty())
+      path.erase(path.rfind('.'));
+
+    // and the suffix if this isn't the first
+    if (next_suffix > 1)
+      path.erase(path.rfind(' '));
+
+    if (!extension.empty())
+      fmt::format_to(std::back_inserter(path), " ({}).{}", next_suffix, extension);
+    else
+      fmt::format_to(std::back_inserter(path), " ({})", next_suffix);
+
     next_suffix++;
   }
 
   return path;
+}
+
+std::string System::GetNewMediaCapturePath(const std::string_view title, const std::string_view container)
+{
+  const CaptureFileNameFormat format =
+    Settings::ParseCaptureFileNameFormat(Core::GetBaseTinyStringSettingValue("MediaCapture", "FilenameFormat"))
+      .value_or(Settings::DEFAULT_MEDIA_CAPTURE_FILENAME_FORMAT);
+
+  return GetNewCapturePath(EmuFolders::Videos, title, format, container);
 }
 
 void System::SaveScreenshot(const char* path, DisplayScreenshotMode mode, DisplayScreenshotFormat format, u8 quality)
@@ -5654,7 +5703,12 @@ void System::SaveScreenshot(const char* path, DisplayScreenshotMode mode, Displa
 
   std::string auto_path;
   if (!path || path[0] == '\0')
-    path = (auto_path = GetScreenshotPath(Settings::GetDisplayScreenshotFormatExtension(format))).c_str();
+  {
+    path = (auto_path = GetNewCapturePath(EmuFolders::Screenshots, s_state.running_game_title,
+                                          g_settings.display_screenshot_filename_format,
+                                          Settings::GetDisplayScreenshotFormatExtension(format)))
+             .c_str();
+  }
 
   GPUBackend::RenderScreenshotToFile(path, mode, quality, true);
 }
@@ -5666,7 +5720,11 @@ bool System::StartRecordingGPUDump(const char* path /*= nullptr*/, u32 num_frame
 
   std::string auto_path;
   if (!path)
-    path = (auto_path = GetScreenshotPath("psxgpu")).c_str();
+  {
+    path = (auto_path = GetNewCapturePath(EmuFolders::Screenshots, s_state.running_game_title,
+                                          g_settings.display_screenshot_filename_format, "psxgpu"))
+             .c_str();
+  }
 
   return g_gpu.StartRecordingGPUDump(path, num_frames);
 }
@@ -5689,23 +5747,6 @@ static std::string_view GetCaptureTypeForMessage(bool capture_video, bool captur
 MediaCapture* System::GetMediaCapture()
 {
   return s_state.media_capture.get();
-}
-
-std::string System::GetNewMediaCapturePath(const std::string_view title, const std::string_view container)
-{
-  const std::string sanitized_name = Path::SanitizeFileName(title);
-  std::string path;
-  if (sanitized_name.empty())
-  {
-    path = Path::Combine(EmuFolders::Videos, fmt::format("{}.{}", GetTimestampStringForFileName(), container));
-  }
-  else
-  {
-    path = Path::Combine(EmuFolders::Videos,
-                         fmt::format("{} {}.{}", sanitized_name, GetTimestampStringForFileName(), container));
-  }
-
-  return path;
 }
 
 bool System::StartMediaCapture(std::string path)
@@ -5764,9 +5805,9 @@ bool System::StartMediaCapture(std::string path, bool capture_video, bool captur
 
   if (path.empty())
   {
-    path =
-      GetNewMediaCapturePath(GetGameTitle(), Core::GetStringSettingValue("MediaCapture", "Container",
-                                                                         Settings::DEFAULT_MEDIA_CAPTURE_CONTAINER));
+    path = GetNewMediaCapturePath(
+      s_state.running_game_title,
+      Core::GetTinyStringSettingValue("MediaCapture", "Container", Settings::DEFAULT_MEDIA_CAPTURE_CONTAINER));
   }
 
   const MediaCaptureBackend backend =
