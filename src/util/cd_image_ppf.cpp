@@ -165,7 +165,7 @@ bool CDImagePPF::ReadV1Patch(std::FILE* fp, Error* error)
   }
 
   u32 count = filelen - 56;
-  if (count <= 0)
+  if (count == 0)
   {
     Error::SetStringView(error, "Invalid count/filelen");
     return false;
@@ -261,9 +261,18 @@ bool CDImagePPF::ReadV2Patch(std::FILE* fp, Error* error)
 
   u32 count = filelen - 1084;
   if (idlen > 0)
-    count -= (idlen + 38);
+  {
+    const u32 extralen = idlen + 38;
+    if (count < extralen)
+    {
+      Error::SetStringView(error, "File is too short (diz)");
+      return false;
+    }
 
-  if (count <= 0)
+    count -= extralen;
+  }
+
+  if (count == 0)
     return false;
 
   if (std::fseek(fp, 1084, SEEK_SET) != 0)
@@ -392,8 +401,8 @@ bool CDImagePPF::ReadV3Patch(std::FILE* fp, Error* error)
 
 bool CDImagePPF::AddPatch(u64 offset, std::span<const u8> patch, std::span<const u8> undo_data, Error* error)
 {
-  DEBUG_LOG("Starting applying patch{} of {} bytes at at offset {}", patch.empty() ? "" : " with undo data",
-            patch.size(), offset);
+  DEBUG_LOG("Starting applying patch{} of {} bytes at offset {}", patch.empty() ? "" : " with undo data", patch.size(),
+            offset);
 
   DebugAssert(undo_data.empty() || patch.size() == undo_data.size());
 
