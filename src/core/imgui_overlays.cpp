@@ -555,9 +555,7 @@ void ImGuiManager::DrawPerformanceOverlay(const GPUBackend* gpu, float& position
     DrawPerformanceStat(dl, position_y, ui_font, status_size, 0.0f, 0, rbound, text);
   }
 
-#undef UNCOLOR
 #undef COLOR
-#undef UNBOLD
 #undef BOLD
 }
 
