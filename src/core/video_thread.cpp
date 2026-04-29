@@ -503,6 +503,7 @@ void VideoThread::Internal::VideoThreadEntryPoint()
           // Should have consumed everything, and be shutdown.
           DebugAssert(read_ptr == write_ptr);
           s_state.command_fifo_read_ptr.store(read_ptr, std::memory_order_release);
+          s_state.thread_handle = {};
           return;
         }
         break;
@@ -515,8 +516,6 @@ void VideoThread::Internal::VideoThreadEntryPoint()
     DebugAssert(read_ptr <= COMMAND_QUEUE_SIZE);
     s_state.command_fifo_read_ptr.store(read_ptr % COMMAND_QUEUE_SIZE, std::memory_order_release);
   }
-
-  s_state.thread_handle = {};
 }
 
 void VideoThread::Internal::DoRunIdle()
