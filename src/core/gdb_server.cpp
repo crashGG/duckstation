@@ -271,7 +271,7 @@ bool GDBServer::Cmd$M(ClientSocket* client, std::string_view data)
   // large enough for most requests
   llvm::SmallVector<u8, 128> buffer;
   buffer.resize_for_overwrite(length.value());
-  if (!StringUtil::DecodeHex(buffer, caret))
+  if (StringUtil::DecodeHex(buffer, caret) != length.value())
   {
     ERROR_LOG("Invalid hex in packet {}", data);
     return false;
