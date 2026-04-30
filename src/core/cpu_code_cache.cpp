@@ -1257,17 +1257,16 @@ void CPU::CodeCache::FillBlockRegInfo(Block* block)
           }
         }
         break;
-
-        case InstructionOp::lwc2:
-        case InstructionOp::swc2:
-          BackpropSetReads(rs);
-          BackpropSetReads(rt);
-          break;
-
-        default:
-          ERROR_LOG("Unknown op {}", static_cast<u32>(iinst->op.GetValue()));
-          break;
       }
+
+      case InstructionOp::lwc2:
+      case InstructionOp::swc2:
+        BackpropSetReads(rs);
+        break;
+
+      default:
+        ERROR_LOG("Unknown op {}", static_cast<u32>(iinst->op.GetValue()));
+        break;
     } // end switch
 
     inst--;
