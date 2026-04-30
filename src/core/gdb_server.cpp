@@ -553,7 +553,7 @@ void GDBServer::ClientSocket::OnSystemPaused()
   m_seen_resume = false;
 
   // Generate a stop reply packet, insert '?' command to generate it.
-  SendReplyWithAck("S00");
+  SendReplyWithAck("S05");
 }
 
 void GDBServer::ClientSocket::OnSystemResumed()
