@@ -4806,7 +4806,7 @@ void FullscreenUI::FileSelectorDialog::PopulateItems()
       }
       else
       {
-        if (m_filters.empty() || std::none_of(m_filters.begin(), m_filters.end(), [&fd](const std::string& filter) {
+        if (!m_filters.empty() && std::none_of(m_filters.begin(), m_filters.end(), [&fd](const std::string& filter) {
               return StringUtil::WildcardMatch(fd.FileName.c_str(), filter.c_str(), false);
             }))
         {
