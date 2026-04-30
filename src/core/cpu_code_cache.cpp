@@ -627,7 +627,7 @@ CPU::CodeCache::PageProtectionMode CPU::CodeCache::GetProtectionModeForBlock(con
 
 void CPU::CodeCache::InvalidateBlock(Block* block, BlockState new_state)
 {
-  if (block->state == BlockState::Valid)
+  if (block->state == BlockState::Valid || block->state == BlockState::FallbackToInterpreter)
   {
     SetCodeLUT(block->pc, g_compile_or_revalidate_block);
     BacklinkBlocks(block->pc, g_compile_or_revalidate_block);
