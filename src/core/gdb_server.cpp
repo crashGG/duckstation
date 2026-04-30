@@ -292,7 +292,6 @@ bool GDBServer::Cmd$M(ClientSocket* client, std::string_view data)
 bool GDBServer::Cmd$s(ClientSocket* client, std::string_view data)
 {
   System::SingleStepCPU();
-  client->SendReplyWithAck("OK");
   return true;
 }
 
