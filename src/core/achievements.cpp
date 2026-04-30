@@ -2614,7 +2614,7 @@ void Achievements::BeginRefreshHashDatabase()
     rc_client_begin_fetch_hash_library(s_state.client, RC_CONSOLE_PLAYSTATION, FetchHashLibraryCallback, nullptr);
   s_state.fetch_all_progress_request =
     rc_client_begin_fetch_all_user_progress(s_state.client, RC_CONSOLE_PLAYSTATION, FetchAllProgressCallback, nullptr);
-  if (!s_state.fetch_hash_library_request || !s_state.fetch_hash_library_request)
+  if (!s_state.fetch_hash_library_request || !s_state.fetch_all_progress_request)
   {
     ERROR_LOG("Failed to create hash database refresh requests.");
     CancelHashDatabaseRequests();

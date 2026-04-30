@@ -65,8 +65,8 @@ CaptureSettingsWidget::CaptureSettingsWidget(SettingsWindow* dialog, QWidget* pa
   SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableAudioCapture, "MediaCapture", "AudioCapture", true);
   SettingWidgetBinder::BindWidgetToIntSetting(sif, m_ui.audioCaptureBitrate, "MediaCapture", "AudioBitrate",
                                               Settings::DEFAULT_MEDIA_CAPTURE_AUDIO_BITRATE);
-  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableVideoCaptureArguments, "MediaCapture",
-                                               "VideoCodecUseArgs", false);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.enableAudioCaptureArguments, "MediaCapture",
+                                               "AudioCodecUseArgs", false);
   SettingWidgetBinder::BindWidgetToStringSetting(sif, m_ui.audioCaptureArguments, "MediaCapture", "AudioCodecArgs");
 
   connect(m_ui.mediaCaptureBackend, &QComboBox::currentIndexChanged, this,

@@ -4806,7 +4806,7 @@ void FullscreenUI::FileSelectorDialog::PopulateItems()
       }
       else
       {
-        if (m_filters.empty() || std::none_of(m_filters.begin(), m_filters.end(), [&fd](const std::string& filter) {
+        if (!m_filters.empty() && std::none_of(m_filters.begin(), m_filters.end(), [&fd](const std::string& filter) {
               return StringUtil::WildcardMatch(fd.FileName.c_str(), filter.c_str(), false);
             }))
         {
@@ -4909,7 +4909,8 @@ void FullscreenUI::FileSelectorDialog::Draw()
     }
     else
     {
-      SetDirectory(std::move(selected->full_path));
+      BeginTransition(DEFAULT_TRANSITION_TIME,
+                      [this, dir = std::move(selected->full_path)]() mutable { SetDirectory(std::move(dir)); });
     }
   }
   else if (directory_selected)
@@ -4924,7 +4925,10 @@ void FullscreenUI::FileSelectorDialog::Draw()
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false) || ImGui::IsKeyPressed(ImGuiKey_NavGamepadContextMenu, false))
     {
       if (!m_items.empty() && m_first_item_is_parent_directory)
-        SetDirectory(std::move(m_items.front().full_path));
+      {
+        BeginTransition(DEFAULT_TRANSITION_TIME,
+                        [this, dir = std::move(m_items.front().full_path)]() mutable { SetDirectory(std::move(dir)); });
+      }
     }
   }
 }
