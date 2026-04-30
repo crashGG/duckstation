@@ -4909,7 +4909,8 @@ void FullscreenUI::FileSelectorDialog::Draw()
     }
     else
     {
-      SetDirectory(std::move(selected->full_path));
+      BeginTransition(DEFAULT_TRANSITION_TIME,
+                      [this, dir = std::move(selected->full_path)]() mutable { SetDirectory(std::move(dir)); });
     }
   }
   else if (directory_selected)
@@ -4924,7 +4925,10 @@ void FullscreenUI::FileSelectorDialog::Draw()
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false) || ImGui::IsKeyPressed(ImGuiKey_NavGamepadContextMenu, false))
     {
       if (!m_items.empty() && m_first_item_is_parent_directory)
-        SetDirectory(std::move(m_items.front().full_path));
+      {
+        BeginTransition(DEFAULT_TRANSITION_TIME,
+                        [this, dir = std::move(m_items.front().full_path)]() mutable { SetDirectory(std::move(dir)); });
+      }
     }
   }
 }
