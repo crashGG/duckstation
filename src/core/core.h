@@ -64,4 +64,7 @@ SettingsInterface* GetGameSettingsLayer();
 /// Retrieves the input settings layer, if present. Must call with lock held.
 SettingsInterface* GetInputSettingsLayer();
 
+// 前端调用模式
+extern bool g_frontboot_mode;
+
 } // namespace Core
