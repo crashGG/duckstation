@@ -607,7 +607,7 @@ void GameSummaryWidget::onComputeHashClicked()
 bool GameSummaryWidget::computeImageHash(const std::string& path, CDImageHasher::TrackHashes& track_hashes,
                                          ProgressCallback* const progress, Error* const error) const
 {
-  std::unique_ptr<CDImage> image = CDImage::Open(m_path.c_str(), false, error);
+  std::unique_ptr<CDImage> image = CDImage::Open(path.c_str(), false, error);
   if (!image)
     return false;
 
