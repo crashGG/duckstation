@@ -1037,7 +1037,8 @@ void FullscreenUI::HandleSelectDiscForDiscSet(const GameDatabase::DiscSetEntry* 
 void FullscreenUI::SwitchToGameList()
 {
   s_game_list_locals.game_list_view =
-    static_cast<GameListView>(Core::GetBaseIntSettingValue("Main", "DefaultFullscreenUIGameView", 0));
+    static_cast<GameListView>(std::min(Core::GetBaseUIntSettingValue("Main", "DefaultFullscreenUIGameView", 0),
+                                       static_cast<u32>(GameListView::Count) - 1));
   s_game_list_locals.game_list_current_selection_path = {};
   s_game_list_locals.game_list_current_selection_timeout = 0.0f;
 
