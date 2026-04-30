@@ -409,7 +409,7 @@ void GameSummaryWidget::setCustomDiscSetTitle(const std::string& text)
 
   GameList::SaveCustomTitleForPath(disc_set_entry->path, text);
 
-  const QSignalBlocker sb(m_ui.title);
+  const QSignalBlocker sb(m_ui.discSetTitle);
   m_ui.discSetTitle->setText(
     QtUtils::StringViewToQString(disc_set_entry->GetDisplayTitle(GameList::ShouldShowLocalizedTitles())));
 
