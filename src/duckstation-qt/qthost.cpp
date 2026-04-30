@@ -3479,6 +3479,12 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
         AutoBoot(autoboot)->override_fast_boot = false;
         continue;
       }
+      else if (CHECK_ARG("-frontboot"))
+      {
+        Core::g_frontboot_mode = true;
+        INFO_LOG("Command Line: -frontboot enabled, using setting1.ini");
+        continue;
+      }
       else if (CHECK_ARG("-resume"))
       {
         state_index = -1;
