@@ -377,7 +377,7 @@ CPU::CodeCache::Block* CPU::CodeCache::CreateBlock(u32 pc, const BlockInstructio
 
   // retain from old block
   const u32 frame_number = System::GetFrameNumber();
-  u32 recompile_frame = System::GetFrameNumber();
+  u32 recompile_frame = frame_number;
   u8 recompile_count = 0;
 
   const u32 idx = (pc & 0xFFFF) >> 2;
@@ -1347,15 +1347,11 @@ void CPU::CodeCache::CompileOrRevalidateBlock(u32 start_pc)
 
 void CPU::CodeCache::DiscardAndRecompileBlock(u32 start_pc)
 {
-  MemMap::BeginCodeWrite();
-
   DEV_LOG("Discard block {:08X} with manual protection", start_pc);
   Block* block = LookupBlock(start_pc);
   DebugAssert(block && block->state == BlockState::Valid);
   InvalidateBlock(block, BlockState::NeedsRecompile);
   CompileOrRevalidateBlock(start_pc);
-
-  MemMap::EndCodeWrite();
 }
 
 const void* CPU::CodeCache::CreateBlockLink(Block* block, void* code, u32 newpc)
