@@ -188,7 +188,7 @@ bool GDBServer::Cmd$G(ClientSocket* client, std::string_view data)
       if (StringUtil::DecodeHex(le_value, tex_value) == 4)
       {
         *reg = ZeroExtend32(le_value[0]) | (ZeroExtend32(le_value[1]) << 8) | (ZeroExtend32(le_value[2]) << 16) |
-               (ZeroExtend32(le_value[3]) << 16);
+               (ZeroExtend32(le_value[3]) << 24);
       }
       else
       {
