@@ -1145,7 +1145,7 @@ GPUTexture* FullscreenUI::GetCoverForCurrentGame(const std::string& game_path)
 
 void FullscreenUI::SetCoverCacheEntry(std::string path, std::string cover_path)
 {
-  s_game_list_locals.cover_image_map.emplace(std::move(path), std::move(cover_path));
+  s_game_list_locals.cover_image_map.insert_or_assign(std::move(path), std::move(cover_path));
 }
 
 void FullscreenUI::RemoveCoverCacheEntry(const std::string& path)
