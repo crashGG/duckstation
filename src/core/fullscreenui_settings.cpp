@@ -548,7 +548,7 @@ void FullscreenUI::InputBindingDialog::Draw()
       // allow the dialog to fade out, but stop receiving any more events
       m_time_remaining = 0.0f;
       m_binding_type = InputBindingInfo::Type::Unknown;
-      InputManager::RemoveHook();
+      Host::RunOnCoreThread(&InputManager::RemoveHook);
       StartClose();
     }
   }
