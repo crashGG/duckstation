@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-FileCopyrightText: 2019-2026 Connor McLaughlin <stenzek@gmail.com>
 // SPDX-License-Identifier: CC-BY-NC-ND-4.0
 
 #include "bus.h"
@@ -19,6 +19,10 @@
 #include "common/intrin.h"
 #include "common/log.h"
 #include "common/memmap.h"
+
+#if defined(__APPLE__) && defined(CPU_ARCH_ARM64)
+#include <pthread.h> // pthread_jit_write_protect_np()
+#endif
 
 LOG_CHANNEL(CodeCache);
 
@@ -69,6 +73,11 @@ static constexpr u32 RECOMPILER_FAR_CODE_CACHE_SIZE = 16 * 1024 * 1024;
 #define USE_CODE_BUFFER_SECTION 1
 #endif
 
+/// JIT write protect for Apple Silicon. Needs to be called prior to writing to any RWX pages.
+#if defined(__APPLE__) && defined(CPU_ARCH_ARM64)
+#define NEEDS_JIT_WRITE_PROTECT 1
+#endif
+
 static void AllocateLUTs();
 static void DeallocateLUTs();
 static void ResetCodeLUT();
@@ -98,6 +107,7 @@ template<PGXPMode pgxp_mode>
 static void BacklinkBlocks(u32 pc, const void* dst);
 static void UnlinkBlockExits(Block* block);
 static void ResetCodeBuffer();
+static void JITWriteProtect(bool enabled);
 
 static void CompileASMFunctions();
 static bool CompileBlock(Block* block);
@@ -137,6 +147,10 @@ struct Locals
   u32 total_instructions_compiled = 0;
   u32 total_host_instructions_emitted = 0;
   u32 total_host_code_used_by_instructions = 0;
+#endif
+
+#ifdef NEEDS_JIT_WRITE_PROTECT
+  bool jit_write_protect_enabled = false;
 #endif
 };
 } // namespace
@@ -200,6 +214,11 @@ bool CPU::CodeCache::ProcessStartup(Error* error)
   if (!PageFaultHandler::Install(error))
     return false;
 
+#ifdef NEEDS_JIT_WRITE_PROTECT
+  // Write protect starts enabled.
+  s_locals.jit_write_protect_enabled = true;
+#endif
+
   return true;
 }
 
@@ -219,8 +238,7 @@ void CPU::CodeCache::Reset()
   if (IsUsingRecompiler())
   {
     ResetCodeBuffer();
-    CompileASMFunctions();
-    ResetCodeLUT();
+    JITWriteProtect(true);
   }
 }
 
@@ -598,8 +616,6 @@ void CPU::CodeCache::InvalidateBlocksWithPageIndex(u32 index)
   if (!ppi.first_block_in_page)
     return;
 
-  MemMap::BeginCodeWrite();
-
   Block* block = ppi.first_block_in_page;
   while (block)
   {
@@ -610,7 +626,7 @@ void CPU::CodeCache::InvalidateBlocksWithPageIndex(u32 index)
   ppi.first_block_in_page = nullptr;
   ppi.last_block_in_page = nullptr;
 
-  MemMap::EndCodeWrite();
+  JITWriteProtect(true);
 }
 
 CPU::CodeCache::PageProtectionMode CPU::CodeCache::GetProtectionModeForPC(u32 pc)
@@ -646,7 +662,6 @@ void CPU::CodeCache::InvalidateBlock(Block* block, BlockState new_state)
 void CPU::CodeCache::InvalidateAllRAMBlocks()
 {
   // TODO: maybe combine the backlink into one big instruction flush cache?
-  MemMap::BeginCodeWrite();
 
   for (Block* block : s_locals.blocks)
   {
@@ -657,13 +672,14 @@ void CPU::CodeCache::InvalidateAllRAMBlocks()
     }
   }
 
+  JITWriteProtect(true);
+
   for (PageProtectionInfo& ppi : s_page_protection)
   {
     ppi.first_block_in_page = nullptr;
     ppi.last_block_in_page = nullptr;
   }
 
-  MemMap::EndCodeWrite();
   Bus::ClearRAMCodePageFlags();
 }
 
@@ -1289,7 +1305,6 @@ void CPU::CodeCache::CompileOrRevalidateBlock(u32 start_pc)
 {
   // TODO: this doesn't currently handle when the cache overflows...
   DebugAssert(IsUsingRecompiler());
-  MemMap::BeginCodeWrite();
 
   Block* block = LookupBlock(start_pc);
   if (block)
@@ -1301,7 +1316,7 @@ void CPU::CodeCache::CompileOrRevalidateBlock(u32 start_pc)
       DebugAssert(block->host_code);
       SetCodeLUT(start_pc, block->host_code);
       BacklinkBlocks(start_pc, block->host_code);
-      MemMap::EndCodeWrite();
+      JITWriteProtect(true);
       return;
     }
 
@@ -1319,7 +1334,7 @@ void CPU::CodeCache::CompileOrRevalidateBlock(u32 start_pc)
     ERROR_LOG("Failed to read block at 0x{:08X}, falling back to uncached interpreter", start_pc);
     SetCodeLUT(start_pc, g_recompiler_functions.interpret_block);
     BacklinkBlocks(start_pc, g_recompiler_functions.interpret_block);
-    MemMap::EndCodeWrite();
+    JITWriteProtect(true);
     return;
   }
 
@@ -1333,22 +1348,31 @@ void CPU::CodeCache::CompileOrRevalidateBlock(u32 start_pc)
       free_far_code_space < Recompiler::MIN_CODE_RESERVE_FOR_BLOCK)
   {
     ERROR_LOG("Out of code space while compiling {:08X}. Resetting code cache.", start_pc);
-    CodeCache::Reset();
+    ResetCodeBuffer();
   }
 
-  if ((block = CreateBlock(start_pc, s_locals.block_instructions, metadata)) == nullptr || block->size == 0 ||
-      !CompileBlock(block))
+  if ((block = CreateBlock(start_pc, s_locals.block_instructions, metadata)) == nullptr || block->size == 0)
+  {
+    ERROR_LOG("Failed to create block at 0x{:08X}, falling back to uncached interpreter", start_pc);
+    SetCodeLUT(start_pc, g_recompiler_functions.interpret_block);
+    BacklinkBlocks(start_pc, g_recompiler_functions.interpret_block);
+    JITWriteProtect(true);
+    return;
+  }
+
+  JITWriteProtect(false);
+  if (!CompileBlock(block))
   {
     ERROR_LOG("Failed to compile block at 0x{:08X}, falling back to uncached interpreter", start_pc);
     SetCodeLUT(start_pc, g_recompiler_functions.interpret_block);
     BacklinkBlocks(start_pc, g_recompiler_functions.interpret_block);
-    MemMap::EndCodeWrite();
+    JITWriteProtect(true);
     return;
   }
 
   SetCodeLUT(start_pc, block->host_code);
   BacklinkBlocks(start_pc, block->host_code);
-  MemMap::EndCodeWrite();
+  JITWriteProtect(true);
 }
 
 void CPU::CodeCache::DiscardAndRecompileBlock(u32 start_pc)
@@ -1419,6 +1443,7 @@ void CPU::CodeCache::BacklinkBlocks(u32 pc, const void* dst)
   {
     DEBUG_LOG("Backlinking {} with dst pc {:08X} to {}{}", it->second, pc, dst,
               (dst == g_recompiler_functions.compile_or_revalidate_block) ? "[compiler]" : "");
+    JITWriteProtect(false);
     EmitJump(it->second, dst, true);
   }
 }
@@ -1433,10 +1458,10 @@ void CPU::CodeCache::UnlinkBlockExits(Block* block)
 
 void CPU::CodeCache::ResetCodeBuffer()
 {
+  JITWriteProtect(false);
+
   if (s_locals.code_used > 0 || s_locals.far_code_used > 0)
   {
-    MemMap::BeginCodeWrite();
-
     if (s_locals.code_used > 0)
     {
       std::memset(s_locals.code_ptr, 0, s_locals.code_used);
@@ -1448,8 +1473,6 @@ void CPU::CodeCache::ResetCodeBuffer()
       std::memset(s_locals.far_code_ptr, 0, s_locals.far_code_used);
       MemMap::FlushInstructionCache(s_locals.far_code_ptr, s_locals.far_code_used);
     }
-
-    MemMap::EndCodeWrite();
   }
 
 #ifdef USE_CODE_BUFFER_SECTION
@@ -1468,6 +1491,20 @@ void CPU::CodeCache::ResetCodeBuffer()
   s_locals.far_code_ptr = (far_code_size > 0) ? (static_cast<u8*>(s_locals.code_ptr) + s_locals.code_size) : nullptr;
   s_locals.free_far_code_ptr = s_locals.far_code_ptr;
   s_locals.far_code_used = 0;
+
+  CompileASMFunctions();
+  ResetCodeLUT();
+}
+
+ALWAYS_INLINE_RELEASE void CPU::CodeCache::JITWriteProtect(bool enabled)
+{
+#ifdef NEEDS_JIT_WRITE_PROTECT
+  if (enabled == s_locals.jit_write_protect_enabled)
+    return;
+
+  s_locals.jit_write_protect_enabled = enabled;
+  pthread_jit_write_protect_np(enabled);
+#endif
 }
 
 u8* CPU::CodeCache::GetFreeCodePointer()
@@ -1546,7 +1583,7 @@ const void* CPU::CodeCache::GetInterpretUncachedBlockFunction()
 
 void CPU::CodeCache::CompileASMFunctions()
 {
-  MemMap::BeginCodeWrite();
+  JITWriteProtect(false);
 
 #ifdef DUMP_CODE_SIZE_STATS
   s_locals.total_instructions_compiled = 0;
@@ -1561,7 +1598,6 @@ void CPU::CodeCache::CompileASMFunctions()
 #endif
 
   CommitCode(asm_size);
-  MemMap::EndCodeWrite();
 }
 
 bool CPU::CodeCache::CompileBlock(Block* block)
@@ -1708,7 +1744,7 @@ PageFaultHandler::HandlerResult CPU::CodeCache::HandleFastmemException(void* exc
           static_cast<unsigned>(info.address_register), static_cast<unsigned>(info.data_register),
           info.AccessSizeInBytes(), static_cast<unsigned>(info.is_signed));
 
-  MemMap::BeginCodeWrite();
+  JITWriteProtect(false);
 
   BackpatchLoadStore(exception_pc, info);
 
@@ -1726,7 +1762,7 @@ PageFaultHandler::HandlerResult CPU::CodeCache::HandleFastmemException(void* exc
     block->compile_count = 1;
   }
 
-  MemMap::EndCodeWrite();
+  JITWriteProtect(true);
 
   // and store the pc in the faulting list, so that we don't emit another fastmem loadstore
   s_locals.fastmem_faulting_pcs.insert(info.guest_pc);
