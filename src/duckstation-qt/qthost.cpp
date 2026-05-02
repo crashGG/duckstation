@@ -15,7 +15,6 @@
 #include "core/achievements.h"
 #include "core/bus.h"
 #include "core/cheats.h"
-#include "core/controller.h"
 #include "core/core.h"
 #include "core/core_private.h"
 #include "core/fullscreenui.h"
@@ -27,10 +26,7 @@
 #include "core/gpu_backend.h"
 #include "core/gpu_hw_texture_cache.h"
 #include "core/host.h"
-#include "core/imgui_overlays.h"
-#include "core/memory_card.h"
 #include "core/performance_counters.h"
-#include "core/spu.h"
 #include "core/system.h"
 #include "core/system_private.h"
 #include "core/video_presenter.h"
@@ -42,14 +38,11 @@
 #include "common/error.h"
 #include "common/file_system.h"
 #include "common/log.h"
-#include "common/minizip_helpers.h"
 #include "common/path.h"
 #include "common/scoped_guard.h"
 #include "common/string_util.h"
 #include "common/threading.h"
 
-#include "util/audio_stream.h"
-#include "util/cd_image.h"
 #include "util/http_cache.h"
 #include "util/http_downloader.h"
 #include "util/imgui_manager.h"
@@ -69,11 +62,8 @@
 #include <QtCore/QFile>
 #include <QtCore/QTimer>
 #include <QtCore/QTranslator>
-#include <QtCore/QtLogging>
 #include <QtGui/QClipboard>
 #include <QtGui/QKeyEvent>
-#include <QtWidgets/QFileDialog>
-#include <QtWidgets/QMessageBox>
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -81,9 +71,11 @@
 #include <cstdlib>
 #include <memory>
 
-#ifdef _WIN32
+#if defined(_WIN32)
 #include "common/windows_headers.h"
 #include <objbase.h> // CoInitializeEx
+#elif defined(__APPLE__)
+#include <unistd.h>
 #endif
 
 #include "moc_qthost.cpp"

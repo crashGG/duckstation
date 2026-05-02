@@ -44,7 +44,6 @@
 #include "video_presenter.h"
 #include "video_thread.h"
 
-#include "util/audio_stream.h"
 #include "util/cd_image.h"
 #include "util/compress_helpers.h"
 #include "util/gpu_device.h"
@@ -77,7 +76,6 @@
 
 #include "fmt/chrono.h"
 #include "fmt/format.h"
-#include "imgui.h"
 #include "xxhash.h"
 
 #include <cctype>
@@ -86,7 +84,6 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <thread>
 
 LOG_CHANNEL(System);
 
