@@ -1342,10 +1342,8 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
   DiscordPresence::UpdateDetails(s_state.game_badge_url, s_state.rich_presence_string);
 #endif
 
-  // Defer starting the prefetch, because otherwise when loading state we'll block until it's all downloaded.
-  // TODO: This can be removed once we're counting requests.
   if (g_settings.achievements_prefetch_badges)
-    Host::RunOnCoreThread(&Achievements::PrefetchAllAchievementBadges);
+    Achievements::PrefetchAllAchievementBadges();
   else
     PrefetchNextAchievementBadge();
 
