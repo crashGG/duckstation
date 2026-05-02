@@ -2232,9 +2232,6 @@ void CoreThread::run()
   createBackgroundControllerPollTimer();
   startBackgroundControllerPollTimer();
 
-  // kick off GPU thread
-  Threading::Thread video_thread(&CoreThread::videoThreadEntryPoint);
-
   // main loop
   while (!m_shutdown_flag)
   {
@@ -2261,10 +2258,6 @@ void CoreThread::run()
 
   destroyBackgroundControllerPollTimer();
 
-  // tell GPU thread to exit
-  VideoThread::Internal::RequestShutdown();
-  video_thread.Join();
-
   // join worker threads
   QtHost::s_async_task_queue.SetWorkerCount(0);
 
@@ -2275,12 +2268,6 @@ void CoreThread::run()
   moveToThread(m_ui_thread);
   delete m_event_loop;
   m_event_loop = nullptr;
-}
-
-void CoreThread::videoThreadEntryPoint()
-{
-  Threading::SetNameOfCurrentThread("Video Thread");
-  VideoThread::Internal::VideoThreadEntryPoint();
 }
 
 void Host::FrameDoneOnVideoThread(GPUBackend* gpu_backend, u32 frame_number)

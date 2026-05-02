@@ -105,9 +105,8 @@ void SyncThread(bool spin);
 namespace Internal {
 const Threading::ThreadHandle& GetThreadHandle();
 void ProcessStartup();
+void ProcessShutdown();
 void DoRunIdle();
-void RequestShutdown();
-void VideoThreadEntryPoint();
 bool PresentFrameAndRestoreContext();
 } // namespace Internal
 } // namespace VideoThread

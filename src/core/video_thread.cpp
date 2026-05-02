@@ -71,6 +71,7 @@ static bool IsCommandFIFOEmpty();
 static void WakeThread();
 static void WakeThreadIfSleeping();
 static bool SleepThread(bool allow_sleep);
+static void VideoThreadEntryPoint();
 
 static bool CreateDeviceOnThread(RenderAPI api, bool fullscreen, bool start_fullscreen_ui,
                                  bool preserve_imgui_on_failure, Error* error);
@@ -100,7 +101,7 @@ struct ALIGN_TO_CACHE_LINE State
 {
   // Owned by CPU thread.
   Timer::Value thread_spin_time = 0;
-  Threading::ThreadHandle thread_handle;
+  Threading::Thread thread;
   Common::unique_aligned_ptr<u8[]> command_fifo_data;
   WindowInfo render_window_info;
   std::optional<GPURenderer> requested_renderer;
@@ -134,7 +135,7 @@ static State s_state;
 
 const Threading::ThreadHandle& VideoThread::Internal::GetThreadHandle()
 {
-  return s_state.thread_handle;
+  return s_state.thread;
 }
 
 void VideoThread::ResetCommandFIFO()
@@ -151,9 +152,12 @@ void VideoThread::Internal::ProcessStartup()
   s_state.command_fifo_data = Common::make_unique_aligned_for_overwrite<u8[]>(HOST_CACHE_LINE_SIZE, COMMAND_QUEUE_SIZE);
   s_state.use_thread = g_settings.gpu_use_thread;
   s_state.run_idle_reasons = static_cast<u8>(RunIdleReason::NoGPUBackend);
+
+  // Thread is always started/persists regardless of whether it is used or not.
+  s_state.thread.Start(&VideoThread::VideoThreadEntryPoint);
 }
 
-void VideoThread::Internal::RequestShutdown()
+void VideoThread::Internal::ProcessShutdown()
 {
   INFO_LOG("Shutting down video thread...");
   SyncThread(false);
@@ -161,6 +165,9 @@ void VideoThread::Internal::RequestShutdown()
   // Thread must be enabled to shut it down.
   SetThreadEnabled(true);
   PushCommandAndWakeThread(AllocateCommand(VideoThreadCommandType::Shutdown, sizeof(VideoThreadCommand)));
+  s_state.thread.Join();
+
+  INFO_LOG("Video thread shutdown complete.");
 }
 
 VideoThreadCommand* VideoThread::AllocateCommand(VideoThreadCommandType command, u32 size)
@@ -407,9 +414,9 @@ bool VideoThread::SleepThread(bool allow_sleep)
   }
 }
 
-void VideoThread::Internal::VideoThreadEntryPoint()
+void VideoThread::VideoThreadEntryPoint()
 {
-  s_state.thread_handle = Threading::ThreadHandle::GetForCallingThread();
+  Threading::SetNameOfCurrentThread("Video Thread");
 
   // Take a local copy of the FIFO, that way it's not ping-ponging between the threads.
   u8* const command_fifo_data = s_state.command_fifo_data.get();
@@ -427,7 +434,7 @@ void VideoThread::Internal::VideoThreadEntryPoint()
       }
       else
       {
-        DoRunIdle();
+        VideoThread::Internal::DoRunIdle();
         continue;
       }
     }
@@ -503,7 +510,6 @@ void VideoThread::Internal::VideoThreadEntryPoint()
           // Should have consumed everything, and be shutdown.
           DebugAssert(read_ptr == write_ptr);
           s_state.command_fifo_read_ptr.store(read_ptr, std::memory_order_release);
-          s_state.thread_handle = {};
           return;
         }
         break;
@@ -1319,7 +1325,7 @@ void VideoThread::ReportFatalErrorAndShutdown(std::string_view reason)
 
 bool VideoThread::IsOnThread()
 {
-  return (!s_state.use_thread || s_state.thread_handle.IsCallingThread());
+  return (!s_state.use_thread || s_state.thread.IsCallingThread());
 }
 
 bool VideoThread::IsUsingThread()
