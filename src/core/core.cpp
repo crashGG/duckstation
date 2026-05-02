@@ -42,10 +42,7 @@ struct CoreLocals
 {
   std::mutex settings_mutex;
   LayeredSettingsInterface layered_settings_interface;
-
-#ifndef __ANDROID__
   INISettingsInterface base_settings_interface;
-#endif
 };
 } // namespace
 
@@ -521,17 +518,6 @@ SettingsInterface* Core::GetInputSettingsLayer()
 {
   return s_locals.layered_settings_interface.GetLayer(LayeredSettingsInterface::LAYER_INPUT);
 }
-
-#ifdef __ANDROID__
-
-void Core::SetBaseSettingsLayer(SettingsInterface* sif)
-{
-  AssertMsg(s_locals.layered_settings_interface.GetLayer(LayeredSettingsInterface::LAYER_BASE) == nullptr,
-            "Base layer has not been set");
-  s_locals.layered_settings_interface.SetLayer(LayeredSettingsInterface::LAYER_BASE, sif);
-}
-
-#endif // __ANDROID__
 
 void Core::SetGameSettingsLayer(SettingsInterface* sif, std::unique_lock<std::mutex>& lock)
 {
