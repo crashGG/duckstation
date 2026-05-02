@@ -347,13 +347,21 @@ bool QtHost::IsDisplayWidgetContainerNeeded()
 
 void QtHost::AdjustQtEnvironmentVariables()
 {
-  const char* desktop = std::getenv("XDG_SESSION_DESKTOP");
+  // Disable screensaver inhibit if running on gamescope.
+  const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
   if (!desktop)
-    return;
+    desktop = std::getenv("XDG_SESSION_DESKTOP");
 
-  std::fprintf(stderr, "XDG_SESSION_DESKTOP=%s\n", desktop);
+  std::fprintf(stderr, "XDG_SESSION_DESKTOP=%s\n", desktop ? desktop : "null");
 
-  if (std::strcmp(desktop, "KDE") == 0 || std::strcmp(desktop, "GNOME") == 0)
+  if (!desktop || std::strstr(desktop, "gamescope"))
+  {
+    INFO_LOG("Missing XDG_CURRENT_DESKTOP ({}) or running under gamescope, disabling screensaver inhibit.",
+             desktop ? desktop : "null");
+    QtHost::DisableScreensaverInhibit();
+  }
+
+  if (desktop && (std::strstr(desktop, "KDE") == 0 || std::strstr(desktop, "GNOME") == 0))
   {
     const char* platform_theme = std::getenv("QT_QPA_PLATFORMTHEME");
     if (platform_theme)

@@ -317,9 +317,6 @@ struct ALIGN_TO_CACHE_LINE StateVars
   GameHash running_game_hash = 0;
   bool running_game_custom_title = false;
 
-  // Prevent screensaver inhibits when running on platforms that don't have it (e.g. gamescope).
-  bool disable_screensaver_inhibit = false;
-
   std::atomic_bool startup_cancelled{false};
 
   std::unique_ptr<INISettingsInterface> game_settings_interface;
@@ -499,17 +496,6 @@ bool System::ProcessStartup(Error* error)
   SetRymlCallbacks();
 
 #ifdef __linux__
-  // Disable screensaver inhibit if running on gamescope.
-  const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
-  if (!desktop)
-    desktop = std::getenv("XDG_SESSION_DESKTOP");
-  if (!desktop || std::strlen(desktop) == 0 || std::strstr(desktop, "gamescope"))
-  {
-    INFO_LOG("Missing XDG_CURRENT_DESKTOP ({}) or running under gamescope, disabling screensaver inhibit.",
-             desktop ? desktop : "null");
-    s_state.disable_screensaver_inhibit = true;
-  }
-
   // Running DuckStation out of /usr is not supported and makes no sense.
   if (std::memcmp(EmuFolders::AppRoot.data(), "/usr/", 5) == 0)
     return false;
@@ -3934,9 +3920,6 @@ PresentSkipMode System::GetEffectivePresentSkipMode()
 
 void System::InhibitScreensaver(bool inhibit)
 {
-  if (s_state.disable_screensaver_inhibit)
-    return;
-
   Error error;
   if (!Host::SetScreensaverInhibit(inhibit, &error))
   {
