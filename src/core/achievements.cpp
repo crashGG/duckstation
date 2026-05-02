@@ -796,7 +796,8 @@ void Achievements::UpdateSettings(const Settings& old_config)
   if (!g_settings.achievements_leaderboard_trackers)
     s_state.active_leaderboard_trackers.clear();
 
-  if (!g_settings.achievements_progress_indicators)
+  // remove progress indicator because it won't remove normally
+  if (g_settings.achievements_progress_indicator_mode == AchievementProgressIndicatorMode::Disabled)
     s_state.active_progress_indicator.reset();
 }
 
@@ -1793,9 +1794,6 @@ void Achievements::HandleAchievementProgressIndicatorShowEvent(const rc_client_e
   DEV_LOG("Showing progress indicator: {} ({}): {}", event->achievement->id, event->achievement->title,
           event->achievement->measured_progress);
 
-  if (!g_settings.achievements_progress_indicators)
-    return;
-
   // Don't show pinned achievements.
   if (IsAchievementPinned(event->achievement->id))
   {
@@ -1819,12 +1817,6 @@ void Achievements::HandleAchievementProgressIndicatorHideEvent(const rc_client_e
     return;
 
   DEV_LOG("Hiding progress indicator");
-
-  if (!g_settings.achievements_progress_indicators)
-  {
-    s_state.active_progress_indicator.reset();
-    return;
-  }
 
   s_state.active_progress_indicator->active = false;
   s_state.active_progress_indicator->time = std::min(s_state.active_progress_indicator->time, INDICATOR_FADE_OUT_TIME);

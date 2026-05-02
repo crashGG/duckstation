@@ -624,16 +624,28 @@ void FullscreenUI::DrawIndicators(NotificationLayout& layout)
   }
 
   if (std::optional<Achievements::AchievementProgressIndicator>& indicator = Achievements::GetActiveProgressIndicator();
-      indicator.has_value())
+      indicator.has_value() &&
+      g_gpu_settings.achievements_progress_indicator_mode != AchievementProgressIndicatorMode::Disabled)
   {
     indicator->time += indicator->active ? io.DeltaTime : -io.DeltaTime;
 
+    const bool show_title =
+      (g_gpu_settings.achievements_progress_indicator_mode == AchievementProgressIndicatorMode::IconAndTitle);
     const ImVec4 left_background_color = DarkerColor(UIStyle.ToastBackgroundColor, 1.3f);
     const ImVec4 right_background_color = DarkerColor(UIStyle.ToastBackgroundColor, 0.8f);
     const float progress_image_size = ImCeil(32.0f * scale);
-    const std::string_view text = indicator->achievement->measured_progress;
-    const ImVec2 text_size = UIStyle.Font->CalcTextSizeA(font_size, font_weight, FLT_MAX, 0.0f, IMSTR_START_END(text));
-    const float box_width = progress_image_size + text_size.x + spacing + padding.x * 2.0f;
+    const std::string_view progress_text = indicator->achievement->measured_progress;
+    const float& progress_text_weight = show_title ? UIStyle.NormalFontWeight : font_weight;
+    const ImVec2 progress_text_size =
+      UIStyle.Font->CalcTextSizeA(font_size, progress_text_weight, FLT_MAX, 0.0f, IMSTR_START_END(progress_text));
+    const std::string_view title_text =
+      show_title ? std::string_view(indicator->achievement->title) : std::string_view();
+    const ImVec2 title_text_size =
+      show_title ? UIStyle.Font->CalcTextSizeA(font_size, font_weight, FLT_MAX, 0.0f, indicator->achievement->title) :
+                   ImVec2();
+
+    const float box_width =
+      progress_image_size + std::max(progress_text_size.x, title_text_size.x) + spacing + padding.x * 2.0f;
     const float box_height = progress_image_size + padding.y * 2.0f;
 
     const auto& [box_min, opacity] = layout.GetNextPosition(
@@ -661,12 +673,40 @@ void FullscreenUI::DrawIndicators(NotificationLayout& layout)
                    ImVec2(1.0f, 1.0f), ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, opacity)));
     }
 
-    const ImVec2 text_pos = box_min + ImVec2(padding.x + progress_image_size + spacing,
-                                             ImFloor((box_max.y - box_min.y - text_size.y) * 0.5f));
-    const ImRect text_clip_rect(text_pos, box_max);
-    RenderShadowedTextClipped(dl, UIStyle.Font, font_size, font_weight, text_pos, box_max,
-                              ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity)), text, &text_size,
-                              ImVec2(0.0f, 0.0f), 0.0f, &text_clip_rect);
+    // Show:
+    // [ badge ] [ title ]
+    // [ badge ] [ progress text ]
+    // Or:
+    // [ badge ] [ progress text centered vertically ]
+    if (show_title)
+    {
+      const float space = box_width - (padding.x * 2.0f) - progress_image_size - spacing;
+      const ImRect title_clip_rect(ImVec2(box_min.x + padding.x + progress_image_size + spacing +
+                                            std::max(ImFloor((space - title_text_size.x) * 0.5f), 0.0f),
+                                          box_min.y + padding.y),
+                                   box_max);
+      RenderShadowedTextClipped(dl, UIStyle.Font, font_size, font_weight, title_clip_rect.Min, title_clip_rect.Max,
+                                ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity)), title_text,
+                                &title_text_size, ImVec2(0.0f, 0.0f), 0.0f, &title_clip_rect);
+
+      const ImRect text_clip_rect(ImVec2(box_min.x + padding.x + progress_image_size + spacing +
+                                           std::max(ImFloor((space - progress_text_size.x) * 0.5f), 0.0f),
+                                         box_min.y + padding.y + title_text_size.y),
+                                  box_max);
+      RenderShadowedTextClipped(dl, UIStyle.Font, font_size, progress_text_weight, text_clip_rect.Min,
+                                text_clip_rect.Max,
+                                ImGui::GetColorU32(ModAlpha(DarkerColor(UIStyle.ToastTextColor), opacity)),
+                                progress_text, &progress_text_size, ImVec2(0.0f, 0.0f), 0.0f, &text_clip_rect);
+    }
+    else
+    {
+      const ImRect text_clip_rect(box_min + ImVec2(padding.x + progress_image_size + spacing,
+                                                   ImFloor((box_max.y - box_min.y - progress_text_size.y) * 0.5f)),
+                                  box_max);
+      RenderShadowedTextClipped(dl, UIStyle.Font, font_size, progress_text_weight, text_clip_rect.Min,
+                                text_clip_rect.Max, ImGui::GetColorU32(ModAlpha(UIStyle.ToastTextColor, opacity)),
+                                progress_text, &progress_text_size, ImVec2(0.0f, 0.0f), 0.0f, &text_clip_rect);
+    }
 
     if (!indicator->active && opacity <= 0.01f)
     {
