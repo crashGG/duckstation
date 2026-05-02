@@ -234,6 +234,7 @@ const std::string& GetGamePath();
 const std::string& GetExeOverride();
 const GameDatabase::Entry* GetGameDatabaseEntry();
 GameHash GetGameHash();
+bool IsRunningGameCustomTitle();
 bool IsRunningUnknownGame();
 bool IsUsingKnownPS1BIOS();
 BootMode GetBootMode();
@@ -461,9 +462,6 @@ void CalculateRewindMemoryUsage(u32 num_saves, u32 resolution_scale, u32 multisa
                                 bool enable_8mb_ram, u64* ram_usage, u64* vram_usage);
 void ClearMemorySaveStates(bool reallocate_resources, bool recycle_textures);
 void SetRunaheadReplayFlag(bool is_analog_input);
-
-/// Called when rich presence changes.
-void UpdateRichPresence(bool update_session_time);
 
 } // namespace System
 

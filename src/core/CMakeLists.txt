@@ -38,6 +38,8 @@ add_library(core
   ddgo_controller.h
   digital_controller.cpp
   digital_controller.h
+  discord_presence.cpp
+  discord_presence.h
   dma.cpp
   dma.h
   fullscreenui.cpp

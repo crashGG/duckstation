@@ -10,6 +10,7 @@
 #include "cheats.h"
 #include "core.h"
 #include "cpu_core.h"
+#include "discord_presence.h"
 #include "fullscreenui.h"
 #include "fullscreenui_private.h"
 #include "game_list.h"
@@ -1098,9 +1099,9 @@ void Achievements::UpdateRichPresence(std::unique_lock<std::recursive_mutex>& lo
 
   INFO_LOG("Rich presence updated: {}", s_state.rich_presence_string);
 
-  lock.unlock();
-  System::UpdateRichPresence(false);
-  lock.lock();
+#ifdef ENABLE_DISCORD_PRESENCE
+  DiscordPresence::UpdateDetails(GetCurrentGameBadgeURL(), s_state.rich_presence_string);
+#endif
 }
 
 void Achievements::OnSystemStarting(CDImage* image, bool disable_hardcore_mode)
@@ -1337,6 +1338,10 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
   // update progress database on first load, in case it was played on another PC
   UpdateGameSummary(true);
 
+#ifdef ENABLE_DISCORD_PRESENCE
+  DiscordPresence::UpdateDetails(s_state.game_badge_url, s_state.rich_presence_string);
+#endif
+
   // Defer starting the prefetch, because otherwise when loading state we'll block until it's all downloaded.
   // TODO: This can be removed once we're counting requests.
   if (g_settings.achievements_prefetch_badges)
@@ -1355,6 +1360,10 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
 
 void Achievements::ClearGameInfo()
 {
+#ifdef ENABLE_DISCORD_PRESENCE
+  DiscordPresence::UpdateDetails({}, {});
+#endif
+
   FullscreenUI::ClearAchievementsState();
 
   s_state.active_leaderboard_trackers = {};
