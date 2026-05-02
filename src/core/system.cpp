@@ -17,6 +17,7 @@
 #include "fullscreenui.h"
 #include "game_database.h"
 #include "game_list.h"
+#include "gdb_server.h"
 #include "gpu.h"
 #include "gpu_backend.h"
 #include "gpu_dump.h"
@@ -55,7 +56,6 @@
 #include "util/iso_reader.h"
 #include "util/media_capture.h"
 #include "util/postprocessing.h"
-#include "util/sockets.h"
 #include "util/state_wrapper.h"
 #include "util/translation.h"
 
@@ -70,6 +70,7 @@
 #include "common/path.h"
 #include "common/ryml_helpers.h"
 #include "common/string_util.h"
+#include "common/threading.h"
 #include "common/time_helpers.h"
 #include "common/timer.h"
 
@@ -100,9 +101,6 @@ LOG_CHANNEL(System);
 
 #ifndef __ANDROID__
 #define ENABLE_DISCORD_PRESENCE 1
-#define ENABLE_GDB_SERVER 1
-#define ENABLE_SOCKET_MULTIPLEXER 1
-#include "gdb_server.h"
 #endif
 
 // #define PROFILE_MEMORY_SAVE_STATES 1
@@ -336,10 +334,6 @@ struct ALIGN_TO_CACHE_LINE StateVars
 
   // process start time
   Timer::Value process_start_time = 0;
-
-#ifdef ENABLE_SOCKET_MULTIPLEXER
-  std::unique_ptr<SocketMultiplexer> socket_multiplexer;
-#endif
 
 #ifdef ENABLE_DISCORD_PRESENCE
   bool discord_presence_active = false;
@@ -600,9 +594,8 @@ void System::IdlePollUpdate()
 
   Achievements::IdleUpdate();
 
-#ifdef ENABLE_SOCKET_MULTIPLEXER
-  if (s_state.socket_multiplexer)
-    s_state.socket_multiplexer->PollEventsWithTimeout(0);
+#ifdef ENABLE_GDB_SERVER
+  GDBServer::Poll(0);
 #endif
 }
 
@@ -2271,9 +2264,8 @@ void System::FrameDone()
   PollDiscordPresence();
 #endif
 
-#ifdef ENABLE_SOCKET_MULTIPLEXER
-  if (s_state.socket_multiplexer)
-    s_state.socket_multiplexer->PollEventsWithTimeout(0);
+#ifdef ENABLE_GDB_SERVER
+  GDBServer::Poll(0);
 #endif
 
   // Save states for rewind and runahead.
@@ -2485,35 +2477,32 @@ void System::Throttle(Timer::Value current_time, Timer::Value sleep_until)
     return;
   }
 
-#ifdef ENABLE_SOCKET_MULTIPLEXER
-  // If we are using the socket multiplier, and have clients, then use it to sleep instead.
+#ifdef ENABLE_GDB_SERVER
+  // If we are running the GDB server and have clients, then use it to sleep instead.
   // That way in a query->response->query->response chain, we don't process only one message per frame.
-  if (s_state.socket_multiplexer && s_state.socket_multiplexer->HasAnyClientSockets())
+  if (GDBServer::HasAnyClients())
   {
     Timer::Value poll_start_time = current_time;
     for (;;)
     {
       const u32 sleep_ms = static_cast<u32>(Timer::ConvertValueToMilliseconds(sleep_until - poll_start_time));
-      s_state.socket_multiplexer->PollEventsWithTimeout(sleep_ms);
+      GDBServer::Poll(sleep_ms);
       poll_start_time = Timer::GetCurrentValue();
       if (poll_start_time >= sleep_until || (!g_settings.display_optimal_frame_pacing && sleep_ms == 0))
         break;
     }
   }
   else
+#endif
   {
     // Use a spinwait if we undersleep for all platforms except android.. don't want to burn battery.
     // Linux also seems to do a much better job of waking up at the requested time.
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(__ANDROID__)
     Timer::SleepUntil(sleep_until, g_settings.display_optimal_frame_pacing);
 #else
     Timer::SleepUntil(sleep_until, false);
 #endif
   }
-#else
-  // No spinwait on Android, see above.
-  Timer::SleepUntil(sleep_until, false);
-#endif
 
 #if 0
   const Timer::Value time_after_sleep = Timer::GetCurrentValue();
@@ -6437,37 +6426,6 @@ u64 System::GetSessionPlayedTime()
 {
   const Timer::Value ctime = Timer::GetCurrentValue();
   return static_cast<u64>(std::round(Timer::ConvertValueToSeconds(ctime - s_state.session_start_time)));
-}
-
-SocketMultiplexer* System::GetSocketMultiplexer()
-{
-#ifdef ENABLE_SOCKET_MULTIPLEXER
-  if (s_state.socket_multiplexer)
-    return s_state.socket_multiplexer.get();
-
-  Error error;
-  s_state.socket_multiplexer = SocketMultiplexer::Create(&error);
-  if (s_state.socket_multiplexer)
-    INFO_LOG("Created socket multiplexer.");
-  else
-    ERROR_LOG("Failed to create socket multiplexer: {}", error.GetDescription());
-
-  return s_state.socket_multiplexer.get();
-#else
-  ERROR_LOG("This build does not support sockets.");
-  return nullptr;
-#endif
-}
-
-void System::ReleaseSocketMultiplexer()
-{
-#ifdef ENABLE_SOCKET_MULTIPLEXER
-  if (!s_state.socket_multiplexer || s_state.socket_multiplexer->HasAnyOpenSockets())
-    return;
-
-  INFO_LOG("Destroying socket multiplexer.");
-  s_state.socket_multiplexer.reset();
-#endif
 }
 
 #ifdef ENABLE_DISCORD_PRESENCE

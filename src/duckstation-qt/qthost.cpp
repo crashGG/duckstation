@@ -2144,9 +2144,12 @@ void CoreThread::updateBackgroundControllerPollInterval()
 
 int CoreThread::getBackgroundControllerPollInterval() const
 {
+#ifdef ENABLE_GDB_SERVER
   if (GDBServer::HasAnyClients())
     return GDB_SERVER_POLLING_INTERVAL;
-  else if (m_video_thread_run_idle)
+#endif
+
+  if (m_video_thread_run_idle)
     return FULLSCREEN_UI_CONTROLLER_POLLING_INTERVAL;
   else if (InputManager::GetPollableDeviceCount() > 0)
     return BACKGROUND_CONTROLLER_POLLING_INTERVAL_WITH_DEVICES;
