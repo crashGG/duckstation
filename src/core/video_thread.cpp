@@ -1346,8 +1346,9 @@ void VideoThread::ResizeRenderWindow(s32 width, s32 height, float scale, float r
   s_state.render_window_info.surface_scale = scale;
   s_state.render_window_info.surface_refresh_rate = refresh_rate;
 
-  RunOnThread(
-    [width, height, scale, refresh_rate]() { ResizeRenderWindowOnThread(width, height, scale, refresh_rate); });
+  RunOnThread([clamped_width, clamped_height, scale, refresh_rate]() {
+    ResizeRenderWindowOnThread(clamped_width, clamped_height, scale, refresh_rate);
+  });
 
   if (System::IsValid())
   {
