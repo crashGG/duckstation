@@ -3732,7 +3732,7 @@ void System::SetRewindState(bool enabled)
   UpdateSpeedLimiterState();
 }
 
-void System::DoFrameStep()
+void System::FrameStep()
 {
   if (!IsValid())
     return;
@@ -3741,7 +3741,7 @@ void System::DoFrameStep()
   {
     Achievements::ConfirmHardcoreModeDisableAsync("Frame stepping", [](bool approved) {
       if (approved)
-        DoFrameStep();
+        FrameStep();
     });
     return;
   }

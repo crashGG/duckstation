@@ -369,7 +369,7 @@ void SetTurboEnabled(bool enabled);
 bool IsRewinding();
 void SetRewindState(bool enabled);
 
-void DoFrameStep();
+void FrameStep();
 
 /// Returns the path to a save state file. Specifying an index of -1 is the "resume" save state.
 std::string GetGameSaveStatePath(std::string_view serial, s32 slot);
