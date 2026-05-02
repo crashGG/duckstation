@@ -17,6 +17,8 @@ namespace Threading {
 class ThreadHandle;
 }
 
+enum class WindowInfoType : u8;
+
 namespace Host {
 
 /// Returns true if the specified resource file exists.
@@ -86,5 +88,11 @@ void WaitForAllAsyncTasks();
 
 /// Commits any changes made to the base settings layer to the host.
 void CommitBaseSettingChanges();
+
+/// Returns the window type for the host.
+WindowInfoType GetRenderWindowInfoType();
+
+/// Changes the screensaver inhibit state.
+bool SetScreensaverInhibit(bool inhibit, Error* error);
 
 } // namespace Host

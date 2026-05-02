@@ -35,6 +35,7 @@
 #include "core/system_private.h"
 #include "core/video_presenter.h"
 #include "core/video_thread.h"
+#include "core/video_thread_private.h"
 
 #include "common/assert.h"
 #include "common/crash_handler.h"
@@ -2252,7 +2253,7 @@ void CoreThread::run()
 
       // have to double-check the condition after processing events, because the events could shut us down
       if (!VideoThread::IsUsingThread() && VideoThread::IsRunningIdle())
-        VideoThread::Internal::DoRunIdle();
+        VideoThread::DoRunIdle();
     }
     else
     {

@@ -11,6 +11,7 @@
 #include "system.h"
 #include "system_private.h"
 #include "video_thread.h"
+#include "video_thread_private.h"
 
 #include "util/gpu_device.h"
 #include "util/http_cache.h"
@@ -714,7 +715,7 @@ bool Core::CoreThreadInitialize(Error* error)
 
   LogStartupInformation();
 
-  VideoThread::Internal::ProcessStartup();
+  VideoThread::ProcessStartup();
 
   Achievements::Initialize();
 
@@ -740,7 +741,7 @@ void Core::CoreThreadShutdown()
 
   HTTPCache::Shutdown();
 
-  VideoThread::Internal::ProcessShutdown();
+  VideoThread::ProcessShutdown();
 
   s_locals.core_thread_handle = {};
 

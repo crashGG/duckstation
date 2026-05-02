@@ -6,9 +6,9 @@
 #include "controller.h"
 #include "core.h"
 #include "gte_types.h"
+#include "host.h"
 #include "imgui_overlays.h"
 #include "system.h"
-#include "video_thread.h"
 
 #include "util/gpu_device.h"
 #include "util/imgui_manager.h"

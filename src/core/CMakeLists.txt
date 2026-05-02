@@ -143,6 +143,7 @@ add_library(core
   video_thread.cpp
   video_thread.h
   video_thread_commands.h
+  video_thread_private.h
 )
 
 set(RECOMPILER_SRCS

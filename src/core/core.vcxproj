@@ -179,6 +179,7 @@
     <ClInclude Include="timers.h" />
     <ClInclude Include="timing_event.h" />
     <ClInclude Include="types.h" />
+    <ClInclude Include="video_thread_private.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\dep\imgui\imgui.vcxproj">

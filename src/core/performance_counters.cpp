@@ -156,7 +156,7 @@ void PerformanceCounters::Reset()
       s_state.last_frame_number = frame_number;
       s_state.last_internal_frame_number = internal_frame_number;
       s_state.last_core_thread_time = Host::GetCoreThreadHandle().GetCPUTime();
-      s_state.last_video_thread_time = VideoThread::Internal::GetThreadHandle().GetCPUTime();
+      s_state.last_video_thread_time = VideoThread::GetThreadHandle().GetCPUTime();
 
       s_state.average_frame_time_accumulator = 0.0f;
       s_state.minimum_frame_time_accumulator = 0.0f;
@@ -207,7 +207,7 @@ void PerformanceCounters::Update(GPUBackend* gpu, u32 frame_number, u32 internal
   s_state.speed = (s_state.vps / System::GetVideoFrameRate()) * 100.0f;
 
   const u64 core_thread_time = Host::GetCoreThreadHandle().GetCPUTime();
-  const u64 video_thread_time = VideoThread::Internal::GetThreadHandle().GetCPUTime();
+  const u64 video_thread_time = VideoThread::GetThreadHandle().GetCPUTime();
   const u64 core_thread_delta = core_thread_time - s_state.last_core_thread_time;
   const u64 video_thread_delta = video_thread_time - s_state.last_video_thread_time;
   s_state.last_core_thread_time = core_thread_time;

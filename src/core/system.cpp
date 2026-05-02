@@ -221,7 +221,7 @@ static void UpdateSessionTime(const std::string& prev_serial);
 
 namespace {
 
-struct ALIGN_TO_CACHE_LINE StateVars
+struct StateVars
 {
   TickCount ticks_per_second = 0;
   TickCount max_slice_ticks = 0;
@@ -311,7 +311,7 @@ struct ALIGN_TO_CACHE_LINE StateVars
 
 } // namespace
 
-static StateVars s_state;
+ALIGN_TO_CACHE_LINE static StateVars s_state;
 
 } // namespace System
 
@@ -3584,7 +3584,7 @@ void System::UpdateSpeedLimiterState()
       core_thread.SetTimeConstraints(s_state.optimal_frame_pacing, new_scheduler_period, typical_time,
                                      new_scheduler_period);
     }
-    const Threading::ThreadHandle& video_thread = VideoThread::Internal::GetThreadHandle();
+    const Threading::ThreadHandle& video_thread = VideoThread::GetThreadHandle();
     if (video_thread)
     {
       video_thread.SetTimeConstraints(s_state.optimal_frame_pacing, new_scheduler_period, typical_time,

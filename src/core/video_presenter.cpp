@@ -1808,7 +1808,7 @@ void VideoPresenter::ReloadPostProcessingSettings(bool display, bool internal, b
 
     // trigger represent of frame
     if (VideoThread::IsSystemPaused())
-      VideoThread::Internal::PresentFrameAndRestoreContext();
+      VideoThread::PresentFrameAndRestoreContext();
   });
 }
 

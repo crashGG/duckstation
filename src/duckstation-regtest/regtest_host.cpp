@@ -18,6 +18,7 @@
 #include "core/system_private.h"
 #include "core/video_presenter.h"
 #include "core/video_thread.h"
+#include "core/video_thread_private.h"
 
 #include "scmversion/scmversion.h"
 
