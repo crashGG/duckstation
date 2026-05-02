@@ -577,6 +577,8 @@ void System::CoreThreadShutdown()
 
   HTTPCache::Shutdown();
 
+  VideoThread::Internal::ProcessShutdown();
+
   s_state.core_thread_handle = {};
 
 #ifdef _WIN32
