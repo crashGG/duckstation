@@ -215,7 +215,7 @@ void QtHost::RegisterTypes()
 bool QtHost::PerformEarlyHardwareChecks()
 {
   Error error;
-  const bool okay = System::PerformEarlyHardwareChecks(&error);
+  const bool okay = Core::PerformEarlyHardwareChecks(&error);
   if (okay && !error.IsValid()) [[likely]]
     return true;
 
@@ -268,7 +268,7 @@ bool QtHost::EarlyProcessStartup()
   QApplication::setDesktopFileName("org.duckstation.DuckStation"_L1);
 
   Error error;
-  if (!System::ProcessStartup(&error)) [[unlikely]]
+  if (!Core::ProcessStartup(&error)) [[unlikely]]
   {
     QMessageBox::critical(nullptr, QStringLiteral("Process Startup Failed"),
                           QString::fromStdString(error.GetDescription()));
@@ -286,7 +286,7 @@ bool QtHost::EarlyProcessStartup()
 
 void QtHost::ProcessShutdown()
 {
-  System::ProcessShutdown();
+  Core::ProcessShutdown();
 
   // Ensure log is flushed.
   Log::SetFileOutputParams(false, nullptr);
@@ -1023,10 +1023,6 @@ void CoreThread::startFullscreenUI()
 
   if (System::IsValid() || VideoThread::IsFullscreenUIRequested())
     return;
-
-  // we want settings loaded so we choose the correct renderer
-  // this also sorts out input sources.
-  System::LoadSettings(false);
 
   // borrow the game start fullscreen flag
   const bool start_fullscreen =
@@ -2082,7 +2078,7 @@ void CoreThread::processAuxiliaryRenderWindowInputEvent(void* userdata, quint32 
 
 void CoreThread::doBackgroundControllerPoll()
 {
-  System::IdlePollUpdate();
+  Core::IdleUpdate();
 }
 
 void CoreThread::createBackgroundControllerPollTimer()
@@ -2221,7 +2217,7 @@ void CoreThread::run()
   // input source setup must happen on emu thread
   {
     Error startup_error;
-    if (!System::CoreThreadInitialize(&startup_error))
+    if (!Core::CoreThreadInitialize(&startup_error))
     {
       moveToThread(m_ui_thread);
       Host::ReportFatalError("Fatal Startup Error", startup_error.GetDescription());
@@ -2273,7 +2269,7 @@ void CoreThread::run()
   QtHost::s_async_task_queue.SetWorkerCount(0);
 
   // and tidy up everything left
-  System::CoreThreadShutdown();
+  Core::CoreThreadShutdown();
 
   // move back to UI thread
   moveToThread(m_ui_thread);

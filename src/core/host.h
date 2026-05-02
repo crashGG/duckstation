@@ -13,6 +13,10 @@
 
 class Error;
 
+namespace Threading {
+class ThreadHandle;
+}
+
 namespace Host {
 
 /// Returns true if the specified resource file exists.
@@ -63,6 +67,9 @@ const char* GetLanguageName(std::string_view language_code);
 
 /// Refreshes the UI when the language is changed.
 bool ChangeLanguage(const char* new_language);
+
+/// Gets a handle to the core thread.
+const Threading::ThreadHandle& GetCoreThreadHandle();
 
 /// Returns true if the currently executing thread is the core thread.
 bool IsOnCoreThread();

@@ -32,6 +32,24 @@ void SetGameSettingsLayer(SettingsInterface* sif, std::unique_lock<std::mutex>& 
 /// Sets the input profile settings layer. Called by System when the game changes.
 void SetInputSettingsLayer(SettingsInterface* sif, std::unique_lock<std::mutex>& lock);
 
+/// Performs mandatory hardware checks.
+bool PerformEarlyHardwareChecks(Error* error);
+
+/// Called on process startup, as early as possible.
+bool ProcessStartup(Error* error);
+
+/// Called on process shutdown.
+void ProcessShutdown();
+
+/// Called on CPU thread initialization.
+bool CoreThreadInitialize(Error* error);
+
+/// Called on CPU thread shutdown.
+void CoreThreadShutdown();
+
+/// Called to poll input when the session is not running.
+void IdleUpdate();
+
 } // namespace Core
 
 namespace Host {

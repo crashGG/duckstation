@@ -252,8 +252,6 @@ bool PopulateGameListEntryFromCurrentGame(GameList::Entry* entry, Error* error);
 
 void FormatLatencyStats(SmallStringBase& str);
 
-/// Loads global settings (i.e. EmuConfig).
-void LoadSettings(bool display_osd_messages);
 void SetDefaultSettings(SettingsInterface& si);
 
 /// Reloads settings, and applies any changes present.

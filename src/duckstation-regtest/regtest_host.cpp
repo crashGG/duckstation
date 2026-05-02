@@ -12,6 +12,7 @@
 #include "core/gpu.h"
 #include "core/gpu_backend.h"
 #include "core/host.h"
+#include "core/performance_counters.h"
 #include "core/spu.h"
 #include "core/system.h"
 #include "core/system_private.h"
@@ -962,7 +963,7 @@ int main(int argc, char* argv[])
   CrashHandler::Install(&Bus::CleanupMemoryMap);
 
   Error error;
-  if (!System::PerformEarlyHardwareChecks(&error) || !System::ProcessStartup(&error))
+  if (!Core::PerformEarlyHardwareChecks(&error) || !Core::ProcessStartup(&error))
   {
     std::fprintf(stderr, "ERROR: ProcessStartup() failed: %s\n", error.GetDescription().c_str());
     return EXIT_FAILURE;
@@ -987,7 +988,7 @@ int main(int argc, char* argv[])
   if (!RegTestHost::SetNewDataRoot(autoboot->path))
     return EXIT_FAILURE;
 
-  if (!System::CoreThreadInitialize(&error))
+  if (!Core::CoreThreadInitialize(&error))
   {
     ERROR_LOG("CoreThreadInitialize() failed: {}", error.GetDescription());
     return EXIT_FAILURE;
@@ -1046,7 +1047,7 @@ cleanup:
   RegTestHost::s_async_task_queue.SetWorkerCount(0);
 
   RegTestHost::ProcessCoreThreadEvents();
-  System::CoreThreadShutdown();
-  System::ProcessShutdown();
+  Core::CoreThreadShutdown();
+  Core::ProcessShutdown();
   return result;
 }

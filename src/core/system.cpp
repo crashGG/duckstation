@@ -44,8 +44,6 @@
 #include "video_presenter.h"
 #include "video_thread.h"
 
-#include "scmversion/scmversion.h"
-
 #include "util/audio_stream.h"
 #include "util/cd_image.h"
 #include "util/compress_helpers.h"
@@ -68,7 +66,6 @@
 #include "common/log.h"
 #include "common/memmap.h"
 #include "common/path.h"
-#include "common/ryml_helpers.h"
 #include "common/string_util.h"
 #include "common/threading.h"
 #include "common/time_helpers.h"
@@ -78,7 +75,6 @@
 #include "IconsFontAwesome.h"
 #include "IconsPromptFont.h"
 
-#include "cpuinfo.h"
 #include "fmt/chrono.h"
 #include "fmt/format.h"
 #include "imgui.h"
@@ -93,11 +89,6 @@
 #include <thread>
 
 LOG_CHANNEL(System);
-
-#ifdef _WIN32
-#include "common/windows_headers.h"
-#include <Objbase.h>
-#endif
 
 // #define PROFILE_MEMORY_SAVE_STATES 1
 
@@ -141,9 +132,6 @@ struct UndoSaveStateBuffer : public SaveStateBuffer
 };
 
 } // namespace
-
-static void CheckCacheLineSize();
-static void LogStartupInformation();
 
 static const SettingsInterface& GetInputSourceSettingsLayer(std::unique_lock<std::mutex>& lock);
 static const SettingsInterface& GetControllerSettingsLayer(std::unique_lock<std::mutex>& lock);
@@ -311,8 +299,6 @@ struct ALIGN_TO_CACHE_LINE StateVars
   std::unique_ptr<INISettingsInterface> input_settings_interface;
   std::string input_profile_name;
 
-  Threading::ThreadHandle core_thread_handle;
-
   // temporary save state, created when loading, used to undo load state
   std::optional<UndoSaveStateBuffer> undo_load_state;
 
@@ -321,9 +307,6 @@ struct ALIGN_TO_CACHE_LINE StateVars
 
   // internal async task counters
   std::atomic_uint32_t outstanding_save_state_tasks{0};
-
-  // process start time
-  Timer::Value process_start_time = 0;
 };
 
 } // namespace
@@ -332,124 +315,7 @@ static StateVars s_state;
 
 } // namespace System
 
-bool System::PerformEarlyHardwareChecks(Error* error)
-{
-  // This shouldn't fail... if it does, just hope for the best.
-  cpuinfo_initialize();
-
-#ifdef CPU_ARCH_X64
-#ifdef CPU_ARCH_SSE41
-  if (!cpuinfo_has_x86_sse4_1())
-  {
-    Error::SetStringFmt(
-      error, "<h3>Your CPU does not support the SSE4.1 instruction set.</h3><p>SSE4.1 is required for this version of "
-             "DuckStation. Please download and switch to the legacy SSE2 version.</p><p>You can download this from <a "
-             "href=\"https://www.duckstation.org/\">www.duckstation.org</a> under \"Other Platforms\".");
-    return false;
-  }
-#else
-  if (cpuinfo_has_x86_sse4_1())
-  {
-    Error::SetStringFmt(
-      error, "You are running the <strong>legacy SSE2 DuckStation executable</strong> on a CPU that supports the "
-             "SSE4.1 instruction set.\nPlease download and switch to the regular, non-SSE2 version.\nYou can download "
-             "this from <a href=\"https://www.duckstation.org/\">www.duckstation.org</a>.");
-  }
-#endif
-#endif
-
-#ifndef DYNAMIC_HOST_PAGE_SIZE
-  // Check page size. If it doesn't match, it is a fatal error.
-  const size_t runtime_host_page_size = MemMap::GetRuntimePageSize();
-  if (runtime_host_page_size == 0)
-  {
-    Error::SetStringFmt(error, "Cannot determine size of page. Continuing with expectation of {} byte pages.",
-                        HOST_PAGE_SIZE);
-  }
-  else if (HOST_PAGE_SIZE != runtime_host_page_size)
-  {
-    Error::SetStringFmt(
-      error, "Page size mismatch. This build was compiled with {} byte pages, but the system has {} byte pages.",
-      HOST_PAGE_SIZE, runtime_host_page_size);
-    return false;
-  }
-#else
-  if (HOST_PAGE_SIZE == 0 || HOST_PAGE_SIZE < MIN_HOST_PAGE_SIZE || HOST_PAGE_SIZE > MAX_HOST_PAGE_SIZE)
-  {
-    Error::SetStringFmt(error, "Page size of {} bytes is out of the range supported by this build: {}-{}.",
-                        HOST_PAGE_SIZE, MIN_HOST_PAGE_SIZE, MAX_HOST_PAGE_SIZE);
-    return false;
-  }
-#endif
-
-  return true;
-}
-
-void System::CheckCacheLineSize()
-{
-  u32 max_line_size = 0;
-  if (cpuinfo_initialize())
-  {
-    const u32 num_l1is = cpuinfo_get_l1i_caches_count();
-    const u32 num_l1ds = cpuinfo_get_l1d_caches_count();
-    const u32 num_l2s = cpuinfo_get_l2_caches_count();
-    for (u32 i = 0; i < num_l1is; i++)
-    {
-      const cpuinfo_cache* cache = cpuinfo_get_l1i_cache(i);
-      if (cache)
-        max_line_size = std::max(max_line_size, cache->line_size);
-    }
-    for (u32 i = 0; i < num_l1ds; i++)
-    {
-      const cpuinfo_cache* cache = cpuinfo_get_l1d_cache(i);
-      if (cache)
-        max_line_size = std::max(max_line_size, cache->line_size);
-    }
-    for (u32 i = 0; i < num_l2s; i++)
-    {
-      const cpuinfo_cache* cache = cpuinfo_get_l2_cache(i);
-      if (cache)
-        max_line_size = std::max(max_line_size, cache->line_size);
-    }
-  }
-
-  if (max_line_size == 0)
-  {
-    ERROR_LOG("Cannot determine size of cache line. Continuing with expectation of {} byte lines.",
-              HOST_CACHE_LINE_SIZE);
-  }
-  else if (HOST_CACHE_LINE_SIZE != max_line_size)
-  {
-    // Not fatal, but does have performance implications.
-    WARNING_LOG(
-      "Cache line size mismatch. This build was compiled with {} byte lines, but the system has {} byte lines.",
-      HOST_CACHE_LINE_SIZE, max_line_size);
-  }
-}
-
-void System::LogStartupInformation()
-{
-#if !defined(CPU_ARCH_X64) || defined(CPU_ARCH_SSE41)
-  const std::string_view suffix = {};
-#else
-  const std::string_view suffix = " [Legacy SSE2]";
-#endif
-  INFO_LOG("DuckStation for {} ({}){}", TARGET_OS_STR, CPU_ARCH_STR, suffix);
-  INFO_LOG("Version: {} [{}]", g_scm_tag_str, g_scm_branch_str);
-  INFO_LOG("SCM Timestamp: {}", g_scm_date_str);
-  if (const cpuinfo_package* package = cpuinfo_initialize() ? cpuinfo_get_package(0) : nullptr) [[likely]]
-  {
-    INFO_LOG("Host CPU: {}", package->name);
-    INFO_LOG("CPU has {} logical processor(s) and {} core(s) across {} cluster(s).", package->processor_count,
-             package->core_count, package->cluster_count);
-  }
-
-#ifdef DYNAMIC_HOST_PAGE_SIZE
-  INFO_LOG("Host Page Size: {} bytes", HOST_PAGE_SIZE);
-#endif
-}
-
-bool System::ProcessStartup(Error* error)
+bool System::AllocatePersistentMemory(Error* error)
 {
   Timer timer;
 
@@ -468,120 +334,13 @@ bool System::ProcessStartup(Error* error)
   }
 
   VERBOSE_LOG("Memory allocation took {} ms.", timer.GetTimeMilliseconds());
-
-  CheckCacheLineSize();
-
-  // Initialize rapidyaml before anything can use it.
-  SetRymlCallbacks();
-
-#ifdef __linux__
-  // Running DuckStation out of /usr is not supported and makes no sense.
-  if (std::memcmp(EmuFolders::AppRoot.data(), "/usr/", 5) == 0)
-    return false;
-#endif
-
-  s_state.process_start_time = Timer::GetCurrentValue();
   return true;
 }
 
-void System::ProcessShutdown()
+void System::ReleasePersistentMemory()
 {
   Bus::ReleaseMemory();
   CPU::CodeCache::ProcessShutdown();
-}
-
-float System::GetProcessUptime()
-{
-  return static_cast<float>(Timer::ConvertValueToSeconds(Timer::GetCurrentValue() - s_state.process_start_time));
-}
-
-bool System::CoreThreadInitialize(Error* error)
-{
-#ifdef _WIN32
-  // On Win32, we have a bunch of things which use COM (e.g. SDL, Cubeb, etc).
-  // We need to initialize COM first, before anything else does, because otherwise they might
-  // initialize it in single-threaded/apartment mode, which can't be changed to multithreaded.
-  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-  if (FAILED(hr))
-  {
-    Error::SetHResult(error, "CoInitializeEx() failed: ", hr);
-    return false;
-  }
-#endif
-
-  s_state.core_thread_handle = Threading::ThreadHandle::GetForCallingThread();
-
-  // This will call back to Host::LoadSettings() -> ReloadSources().
-  LoadSettings(false);
-
-  LogStartupInformation();
-
-  VideoThread::Internal::ProcessStartup();
-
-  Achievements::Initialize();
-
-#ifdef ENABLE_DISCORD_PRESENCE
-  if (g_settings.enable_discord_presence)
-    DiscordPresence::Initialize();
-#endif
-
-  return true;
-}
-
-void System::CoreThreadShutdown()
-{
-#ifdef ENABLE_DISCORD_PRESENCE
-  DiscordPresence::Shutdown();
-#endif
-
-  Achievements::Shutdown();
-
-  GPUDevice::UnloadDynamicLibraries();
-
-  InputManager::CloseSources();
-
-  HTTPCache::Shutdown();
-
-  VideoThread::Internal::ProcessShutdown();
-
-  s_state.core_thread_handle = {};
-
-#ifdef _WIN32
-  CoUninitialize();
-#endif
-}
-
-const Threading::ThreadHandle& System::GetCoreThreadHandle()
-{
-  return s_state.core_thread_handle;
-}
-
-void System::SetCoreThreadHandle(Threading::ThreadHandle handle)
-{
-  s_state.core_thread_handle = std::move(handle);
-}
-
-bool Host::IsOnCoreThread()
-{
-  // This really doesn't belong here...
-  return System::GetCoreThreadHandle().IsCallingThread();
-}
-
-void System::IdlePollUpdate()
-{
-  InputManager::PollSources();
-
-#ifdef ENABLE_DISCORD_PRESENCE
-  DiscordPresence::Poll();
-#endif
-
-  HTTPCache::PollRequests();
-
-  Achievements::IdleUpdate();
-
-#ifdef ENABLE_GDB_SERVER
-  GDBServer::Poll(0);
-#endif
 }
 
 System::State System::GetState()
@@ -3819,10 +3578,11 @@ void System::UpdateSpeedLimiterState()
   {
     const u64 typical_time =
       std::min(std::max<u64>((new_scheduler_period / 1000000) * 1000000, MIN_FRAME_TIME_NS), TYPICAL_FRAME_TIME_NS);
-    if (s_state.core_thread_handle)
+    const Threading::ThreadHandle& core_thread = Host::GetCoreThreadHandle();
+    if (core_thread)
     {
-      s_state.core_thread_handle.SetTimeConstraints(s_state.optimal_frame_pacing, new_scheduler_period, typical_time,
-                                                    new_scheduler_period);
+      core_thread.SetTimeConstraints(s_state.optimal_frame_pacing, new_scheduler_period, typical_time,
+                                     new_scheduler_period);
     }
     const Threading::ThreadHandle& video_thread = VideoThread::Internal::GetThreadHandle();
     if (video_thread)
@@ -5364,7 +5124,7 @@ void System::DoRewind()
   VideoThread::PresentCurrentFrame();
 
   Host::PumpMessagesOnCoreThread();
-  IdlePollUpdate();
+  Core::IdleUpdate();
 
   // get back into it straight away if we're no longer rewinding
   if (!IsRewinding())
