@@ -46,7 +46,6 @@
 #include "common/path.h"
 #include "common/scoped_guard.h"
 #include "common/string_util.h"
-#include "common/task_queue.h"
 #include "common/threading.h"
 
 #include "util/audio_stream.h"
@@ -105,9 +104,6 @@ QT_TRANSLATE_NOOP("MAC_APPLICATION_MENU", "About %1")
 #endif
 
 static constexpr u32 SETTINGS_SAVE_DELAY = 1000;
-
-/// Use two async worker threads, should be enough for most tasks.
-static constexpr u32 NUM_ASYNC_WORKER_THREADS = 2;
 
 /// Interval at which the controllers are polled when the system is not active.
 static constexpr int BACKGROUND_CONTROLLER_POLLING_INTERVAL_WITH_DEVICES = 100;
@@ -180,7 +176,6 @@ struct State
 } // namespace
 
 ALIGN_TO_CACHE_LINE static State s_state;
-ALIGN_TO_CACHE_LINE static TaskQueue s_async_task_queue;
 
 } // namespace QtHost
 
@@ -1712,16 +1707,6 @@ void Host::RunOnUIThread(std::function<void()> function, bool block /* = false*/
                             block ? Qt::BlockingQueuedConnection : Qt::QueuedConnection, std::move(function));
 }
 
-void Host::QueueAsyncTask(std::function<void()> function)
-{
-  QtHost::s_async_task_queue.SubmitTask(std::move(function));
-}
-
-void Host::WaitForAllAsyncTasks()
-{
-  QtHost::s_async_task_queue.WaitForAll();
-}
-
 QtAsyncTask::QtAsyncTask(WorkCallback callback)
 {
   m_callback = std::move(callback);
@@ -2218,17 +2203,13 @@ void CoreThread::run()
   // input source setup must happen on emu thread
   {
     Error startup_error;
-    if (!Core::CoreThreadInitialize(&startup_error))
+    if (!Core::CoreThreadInitialize(false, &startup_error))
     {
       moveToThread(m_ui_thread);
       Host::ReportFatalError("Fatal Startup Error", startup_error.GetDescription());
       return;
     }
   }
-
-  // start up worker threads
-  // TODO: Replace this with QThreads
-  QtHost::s_async_task_queue.SetWorkerCount(NUM_ASYNC_WORKER_THREADS);
 
   // connections
   connect(qApp, &QGuiApplication::applicationStateChanged, this, &CoreThread::applicationStateChanged);
@@ -2265,9 +2246,6 @@ void CoreThread::run()
     System::ShutdownSystem(false);
 
   destroyBackgroundControllerPollTimer();
-
-  // join worker threads
-  QtHost::s_async_task_queue.SetWorkerCount(0);
 
   // and tidy up everything left
   Core::CoreThreadShutdown();

@@ -28,6 +28,7 @@
 #include "common/path.h"
 #include "common/ryml_helpers.h"
 #include "common/string_util.h"
+#include "common/task_queue.h"
 #include "common/threading.h"
 #include "common/timer.h"
 
@@ -49,6 +50,9 @@ LOG_CHANNEL(Core);
 
 namespace Core {
 
+/// Use two async worker threads, should be enough for most tasks.
+static constexpr u32 NUM_ASYNC_WORKER_THREADS = 2;
+
 static bool SetAppRootAndResources(const char* resources_subdir, Error* error);
 static bool SetDataRoot(Error* error);
 static void SetDefaultSettings(SettingsInterface& si, bool host, bool system, bool controller);
@@ -66,6 +70,8 @@ struct CoreLocals
   Threading::ThreadHandle core_thread_handle;
 
   Timer::Value process_start_time = 0;
+
+  TaskQueue async_task_queue;
 };
 } // namespace
 
@@ -695,7 +701,7 @@ void Core::ProcessShutdown()
   System::ReleasePersistentMemory();
 }
 
-bool Core::CoreThreadInitialize(Error* error)
+bool Core::CoreThreadInitialize(bool disable_worker_threads, Error* error)
 {
 #ifdef _WIN32
   // On Win32, we have a bunch of things which use COM (e.g. SDL, Cubeb, etc).
@@ -710,6 +716,9 @@ bool Core::CoreThreadInitialize(Error* error)
 #endif
 
   s_locals.core_thread_handle = Threading::ThreadHandle::GetForCallingThread();
+
+  if (!disable_worker_threads)
+    s_locals.async_task_queue.SetWorkerCount(NUM_ASYNC_WORKER_THREADS);
 
   System::LoadSettings(false);
 
@@ -729,6 +738,8 @@ bool Core::CoreThreadInitialize(Error* error)
 
 void Core::CoreThreadShutdown()
 {
+  s_locals.async_task_queue.SetWorkerCount(0);
+
 #ifdef ENABLE_DISCORD_PRESENCE
   DiscordPresence::Shutdown();
 #endif
@@ -758,6 +769,16 @@ const Threading::ThreadHandle& Host::GetCoreThreadHandle()
 bool Host::IsOnCoreThread()
 {
   return Core::s_locals.core_thread_handle.IsCallingThread();
+}
+
+void Host::QueueAsyncTask(std::function<void()> function)
+{
+  Core::s_locals.async_task_queue.SubmitTask(std::move(function));
+}
+
+void Host::WaitForAllAsyncTasks()
+{
+  Core::s_locals.async_task_queue.WaitForAll();
 }
 
 float Core::GetProcessUptime()

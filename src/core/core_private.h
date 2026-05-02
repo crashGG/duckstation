@@ -42,7 +42,7 @@ bool ProcessStartup(Error* error);
 void ProcessShutdown();
 
 /// Called on CPU thread initialization.
-bool CoreThreadInitialize(Error* error);
+bool CoreThreadInitialize(bool disable_worker_threads, Error* error);
 
 /// Called on CPU thread shutdown.
 void CoreThreadShutdown();
