@@ -6354,7 +6354,7 @@ void FullscreenUI::LoadingScreenProgressCallback::Close()
   else
   {
     // since this was pushing frames, we need to restore the context. do that by pushing a frame ourselves
-    VideoThread::Internal::PresentFrameAndRestoreContext();
+    VideoThread::PresentFrameAndRestoreContext();
   }
 
   m_last_progress_percent = -1;
