@@ -58,6 +58,8 @@ static constexpr u32 NUM_ASYNC_WORKER_THREADS = 2;
 static bool SetAppRootAndResources(const char* resources_subdir, Error* error);
 static bool SetDataRoot(Error* error);
 static void SetDefaultSettings(SettingsInterface& si, bool host, bool system, bool controller);
+// 前端调用模式
+bool g_frontboot_mode = false;
 
 static void CheckCacheLineSize();
 static void LogStartupInformation();
@@ -252,7 +254,11 @@ bool Core::SetDataRoot(Error* error)
 
 std::string Core::GetBaseSettingsPath()
 {
-  return Path::Combine(EmuFolders::DataRoot, "settings.ini");
+// 前端调用模式
+    if (g_frontboot_mode)
+        return Path::Combine(EmuFolders::DataRoot, "setting1.ini");
+    else
+		return Path::Combine(EmuFolders::DataRoot, "settings.ini");
 }
 
 bool Core::InitializeBaseSettingsLayer(std::string settings_path, Error* error)
