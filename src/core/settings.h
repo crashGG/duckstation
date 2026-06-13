@@ -315,7 +315,6 @@ struct Settings : public GPUSettings
   bool cdrom_subq_skew : 1 = false;
   bool cdrom_load_image_to_ram : 1 = false;
   bool cdrom_load_image_patches : 1 = false;
-  bool cdrom_ignore_host_subcode : 1 = false;
   bool cdrom_mute_cd_audio : 1 = false;
   bool cdrom_auto_disc_change : 1 = false;
 
@@ -468,7 +467,7 @@ struct Settings : public GPUSettings
 
   void Load(const SettingsInterface& si, const SettingsInterface& controller_si);
   void LoadPGXPSettings(const SettingsInterface& si);
-  void Save(SettingsInterface& si, bool ignore_base) const;
+  void Save(SettingsInterface& si, bool ignore_user_prefs, bool for_copy) const;
 
   void ApplySettingRestrictions();
   void FixIncompatibleSettings(const SettingsInterface& si, bool display_osd_messages);
