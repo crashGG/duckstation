@@ -222,7 +222,7 @@ Settings::Settings()
 
 bool Settings::HasAnyPerGameMemoryCards() const
 {
-  return std::any_of(memory_card_types.begin(), memory_card_types.end(), [](MemoryCardType t) {
+  return std::ranges::any_of(memory_card_types, [](MemoryCardType t) {
     return (t == MemoryCardType::PerGame || t == MemoryCardType::PerGameTitle);
   });
 }
@@ -256,6 +256,8 @@ void Settings::UpdateOverclockActive()
 
 void Settings::Load(const SettingsInterface& si, const SettingsInterface& controller_si)
 {
+  TinyString skey;
+
   region =
     ParseConsoleRegionName(
       si.GetStringViewValue("Console", "Region", Settings::GetConsoleRegionName(Settings::DEFAULT_CONSOLE_REGION)))
@@ -350,6 +352,8 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
     ParseForceVideoTimingName(
       si.GetStringViewValue("GPU", "ForceVideoTiming", GetForceVideoTimingName(DEFAULT_FORCE_VIDEO_TIMING_MODE)))
       .value_or(DEFAULT_FORCE_VIDEO_TIMING_MODE);
+  gpu_disable_textures = si.GetBoolValue("GPU", "DisableTextures", false);
+  gpu_disable_vertex_lighting = si.GetBoolValue("GPU", "DisableVertexLighting", false);
   gpu_widescreen_rendering = gpu_widescreen_hack = si.GetBoolValue("GPU", "WidescreenHack", false);
   gpu_modulation_crop = si.GetBoolValue("GPU", "EnableModulationCrop", false);
   gpu_texture_cache = si.GetBoolValue("GPU", "EnableTextureCache", false);
@@ -439,9 +443,9 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
 
   for (size_t i = 0; i < display_osd_message_duration.size(); i++)
   {
-    display_osd_message_duration[i] = si.GetFloatValue(
-      "Display", TinyString::from_format("OSD{}Duration", GetDisplayOSDMessageTypeName(static_cast<OSDMessageType>(i))),
-      DEFAULT_DISPLAY_OSD_MESSAGE_DURATIONS[i]);
+    skey.format("OSD{}Duration", GetDisplayOSDMessageTypeName(static_cast<OSDMessageType>(i)));
+    display_osd_message_duration[i] =
+      si.GetFloatValue("Display", skey.c_str(), DEFAULT_DISPLAY_OSD_MESSAGE_DURATIONS[i]);
   }
   display_osd_message_location = ParseNotificationLocation(si.GetStringViewValue("Display", "OSDMessageLocation"))
                                    .value_or(DEFAULT_OSD_MESSAGE_LOCATION);
@@ -491,33 +495,34 @@ void Settings::Load(const SettingsInterface& si, const SettingsInterface& contro
                                                                          GetMultitapModeName(DEFAULT_MULTITAP_MODE)))
                     .value_or(DEFAULT_MULTITAP_MODE);
 
-  const std::array<bool, 2> mtap_enabled = {{IsPort1MultitapEnabled(), IsPort2MultitapEnabled()}};
+  const std::array<bool, 2> mtap_enabled = Controller::GetMultitapEnabledPorts(multitap_mode);
   for (u32 pad = 0; pad < NUM_CONTROLLER_AND_CARD_PORTS; pad++)
   {
     // Ignore types when multitap not enabled
-    const auto [port, slot] = Controller::ConvertPadToPortAndSlot(pad);
-    if (Controller::PadIsMultitapSlot(pad) && !mtap_enabled[port])
+    if (Controller::PadIsMultitapSlot(pad))
     {
-      controller_types[pad] = ControllerType::None;
-      continue;
+      const auto& [port, slot] = Controller::ConvertPadToPortAndSlot(pad);
+      if (!mtap_enabled[port])
+      {
+        controller_types[pad] = ControllerType::None;
+        memory_card_types[pad] = MemoryCardType::None;
+        continue;
+      }
     }
 
     const ControllerType default_type = (pad == 0) ? DEFAULT_CONTROLLER_1_TYPE : DEFAULT_CONTROLLER_2_TYPE;
     const Controller::ControllerInfo* cinfo = Controller::GetControllerInfo(controller_si.GetStringViewValue(
       Controller::GetSettingsSection(pad).c_str(), "Type", Controller::GetControllerInfo(default_type).name));
     controller_types[pad] = cinfo ? cinfo->type : default_type;
+
+    const MemoryCardType default_card_type = (pad == 0) ? DEFAULT_MEMORY_CARD_1_TYPE : DEFAULT_MEMORY_CARD_2_TYPE;
+    skey.format("Card{}Type", pad + 1);
+    memory_card_types[pad] =
+      ParseMemoryCardTypeName(si.GetStringViewValue("MemoryCards", skey.c_str())).value_or(default_card_type);
+    skey.format("Card{}Path", pad + 1);
+    memory_card_paths[pad] = si.GetStringViewValue("MemoryCards", skey.c_str());
   }
 
-  memory_card_types[0] =
-    ParseMemoryCardTypeName(
-      si.GetStringViewValue("MemoryCards", "Card1Type", GetMemoryCardTypeName(DEFAULT_MEMORY_CARD_1_TYPE)))
-      .value_or(DEFAULT_MEMORY_CARD_1_TYPE);
-  memory_card_types[1] =
-    ParseMemoryCardTypeName(
-      si.GetStringViewValue("MemoryCards", "Card2Type", GetMemoryCardTypeName(DEFAULT_MEMORY_CARD_2_TYPE)))
-      .value_or(DEFAULT_MEMORY_CARD_2_TYPE);
-  memory_card_paths[0] = si.GetStringViewValue("MemoryCards", "Card1Path");
-  memory_card_paths[1] = si.GetStringViewValue("MemoryCards", "Card2Path");
   memory_card_use_playlist_title = si.GetBoolValue("MemoryCards", "UsePlaylistTitle", true);
   memory_card_fast_forward_access = si.GetBoolValue("MemoryCards", "FastForwardAccess", false);
 
@@ -656,6 +661,8 @@ void Settings::LoadPGXPSettings(const SettingsInterface& si)
 
 void Settings::Save(SettingsInterface& si, bool ignore_user_prefs, bool for_copy) const
 {
+  TinyString skey;
+
   si.SetStringValue("Console", "Region", GetConsoleRegionName(region));
   si.SetBoolValue("Console", "Enable8MBRAM", cpu_enable_8mb_ram);
 
@@ -737,6 +744,8 @@ void Settings::Save(SettingsInterface& si, bool ignore_user_prefs, bool for_copy
   si.SetUIntValue("GPU", "DownsampleScale", gpu_downsample_scale);
   si.SetStringValue("GPU", "WireframeMode", GetGPUWireframeModeName(gpu_wireframe_mode));
   si.SetStringValue("GPU", "ForceVideoTiming", GetForceVideoTimingName(gpu_force_video_timing));
+  si.SetBoolValue("GPU", "DisableTextures", gpu_disable_textures);
+  si.SetBoolValue("GPU", "DisableVertexLighting", gpu_disable_vertex_lighting);
   si.SetBoolValue("GPU", "WidescreenHack", gpu_widescreen_rendering);
   si.SetBoolValue("GPU", "EnableModulationCrop", gpu_modulation_crop);
   si.SetBoolValue("GPU", "EnableTextureCache", gpu_texture_cache);
@@ -810,10 +819,8 @@ void Settings::Save(SettingsInterface& si, bool ignore_user_prefs, bool for_copy
 
     for (size_t i = 0; i < display_osd_message_duration.size(); i++)
     {
-      si.SetFloatValue(
-        "Display",
-        TinyString::from_format("OSD{}Duration", GetDisplayOSDMessageTypeName(static_cast<OSDMessageType>(i))),
-        display_osd_message_duration[i]);
+      skey.format("OSD{}Duration", GetDisplayOSDMessageTypeName(static_cast<OSDMessageType>(i)));
+      si.SetFloatValue("Display", skey.c_str(), display_osd_message_duration[i]);
     }
 
     si.SetStringValue("Display", "OSDMessageLocation", GetNotificationLocationName(display_osd_message_location));
@@ -854,19 +861,14 @@ void Settings::Save(SettingsInterface& si, bool ignore_user_prefs, bool for_copy
   {
     si.SetStringValue(Controller::GetSettingsSection(i).c_str(), "Type",
                       Controller::GetControllerInfo(controller_types[i]).name);
+
+    skey.format("Card{}Type", i + 1);
+    si.SetStringValue("MemoryCards", skey, GetMemoryCardTypeName(memory_card_types[0]));
+    if (!memory_card_paths[i].empty())
+      si.SetStringValue("MemoryCards", skey, memory_card_paths[i].c_str());
+    else
+      si.DeleteValue("MemoryCards", skey);
   }
-
-  si.SetStringValue("MemoryCards", "Card1Type", GetMemoryCardTypeName(memory_card_types[0]));
-  si.SetStringValue("MemoryCards", "Card2Type", GetMemoryCardTypeName(memory_card_types[1]));
-  if (!memory_card_paths[0].empty())
-    si.SetStringValue("MemoryCards", "Card1Path", memory_card_paths[0].c_str());
-  else
-    si.DeleteValue("MemoryCards", "Card1Path");
-
-  if (!memory_card_paths[1].empty())
-    si.SetStringValue("MemoryCards", "Card2Path", memory_card_paths[1].c_str());
-  else
-    si.DeleteValue("MemoryCards", "Card2Path");
 
   si.SetBoolValue("MemoryCards", "UsePlaylistTitle", memory_card_use_playlist_title);
   si.SetBoolValue("MemoryCards", "FastForwardAccess", memory_card_fast_forward_access);
@@ -1152,6 +1154,8 @@ void Settings::ApplySettingRestrictions()
     gpu_downsample_mode = GPUDownsampleMode::Disabled;
     gpu_wireframe_mode = GPUWireframeMode::Disabled;
     gpu_force_video_timing = ForceVideoTimingMode::Disabled;
+    gpu_disable_textures = false;
+    gpu_disable_vertex_lighting = false;
     gpu_widescreen_rendering = false;
     gpu_widescreen_hack = false;
     gpu_modulation_crop = false;
@@ -2769,6 +2773,10 @@ const char* Settings::GetPIODeviceTypeModeDisplayName(PIODeviceType type)
 
 namespace EmuFolders {
 
+static void EnsureFolderExists(const std::string& path);
+static std::string LoadPathFromSettings(const SettingsInterface& si, const std::string& root, const char* section,
+                                        const char* name, const char* def);
+
 std::string AppRoot;
 std::string DataRoot;
 std::string Bios;
@@ -2789,9 +2797,32 @@ std::string Textures;
 std::string UserResources;
 std::string Videos;
 
-static void EnsureFolderExists(const std::string& path);
-
 } // namespace EmuFolders
+
+std::string EmuFolders::GetDefaultPath(const std::string* ref_folder)
+{
+  // clang-format off
+  std::string_view subdir;
+  if (ref_folder == &Bios) subdir = "bios";
+  else if (ref_folder == &Cache) subdir = "cache";
+  else if (ref_folder == &Cheats) subdir = "cheats";
+  else if (ref_folder == &Covers) subdir = "covers";
+  else if (ref_folder == &GameIcons) subdir = "gameicons";
+  else if (ref_folder == &GameSettings) subdir = "gamesettings";
+  else if (ref_folder == &InputProfiles) subdir = "inputprofiles";
+  else if (ref_folder == &MemoryCards) subdir = "memcards";
+  else if (ref_folder == &Patches) subdir = "patches";
+  else if (ref_folder == &SaveStates) subdir = "savestates";
+  else if (ref_folder == &Screenshots) subdir = "screenshots";
+  else if (ref_folder == &Shaders) subdir = "shaders";
+  else if (ref_folder == &Subchannels) subdir = "subchannels";
+  else if (ref_folder == &Textures) subdir = "textures";
+  else if (ref_folder == &UserResources) subdir = "resources";
+  else if (ref_folder == &Videos) subdir = "videos";
+  // clang-format on
+
+  return Path::Combine(DataRoot, subdir);
+}
 
 void EmuFolders::SetDefaults()
 {
@@ -2813,8 +2844,8 @@ void EmuFolders::SetDefaults()
   Videos = Path::Combine(DataRoot, "videos");
 }
 
-static std::string LoadPathFromSettings(SettingsInterface& si, const std::string& root, const char* section,
-                                        const char* name, const char* def)
+std::string EmuFolders::LoadPathFromSettings(const SettingsInterface& si, const std::string& root, const char* section,
+                                             const char* name, const char* def)
 {
   std::string value = si.GetStringValue(section, name, def);
   if (value.empty())
@@ -2825,7 +2856,7 @@ static std::string LoadPathFromSettings(SettingsInterface& si, const std::string
   return value;
 }
 
-void EmuFolders::LoadConfig(SettingsInterface& si)
+void EmuFolders::LoadConfig(const SettingsInterface& si)
 {
   Bios = LoadPathFromSettings(si, DataRoot, "BIOS", "SearchDirectory", "bios");
   Cache = LoadPathFromSettings(si, DataRoot, "Folders", "Cache", "cache");

@@ -23,6 +23,8 @@ set(SRCS
   advancedsettingswidget.cpp
   advancedsettingswidget.h
   advancedsettingswidget.ui
+  animatedstackedwidget.cpp
+  animatedstackedwidget.h
   asynchttprequest.cpp
   asynchttprequest.h
   asyncpixmaploader.cpp
@@ -36,6 +38,8 @@ set(SRCS
   biossettingswidget.cpp
   biossettingswidget.h
   biossettingswidget.ui
+  cardradiobutton.cpp
+  cardradiobutton.h
   colorpickerbutton.cpp
   colorpickerbutton.h
   capturesettingswidget.cpp
@@ -156,6 +160,8 @@ set(SRCS
   qtwindowinfo.cpp
   qtwindowinfo.h
   resource.h
+  searchbox.cpp
+  searchbox.h
   selectdiscdialog.cpp
   selectdiscdialog.h
   selectdiscdialog.ui

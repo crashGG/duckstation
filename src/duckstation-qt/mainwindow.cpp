@@ -983,19 +983,23 @@ void MainWindow::populateLoadStateMenu(std::string_view game_serial, QMenu* menu
                       tr("Undo Load State"));
   load_from_state->setEnabled(s_locals.undo_state_timestamp.has_value());
   connect(load_from_state, &QAction::triggered, g_core_thread, &CoreThread::undoLoadState);
-  menu->addSeparator();
 
   if (!game_serial.empty())
   {
+    menu->addSeparator();
+
     for (u32 slot = 1; slot <= System::PER_GAME_SAVE_STATE_SLOTS; slot++)
       add_slot(tr("Game Save %1 (%2)"), tr("Game Save %1 (Empty)"), game_serial, static_cast<s32>(slot));
-
-    menu->addSeparator();
   }
 
-  std::string_view empty_serial;
-  for (u32 slot = 1; slot <= System::GLOBAL_SAVE_STATE_SLOTS; slot++)
-    add_slot(tr("Global Save %1 (%2)"), tr("Global Save %1 (Empty)"), empty_serial, static_cast<s32>(slot));
+  if (System::AreGlobalSaveStatesEnabled())
+  {
+    menu->addSeparator();
+
+    std::string_view empty_serial;
+    for (u32 slot = 1; slot <= System::GLOBAL_SAVE_STATE_SLOTS; slot++)
+      add_slot(tr("Global Save %1 (%2)"), tr("Global Save %1 (Empty)"), empty_serial, static_cast<s32>(slot));
+  }
 }
 
 void MainWindow::populateSaveStateMenu(std::string_view game_serial, QMenu* menu)
@@ -1026,19 +1030,23 @@ void MainWindow::populateSaveStateMenu(std::string_view game_serial, QMenu* menu
 
     g_core_thread->saveState(QDir::toNativeSeparators(path));
   });
-  menu->addSeparator();
 
   if (!game_serial.empty())
   {
+    menu->addSeparator();
+
     for (u32 slot = 1; slot <= System::PER_GAME_SAVE_STATE_SLOTS; slot++)
       add_slot(tr("Game Save %1 (%2)"), tr("Game Save %1 (Empty)"), game_serial, static_cast<s32>(slot));
-
-    menu->addSeparator();
   }
 
-  std::string_view empty_serial;
-  for (u32 slot = 1; slot <= System::GLOBAL_SAVE_STATE_SLOTS; slot++)
-    add_slot(tr("Global Save %1 (%2)"), tr("Global Save %1 (Empty)"), empty_serial, static_cast<s32>(slot));
+  if (System::AreGlobalSaveStatesEnabled())
+  {
+    menu->addSeparator();
+
+    std::string_view empty_serial;
+    for (u32 slot = 1; slot <= System::GLOBAL_SAVE_STATE_SLOTS; slot++)
+      add_slot(tr("Global Save %1 (%2)"), tr("Global Save %1 (Empty)"), empty_serial, static_cast<s32>(slot));
+  }
 }
 
 void MainWindow::onCheatsMenuAboutToShow()
@@ -1394,6 +1402,7 @@ void MainWindow::onChangeDiscMenuAboutToShow()
   else if (const GameDatabase::Entry* entry = System::GetGameDatabaseEntry(); entry && entry->disc_set)
   {
     auto lock = GameList::GetLock();
+    GameList::EnsureLoaded(lock);
     for (const auto& [title, glentry] :
          GameList::GetEntriesInDiscSet(entry->disc_set, m_game_list_widget->getModel()->getShowLocalizedTitles()))
     {
@@ -2577,8 +2586,8 @@ void MainWindow::connectSignals()
   connect(m_ui.actionISOBrowser, &QAction::triggered, this, &MainWindow::onToolsISOBrowserTriggered);
   connect(m_ui.actionControllerTest, &QAction::triggered, g_core_thread, &CoreThread::startControllerTest);
   connect(m_ui.actionCoverDownloader, &QAction::triggered, this, &MainWindow::onToolsCoverDownloaderTriggered);
-  connect(m_ui.actionToolsDownloadAchievementGameIcons, &QAction::triggered, this,
-          &MainWindow::onToolsDownloadAchievementGameIconsTriggered);
+  connect(m_ui.actionToolsRefreshAchievementDatabase, &QAction::triggered, g_main_window,
+          &MainWindow::onToolsRefreshAchievementDatabaseTriggered);
   connect(m_ui.actionToolsRefreshAchievementProgress, &QAction::triggered, g_main_window,
           &MainWindow::refreshAchievementProgress);
   connect(m_ui.actionMediaCapture, &QAction::triggered, this, &MainWindow::onToolsMediaCaptureTriggered);
@@ -2801,8 +2810,14 @@ SettingsWindow* MainWindow::getSettingsWindow()
   if (!m_settings_window)
   {
     m_settings_window = new SettingsWindow();
-    connect(m_settings_window, &SettingsWindow::debugOptionsVisibiltyChanged, this,
+    connect(m_settings_window, &SettingsWindow::debugOptionsVisibilityChanged, this,
             &MainWindow::updateDebugMenuVisibility);
+
+    if (m_controller_settings_window)
+    {
+      connect(m_controller_settings_window, &ControllerSettingsWindow::multitapModeChanged, m_settings_window,
+              &SettingsWindow::onMultitapModeChanged);
+    }
   }
 
   return m_settings_window;
@@ -2841,7 +2856,16 @@ void MainWindow::openGamePropertiesForCurrentGame(const char* category /* = null
 ControllerSettingsWindow* MainWindow::getControllerSettingsWindow()
 {
   if (!m_controller_settings_window)
+  {
     m_controller_settings_window = new ControllerSettingsWindow();
+
+    // What a pain in the butt to sync...
+    if (m_settings_window)
+    {
+      connect(m_controller_settings_window, &ControllerSettingsWindow::multitapModeChanged, m_settings_window,
+              &SettingsWindow::onMultitapModeChanged);
+    }
+  }
 
   return m_controller_settings_window;
 }
@@ -2900,13 +2924,14 @@ void MainWindow::onSettingsControllerProfilesTriggered()
   QtUtils::ShowOrRaiseWindow(m_input_profile_editor_window, this);
 }
 
-void MainWindow::openInputProfileEditor(const std::string_view name)
+ControllerSettingsWindow* MainWindow::openInputProfileEditor(const std::string_view name)
 {
   if (!m_input_profile_editor_window)
     m_input_profile_editor_window = new ControllerSettingsWindow(nullptr, true);
 
   QtUtils::ShowOrRaiseWindow(m_input_profile_editor_window, this);
   m_input_profile_editor_window->switchProfile(name);
+  return m_input_profile_editor_window;
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -2915,7 +2940,8 @@ void MainWindow::closeEvent(QCloseEvent* event)
   // When recreating, g_main_window will be the new window at this point.
   if (!QtHost::IsSystemValidOrStarting() || g_main_window != this)
   {
-    QtUtils::SaveWindowGeometry(this);
+    if (!QtHost::InNoGUIMode())
+      QtUtils::SaveWindowGeometry(this);
 
     if (s_locals.fullscreen_ui_started && g_main_window == this)
       g_core_thread->stopFullscreenUI();
@@ -3286,8 +3312,8 @@ void MainWindow::onAchievementsLoginSuccess(const QString& username, quint32 poi
 
 void MainWindow::onAchievementsActiveChanged(bool active)
 {
+  m_ui.actionToolsRefreshAchievementDatabase->setEnabled(active);
   m_ui.actionToolsRefreshAchievementProgress->setEnabled(active);
-  m_ui.actionToolsDownloadAchievementGameIcons->setEnabled(active);
 }
 
 void MainWindow::onAchievementsHardcoreModeChanged(bool enabled)
@@ -3358,19 +3384,19 @@ void MainWindow::onToolsCoverDownloaderTriggered()
   QtUtils::ShowOrRaiseWindow(m_cover_download_window, this, true);
 }
 
-void MainWindow::onToolsDownloadAchievementGameIconsTriggered()
+void MainWindow::onToolsRefreshAchievementDatabaseTriggered()
 {
   QtAsyncTaskWithProgressDialog::create(
-    this, TRANSLATE_STR("GameListWidget", "Download Game Icons"),
-    TRANSLATE_STR("GameListWidget", "Downloading game icons..."), false, true, 0, 0, 0.0f, true,
+    this, TRANSLATE_STR("MainWindow", "Refresh Achievement Progress"), {}, false, true, 0, 0, 0.0f, true,
     [](ProgressCallback* progress) {
       Error error;
-      const bool result = Achievements::DownloadGameIcons(progress, &error);
+      const bool result = Achievements::RefreshGameList(progress, &error);
       return [error = std::move(error), result]() {
         if (!result)
           g_main_window->reportError(tr("Error"), QString::fromStdString(error.GetDescription()));
 
-        g_main_window->m_game_list_widget->getModel()->invalidateColumn(GameListModel::Column_Icon);
+        g_main_window->m_ui.statusBar->showMessage(tr("RA: Updated achievement game database."));
+        g_main_window->m_game_list_widget->getModel()->invalidateColumn(GameListModel::Column_Achievements);
       };
     });
 }

@@ -104,8 +104,8 @@ using namespace Qt::StringLiterals;
 
 // Update channels.
 static constexpr const std::pair<const char*, const char*> s_update_channels[] = {
-  {"latest", QT_TRANSLATE_NOOP("AutoUpdaterWindow", "Stable Releases")},
-  {"preview", QT_TRANSLATE_NOOP("AutoUpdaterWindow", "Preview Releases")},
+  {"latest", QT_TRANSLATE_NOOP("AutoUpdaterDialog", "Stable Releases")},
+  {"preview", QT_TRANSLATE_NOOP("AutoUpdaterDialog", "Preview Releases")},
 };
 
 LOG_CHANNEL(Host);
@@ -253,13 +253,24 @@ std::vector<std::pair<QString, QString>> AutoUpdaterDialog::getChannelList()
   std::vector<std::pair<QString, QString>> ret;
   ret.reserve(std::size(s_update_channels));
   for (const auto& [name, desc] : s_update_channels)
-    ret.emplace_back(QString::fromUtf8(name), qApp->translate("AutoUpdaterWindow", desc));
+    ret.emplace_back(QString::fromUtf8(name), tr(desc));
   return ret;
 }
 
-std::string AutoUpdaterDialog::getDefaultTag()
+const char* AutoUpdaterDialog::getDefaultTag()
 {
   return UPDATER_RELEASE_CHANNEL;
+}
+
+QString AutoUpdaterDialog::getTagDisplayName(const std::string_view tag)
+{
+  for (const auto& [name, desc] : s_update_channels)
+  {
+    if (tag == name)
+      return tr(desc);
+  }
+
+  return QString();
 }
 
 std::string AutoUpdaterDialog::getCurrentUpdateTag()
@@ -728,7 +739,7 @@ bool AutoUpdaterDialog::extractUpdater(const std::string& zip_path, const std::s
           tr("<h1>Inconsistent Application State</h1><h3>The update zip is missing the current executable:</h3><div "
              "align=\"center\"><pre>%1</pre></div><p><strong>This is usually a result of manually renaming the "
              "file.</strong> Continuing to install this update may result in a broken installation if the renamed "
-             "executable is used. The DuckStation executable should be named:<div "
+             "executable is used. The DuckStation executable should be named:</p><div "
              "align=\"center\"><pre>%2</pre></div><p>Do you want to continue anyway?</p>")
             .arg(QString::fromStdString(std::string(check_for_file)))
             .arg(QStringLiteral(UPDATER_EXPECTED_EXECUTABLE)),

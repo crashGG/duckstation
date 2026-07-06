@@ -112,7 +112,7 @@ public:
   ALWAYS_INLINE DebuggerWindow* getDebuggerWindow() const { return m_debugger_window; }
 
   /// Opens the editor for a specific input profile.
-  void openInputProfileEditor(const std::string_view name);
+  ControllerSettingsWindow* openInputProfileEditor(const std::string_view name);
 
   /// Returns pointer to settings window.
   SettingsWindow* getSettingsWindow();
@@ -301,7 +301,7 @@ private:
   void onToolsMemoryScannerTriggered();
   void onToolsISOBrowserTriggered();
   void onToolsCoverDownloaderTriggered();
-  void onToolsDownloadAchievementGameIconsTriggered();
+  void onToolsRefreshAchievementDatabaseTriggered();
   void onToolsMediaCaptureTriggered(bool checked);
   void onToolsOpenDataDirectoryTriggered();
   void onToolsOpenTextureDirectoryTriggered();

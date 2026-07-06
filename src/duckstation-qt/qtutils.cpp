@@ -200,7 +200,7 @@ std::optional<unsigned> QtUtils::PromptForAddress(QWidget* parent, const QString
                                                   bool code)
 {
   const QString address_str(
-    QInputDialog::getText(parent, title, qApp->translate("DebuggerWindow", "Enter memory address:")));
+    QInputDialog::getText(parent, title, QCoreApplication::translate("DebuggerWindow", "Enter memory address:")));
   if (address_str.isEmpty())
     return std::nullopt;
 
@@ -217,7 +217,7 @@ std::optional<unsigned> QtUtils::PromptForAddress(QWidget* parent, const QString
   {
     MessageBoxCritical(
       parent, title,
-      qApp->translate("DebuggerWindow", "Invalid address. It should be in hex (0x12345678 or 12345678)"));
+      QCoreApplication::translate("DebuggerWindow", "Invalid address. It should be in hex (0x12345678 or 12345678)"));
     return std::nullopt;
   }
 
@@ -288,7 +288,7 @@ void QtUtils::SetWindowResizeable(QWidget* widget, bool resizeable)
       // Min/max numbers come from uic.
       widget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
       widget->setMinimumSize(1, 1);
-      widget->setMaximumSize(16777215, 16777215);
+      widget->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     }
     else
     {
@@ -588,7 +588,7 @@ void QtUtils::SaveWindowGeometry(QWidget* widget, bool auto_commit_changes /* = 
 void QtUtils::SaveWindowGeometry(std::string_view window_name, QWidget* widget, bool auto_commit_changes)
 {
   // don't touch minimized/fullscreen windows
-  if (widget->windowState() & (Qt::WindowMinimized | Qt::WindowFullScreen))
+  if (widget->windowState() & (Qt::WindowMinimized | Qt::WindowFullScreen) || !widget->isVisible())
     return;
 
   // save the unmaximized geometry if maximized

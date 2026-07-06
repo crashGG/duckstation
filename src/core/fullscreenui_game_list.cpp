@@ -86,38 +86,36 @@ void FullscreenUI::ClearGameListState()
 
 void FullscreenUI::DoSetCoverImage(std::string entry_path)
 {
-  OpenFileSelector(
-    FSUI_ICONVSTR(ICON_FA_IMAGE, "Set Cover Image"), false,
-    [entry_path = std::move(entry_path)](std::string path) {
-      if (path.empty())
-        return;
+  OpenFileSelector(FSUI_ICONVSTR(ICON_FA_IMAGE, "Set Cover Image"), GetImageFilters(), EmuFolders::Covers,
+                   [entry_path = std::move(entry_path)](std::string path) {
+                     if (path.empty())
+                       return;
 
-      const auto lock = GameList::GetLock();
-      const GameList::Entry* entry = GameList::GetEntryForPath(entry_path);
-      if (!entry)
-        return;
+                     const auto lock = GameList::GetLock();
+                     const GameList::Entry* entry = GameList::GetEntryForPath(entry_path);
+                     if (!entry)
+                       return;
 
-      std::string existing_path = GameList::GetCoverImagePathForEntry(entry);
-      std::string new_path = GameList::GetNewCoverImagePathForEntry(entry, path.c_str(), false);
-      if (!existing_path.empty())
-      {
-        OpenConfirmMessageDialog(
-          ICON_EMOJI_WARNING, FSUI_ICONVSTR(ICON_FA_IMAGE, "Set Cover Image"),
-          FSUI_STR("A cover already exists for this game. Are you sure that you want to overwrite it?"),
-          [path = std::move(path), existing_path = std::move(existing_path),
-           new_path = std::move(new_path)](bool result) {
-            if (!result)
-              return;
+                     std::string existing_path = GameList::GetCoverImagePathForEntry(entry);
+                     std::string new_path = GameList::GetNewCoverImagePathForEntry(entry, path.c_str(), false);
+                     if (!existing_path.empty())
+                     {
+                       OpenConfirmMessageDialog(
+                         ICON_EMOJI_WARNING, FSUI_ICONVSTR(ICON_FA_IMAGE, "Set Cover Image"),
+                         FSUI_STR("A cover already exists for this game. Are you sure that you want to overwrite it?"),
+                         [path = std::move(path), existing_path = std::move(existing_path),
+                          new_path = std::move(new_path)](bool result) {
+                           if (!result)
+                             return;
 
-            DoSetCoverImage(std::move(path), std::move(existing_path), std::move(new_path));
-          });
-      }
-      else
-      {
-        DoSetCoverImage(std::move(path), std::move(existing_path), std::move(new_path));
-      }
-    },
-    GetImageFilters(), EmuFolders::Covers);
+                           DoSetCoverImage(std::move(path), std::move(existing_path), std::move(new_path));
+                         });
+                     }
+                     else
+                     {
+                       DoSetCoverImage(std::move(path), std::move(existing_path), std::move(new_path));
+                     }
+                   });
 }
 
 void FullscreenUI::DoSetCoverImage(std::string source_path, std::string existing_path, std::string new_path)
@@ -310,7 +308,10 @@ void FullscreenUI::DrawGameListWindow()
     BeginNavBar();
 
     if (NavButton(ICON_PF_NAVIGATION_BACK, true, true))
-      BeginTransition([]() { SwitchToMainWindow(MainWindowType::Landing); });
+    {
+      BeginTransition(TransitionEffect::ZoomOut, DEFAULT_TRANSITION_TIME,
+                      []() { SwitchToMainWindow(MainWindowType::Landing); });
+    }
 
     NavTitle(Host::TranslateToStringView(FSUI_TR_CONTEXT, titles[static_cast<u32>(s_game_list_locals.game_list_view)]));
 
@@ -389,7 +390,11 @@ void FullscreenUI::DrawGameListWindow()
     else if (ImGui::IsKeyPressed(ImGuiKey_GamepadBack, false) || ImGui::IsKeyPressed(ImGuiKey_F2, false))
     {
       EnqueueSoundEffect(SFX_NAV_BACK);
-      BeginTransition(&SwitchToSettings);
+      BeginTransition(TransitionEffect::ZoomIn, DEFAULT_TRANSITION_TIME, []() {
+        // if we're opening to game list, use the main page, otherwise game list settings
+        const SettingsPage page = ShouldOpenToGameList() ? SettingsPage::Interface : SettingsPage::GameList;
+        FullscreenUI::SwitchToSettings(page);
+      });
     }
     else if (ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false) || ImGui::IsKeyPressed(ImGuiKey_F5, false))
     {
@@ -436,7 +441,10 @@ void FullscreenUI::DrawGameList(const ImVec2& heading_size)
   }
 
   if (!AreAnyDialogsOpen() && WantsToCloseMenu())
-    BeginTransition([]() { SwitchToMainWindow(MainWindowType::Landing); });
+  {
+    BeginTransition(TransitionEffect::ZoomOut, DEFAULT_TRANSITION_TIME,
+                    []() { SwitchToMainWindow(MainWindowType::Landing); });
+  }
 
   const bool compact_mode = Core::GetBaseBoolSettingValue("Main", "FullscreenUIGameListCompactMode", true);
   const bool show_localized_titles = GameList::ShouldShowLocalizedTitles();
@@ -787,7 +795,10 @@ void FullscreenUI::DrawGameGrid(const ImVec2& heading_size)
   }
 
   if (ImGui::IsWindowFocused() && WantsToCloseMenu())
-    BeginTransition([]() { SwitchToMainWindow(MainWindowType::Landing); });
+  {
+    BeginTransition(TransitionEffect::ZoomOut, DEFAULT_TRANSITION_TIME,
+                    []() { SwitchToMainWindow(MainWindowType::Landing); });
+  }
 
   ResetFocusHere();
   BeginMenuButtons(0, 0.0f, 15.0f, 15.0f, 20.0f, 20.0f);
@@ -969,45 +980,44 @@ void FullscreenUI::HandleGameListOptions(const GameList::Entry* entry)
       {FSUI_ICONSTR(ICON_FA_DELETE_LEFT, "Reset Play Time"), false},
     };
 
-    OpenChoiceDialog(
-      entry->GetDisplayTitle(GameList::ShouldShowLocalizedTitles()), false, std::move(options),
-      [entry_path = entry->path, entry_serial = entry->serial](s32 index, const std::string& title,
-                                                               bool checked) mutable {
-        switch (index)
-        {
-          case 0: // Open Game Properties
-            BeginTransition([entry_path = std::move(entry_path)]() { SwitchToGameSettingsForPath(entry_path); });
-            break;
-          case 1: // Open Containing Directory
-            ExitFullscreenAndOpenURL(Path::CreateFileURL(Path::GetDirectory(entry_path)));
-            break;
-          case 2: // Set Cover Image
-            DoSetCoverImage(std::move(entry_path));
-            break;
-          case 3: // Resume Game
-            DoStartPath(entry_path, System::GetGameSaveStatePath(entry_serial, -1));
-            break;
-          case 4: // Load State
-            BeginTransition([entry_serial = std::move(entry_serial), entry_path = std::move(entry_path)]() {
-              OpenSaveStateSelector(entry_serial, entry_path, true);
-            });
-            break;
-          case 5: // Default Boot
-            DoStartPath(entry_path);
-            break;
-          case 6: // Fast Boot
-            DoStartPath(entry_path, {}, true);
-            break;
-          case 7: // Slow Boot
-            DoStartPath(entry_path, {}, false);
-            break;
-          case 8: // Reset Play Time
-            GameList::ClearPlayedTimeForSerial(entry_serial);
-            break;
-          default:
-            break;
-        }
-      });
+    OpenChoiceDialog(entry->GetDisplayTitle(GameList::ShouldShowLocalizedTitles()), false, std::move(options),
+                     [entry_path = entry->path, entry_serial = entry->serial](s32 index, const std::string& title,
+                                                                              bool checked) mutable {
+                       switch (index)
+                       {
+                         case 0: // Open Game Properties
+                           BeginTransition(
+                             TransitionEffect::ZoomIn, DEFAULT_TRANSITION_TIME,
+                             [entry_path = std::move(entry_path)]() { SwitchToGameSettingsForPath(entry_path); });
+                           break;
+                         case 1: // Open Containing Directory
+                           ExitFullscreenAndOpenURL(Path::CreateFileURL(Path::GetDirectory(entry_path)));
+                           break;
+                         case 2: // Set Cover Image
+                           DoSetCoverImage(std::move(entry_path));
+                           break;
+                         case 3: // Resume Game
+                           DoStartPath(entry_path, System::GetGameSaveStatePath(entry_serial, -1));
+                           break;
+                         case 4: // Load State
+                           OpenSaveStateSelector(entry_serial, entry_path, true);
+                           break;
+                         case 5: // Default Boot
+                           DoStartPath(entry_path);
+                           break;
+                         case 6: // Fast Boot
+                           DoStartPath(entry_path, {}, true);
+                           break;
+                         case 7: // Slow Boot
+                           DoStartPath(entry_path, {}, false);
+                           break;
+                         case 8: // Reset Play Time
+                           GameList::ClearPlayedTimeForSerial(entry_serial);
+                           break;
+                         default:
+                           break;
+                       }
+                     });
   }
   else
   {
@@ -1115,9 +1125,11 @@ GPUTexture* FullscreenUI::GetGameListCover(const GameList::Entry* entry, bool fa
     // try achievements image before memcard icon
     if (fallback_to_achievements_icon && cover_it->second.empty() && Achievements::IsActive())
     {
-      const auto lock = Achievements::GetLock();
-      if (Achievements::GetCurrentGamePath() == entry->path)
+      if (VideoThread::GetGamePath() == entry->path)
+      {
+        const auto lock = Achievements::GetLock();
         cover_it->second = Achievements::GetCurrentGameBadgeURL();
+      }
     }
   }
 

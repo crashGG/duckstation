@@ -77,6 +77,9 @@ SettingsWindow::SettingsWindow(const GameList::Entry* entry, std::unique_ptr<INI
 
 SettingsWindow::~SettingsWindow()
 {
+  if (m_sif && m_sif->IsDirty()) [[unlikely]]
+    WARNING_LOG("File {} was dirty when SettingsWindow was closed", Path::GetFileName(m_sif->GetPath()));
+
   if (isPerGameSettings())
     s_open_game_properties_dialogs.removeOne(this);
 }
@@ -100,7 +103,7 @@ void SettingsWindow::addPages()
   if (!isPerGameSettings())
   {
     addWidget(
-      m_game_list_settings = new GameListSettingsWidget(this, m_ui.settingsContainer), tr("Game List"),
+      new GameListSettingsWidget(this, m_ui.settingsContainer), tr("Game List"),
       u":/icons/monochrome/svg/folder-open-line.svg"_s,
       tr("<strong>Game List Settings</strong><hr>The list above shows the directories which will be searched by "
          "DuckStation to populate the game list. Search directories can be added, removed, and switched to "
@@ -142,8 +145,7 @@ void SettingsWindow::addPages()
     u":/icons/monochrome/svg/memcard-line.svg"_s,
     tr("<strong>Memory Card Settings</strong><hr>This page lets you control what mode the memory card emulation will "
        "function in, and where the images for these cards will be stored on disk."));
-  GraphicsSettingsWidget* graphics_settings;
-  addWidget(graphics_settings = new GraphicsSettingsWidget(this, m_ui.settingsContainer), tr("Graphics"),
+  addWidget(new GraphicsSettingsWidget(this, m_ui.settingsContainer), tr("Graphics"),
             u":/icons/monochrome/svg/image-fill.svg"_s,
             tr("<strong>Graphics Settings</strong><hr>These options control how the graphics of the emulated console "
                "are rendered. Not all options are available for the software renderer. Mouse over each option for "
@@ -270,7 +272,7 @@ void SettingsWindow::connectUi()
   if (!isPerGameSettings())
   {
     // must be a queued connection, since this comes from a control on the widget
-    connect(this, &SettingsWindow::debugOptionsVisibiltyChanged, this, &SettingsWindow::reloadPages,
+    connect(this, &SettingsWindow::debugOptionsVisibilityChanged, this, &SettingsWindow::reloadPages,
             Qt::QueuedConnection);
   }
 }
@@ -385,6 +387,16 @@ void SettingsWindow::onClearSettingsClicked()
 
   QtUtils::AsyncMessageBox(this, QMessageBox::Information, tr("DuckStation Settings"),
                            tr("Per-game configuration cleared."));
+}
+
+GameListSettingsWidget* SettingsWindow::getGameListSettingsWidget() const
+{
+  return findChild<GameListSettingsWidget*>();
+}
+
+AchievementSettingsWidget* SettingsWindow::getAchievementSettingsWidget() const
+{
+  return findChild<AchievementSettingsWidget*>();
 }
 
 void SettingsWindow::registerWidgetHelp(QObject* object, QString title, QString recommended_value, QString text)
@@ -707,6 +719,37 @@ bool SettingsWindow::hasGameTrait(GameDatabase::Trait trait)
 bool SettingsWindow::isGameHashStable() const
 {
   return (m_path.empty() || !CDImage::HasOverlayablePatch(m_path.c_str()));
+}
+
+MultitapMode SettingsWindow::getEffectiveMultitapMode() const
+{
+  TinyString str;
+  if (isPerGameSettings())
+  {
+    if (m_sif->GetBoolValue("ControllerPorts", "UseGameSettingsForController", false))
+    {
+      str = m_sif->GetTinyStringValue("ControllerPorts", "MultitapMode");
+    }
+    else if (!(str = m_sif->GetTinyStringValue("ControllerPorts", "InputProfileName")).empty())
+    {
+      // this is massive ugh, we need to load the input profile...
+      INISettingsInterface profile_sif(System::GetInputProfilePath(str));
+      if (profile_sif.Load())
+        str = profile_sif.GetTinyStringValue("ControllerPorts", "MultitapMode");
+    }
+  }
+
+  // fall back to global
+  if (str.empty())
+    str = Core::GetBaseTinyStringSettingValue("ControllerPorts", "MultitapMode");
+
+  return Settings::ParseMultitapModeName(str).value_or(Settings::DEFAULT_MULTITAP_MODE);
+}
+
+void SettingsWindow::onMultitapModeChanged(MultitapMode mode)
+{
+  if (MemoryCardSettingsWidget* memcard_settings = findChild<MemoryCardSettingsWidget*>())
+    memcard_settings->createPortSettings(mode);
 }
 
 SettingsWindow* SettingsWindow::openGamePropertiesDialog(const GameList::Entry* entry,

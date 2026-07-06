@@ -551,14 +551,14 @@ void QtHost::CheckDesktopFile()
     {
       const std::unique_ptr<QMessageBox> msgbox(QtUtils::NewMessageBox(
         nullptr, QMessageBox::Question, msgbox_title,
-        qApp
-          ->translate("QtHost",
-                      "Would you like to create a launcher shortcut for DuckStation?\n\n"
-                      "This will add DuckStation to your application menu, allowing you to launch it more easily.\n\n"
-                      "The shortcut will be created at:\n%1")
+        QCoreApplication::translate(
+          "QtHost", "Would you like to create a launcher shortcut for DuckStation?\n\n"
+                    "This will add DuckStation to your application menu, allowing you to launch it more easily.\n\n"
+                    "The shortcut will be created at:\n%1")
           .arg(QString::fromStdString(desktop_file_path)),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::NoButton, false));
-      QCheckBox* const ignore_cb = new QCheckBox(qApp->translate("QtHost", "Don't ask again"), msgbox.get());
+      QCheckBox* const ignore_cb =
+        new QCheckBox(QCoreApplication::translate("QtHost", "Don't ask again"), msgbox.get());
       msgbox->setCheckBox(ignore_cb);
       msgbox->setWindowIcon(GetAppIcon());
 
@@ -581,14 +581,15 @@ void QtHost::CheckDesktopFile()
     if (!CreateDesktopFile(application_path, desktop_file_path, &error))
     {
       QMessageBox::critical(g_main_window, msgbox_title,
-                            qApp->translate("QtHost", "Failed to create launcher shortcut shortcut:\n%1")
+                            QCoreApplication::translate("QtHost", "Failed to create launcher shortcut shortcut:\n%1")
                               .arg(QString::fromStdString(error.GetDescription())));
     }
     else
     {
       QMessageBox::information(g_main_window, msgbox_title,
-                               qApp->translate("QtHost", "Launcher shortcut created successfully.\n\n"
-                                                         "You can find DuckStation in your application menu."));
+                               QCoreApplication::translate("QtHost",
+                                                           "Launcher shortcut created successfully.\n\n"
+                                                           "You can find DuckStation in your application menu."));
     }
   }
   else
@@ -610,11 +611,10 @@ void QtHost::CheckDesktopFile()
 
     const QMessageBox::StandardButton result = QMessageBox::question(
       g_main_window, u"DuckStation"_s,
-      qApp
-        ->translate("QtHost", "The existing launcher shortcut points to a different location:\n\n"
-                              "Current: %1\n"
-                              "Shortcut: %2\n\n"
-                              "Would you like to update the shortcut to point to the current location?")
+      QCoreApplication::translate("QtHost", "The existing launcher shortcut points to a different location:\n\n"
+                                            "Current: %1\n"
+                                            "Shortcut: %2\n\n"
+                                            "Would you like to update the shortcut to point to the current location?")
         .arg(QString::fromStdString(application_path))
         .arg(QString::fromStdString(existing_exec_path)),
       QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
@@ -627,7 +627,7 @@ void QtHost::CheckDesktopFile()
       if (!FileSystem::DeleteFile(desktop_file_path.c_str(), &error))
       {
         QMessageBox::critical(g_main_window, msgbox_title,
-                              qApp->translate("QtHost", "Failed to remove old launcher shortcut:\n%1")
+                              QCoreApplication::translate("QtHost", "Failed to remove old launcher shortcut:\n%1")
                                 .arg(QString::fromStdString(error.GetDescription())));
         return;
       }
@@ -636,13 +636,13 @@ void QtHost::CheckDesktopFile()
       if (!CreateDesktopFile(application_path, desktop_file_path, &error))
       {
         QMessageBox::critical(g_main_window, msgbox_title,
-                              qApp->translate("QtHost", "Failed to create updated launcher shortcut:\n%1")
+                              QCoreApplication::translate("QtHost", "Failed to create updated launcher shortcut:\n%1")
                                 .arg(QString::fromStdString(error.GetDescription())));
       }
       else
       {
         QMessageBox::information(g_main_window, msgbox_title,
-                                 qApp->translate("QtHost", "Launcher shortcut updated successfully."));
+                                 QCoreApplication::translate("QtHost", "Launcher shortcut updated successfully."));
       }
     }
   }
@@ -682,6 +682,9 @@ bool QtHost::SaveGameSettings(SettingsInterface* sif, bool delete_if_empty)
   if (delete_if_empty && ini->IsEmpty())
   {
     INFO_LOG("Removing empty gamesettings ini {}", Path::GetFileName(ini->GetPath()));
+
+    // prevent empty ini from being saved if it was modified and transitioned back to empty
+    ini->SetDirty(false);
 
     // grab the settings lock while we're writing the file, that way the CPU thread doesn't try
     // to read it at the same time.
@@ -875,7 +878,7 @@ void CoreThread::setDefaultSettings(bool host, bool system, bool controller)
     return;
   }
 
-  Core::SetDefaultSettings(host, system, controller);
+  Core::SetDefaultSettings(host, system, controller, true);
 }
 
 void Host::SetDefaultSettings(SettingsInterface& si)
@@ -2629,8 +2632,8 @@ s32 Host::Internal::GetTranslatedStringImpl(std::string_view context, std::strin
   const std::string temp_context(context);
   const std::string temp_msg(msg);
   const std::string temp_disambiguation(disambiguation);
-  const QString translated_msg = qApp->translate(temp_context.c_str(), temp_msg.c_str(),
-                                                 disambiguation.empty() ? nullptr : temp_disambiguation.c_str());
+  const QString translated_msg = QCoreApplication::translate(
+    temp_context.c_str(), temp_msg.c_str(), disambiguation.empty() ? nullptr : temp_disambiguation.c_str());
   const QByteArray translated_utf8 = translated_msg.toUtf8();
   const size_t translated_size = translated_utf8.size();
   if (translated_size > tbuf_space)
@@ -2643,13 +2646,13 @@ s32 Host::Internal::GetTranslatedStringImpl(std::string_view context, std::strin
 
 std::string Host::TranslatePluralToString(const char* context, const char* msg, const char* disambiguation, int count)
 {
-  return qApp->translate(context, msg, disambiguation, count).toStdString();
+  return QCoreApplication::translate(context, msg, disambiguation, count).toStdString();
 }
 
 SmallString Host::TranslatePluralToSmallString(const char* context, const char* msg, const char* disambiguation,
                                                int count)
 {
-  const QString qstr = qApp->translate(context, msg, disambiguation, count);
+  const QString qstr = QCoreApplication::translate(context, msg, disambiguation, count);
   SmallString ret;
 
 #ifdef _WIN32
@@ -3163,8 +3166,9 @@ void CoreThread::updatePerformanceCounters(const GPUBackend* gpu_backend)
 
   if (render_api != m_last_render_api || hardware_renderer != m_last_hardware_renderer)
   {
-    const QString renderer_str = hardware_renderer ? QString::fromUtf8(GPUDevice::RenderAPIToString(render_api)) :
-                                                     qApp->translate("GPURenderer", "Software");
+    const QString renderer_str =
+      QString::fromUtf8(hardware_renderer ? GPUDevice::RenderAPIToString(render_api) :
+                                            Settings::GetRendererDisplayName(GPURenderer::Software));
     QMetaObject::invokeMethod(g_main_window->getStatusRendererWidget(), &QLabel::setText, Qt::QueuedConnection,
                               renderer_str);
     m_last_render_api = render_api;
@@ -3583,8 +3587,8 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
     if (!FileSystem::FileExists(autoboot->path.c_str()))
     {
       QMessageBox::critical(
-        nullptr, qApp->translate("QtHost", "Error"),
-        qApp->translate("QtHost", "File '%1' does not exist.").arg(QString::fromStdString(autoboot->path)));
+        nullptr, QCoreApplication::translate("QtHost", "Error"),
+        QCoreApplication::translate("QtHost", "File '%1' does not exist.").arg(QString::fromStdString(autoboot->path)));
       return false;
     }
   }
@@ -3610,8 +3614,8 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
 
     if (autoboot->save_state.empty() || !FileSystem::FileExists(autoboot->save_state.c_str()))
     {
-      QMessageBox::critical(nullptr, qApp->translate("QtHost", "Error"),
-                            qApp->translate("QtHost", "The specified save state does not exist."));
+      QMessageBox::critical(nullptr, QCoreApplication::translate("QtHost", "Error"),
+                            QCoreApplication::translate("QtHost", "The specified save state does not exist."));
       return false;
     }
   }
@@ -3629,10 +3633,10 @@ bool QtHost::ParseCommandLineParametersAndInitializeConfig(QApplication& app,
   if (s_state.batch_mode && !autoboot && !s_state.start_fullscreen_ui)
   {
     QMessageBox::critical(
-      nullptr, qApp->translate("QtHost", "Error"),
+      nullptr, QCoreApplication::translate("QtHost", "Error"),
       s_state.nogui_mode ?
-        qApp->translate("QtHost", "Cannot use no-gui mode, because no boot filename was specified.") :
-        qApp->translate("QtHost", "Cannot use batch mode, because no boot filename was specified."));
+        QCoreApplication::translate("QtHost", "Cannot use no-gui mode, because no boot filename was specified.") :
+        QCoreApplication::translate("QtHost", "Cannot use batch mode, because no boot filename was specified."));
     return false;
   }
 
@@ -3653,42 +3657,44 @@ bool QtHost::RunSetupWizard()
 
 int main(int argc, char* argv[])
 {
-  if (!QtHost::VeryEarlyProcessStartup())
+  using namespace QtHost;
+
+  if (!VeryEarlyProcessStartup())
     return EXIT_FAILURE;
 
   QApplication app(argc, argv);
-  if (!QtHost::PerformEarlyHardwareChecks())
+  if (!PerformEarlyHardwareChecks())
     return EXIT_FAILURE;
 
 #ifdef __linux__
   // Normally we'd have this shitfuckery in VeryEarlyProcessStartup(), but QApplication needs to be
   // created before the platform plugin is loaded. This is only here because GNOME plus Wankland
   // and their implementation of it is fucking terrible.
-  QtHost::ApplyWaylandWorkarounds();
+  ApplyWaylandWorkarounds();
 #endif
 
   // Type registration has to happen after hardware checks, clang emits ptest instructions otherwise.
-  QtHost::RegisterTypes();
+  RegisterTypes();
 
   std::shared_ptr<SystemBootParameters> autoboot;
-  if (!QtHost::ParseCommandLineParametersAndInitializeConfig(app, autoboot))
+  if (!ParseCommandLineParametersAndInitializeConfig(app, autoboot))
     return EXIT_FAILURE;
 
-  if (!QtHost::EarlyProcessStartup())
+  if (!EarlyProcessStartup())
     return EXIT_FAILURE;
 
   // Remove any previous-version remnants.
-  if (QtHost::s_state.cleanup_after_update)
+  if (s_state.cleanup_after_update)
     AutoUpdaterDialog::cleanupAfterUpdate();
 
   // Set theme before creating any windows.
-  QtHost::UpdateApplicationTheme();
+  UpdateApplicationTheme();
 
   // Build warning.
   AutoUpdaterDialog::warnAboutUnofficialBuild();
 
   // Setting/folder migrations.
-  QtHost::ApplyMigrations();
+  ApplyMigrations();
 
   // Create core thread object, but don't start it yet. That way the main window can connect to it,
   // and ensures that no signals are lost. Then we create and connect the main window.
@@ -3703,12 +3709,12 @@ int main(int argc, char* argv[])
   LogWindow::updateSettings(true);
 
   // Now we can actually start the CPU thread.
-  QtHost::HookSignals();
+  HookSignals();
   g_core_thread->start();
 
   // Optionally run setup wizard.
   int result;
-  if (QtHost::s_state.run_setup_wizard && !QtHost::RunSetupWizard())
+  if (s_state.run_setup_wizard && !RunSetupWizard())
   {
     result = EXIT_FAILURE;
     goto shutdown_and_exit;
@@ -3716,13 +3722,13 @@ int main(int argc, char* argv[])
 
 #ifdef __linux__
   // Create desktop file if it does not exist.
-  QtHost::CheckDesktopFile();
+  CheckDesktopFile();
 
   // I hate this so much. Turns out not only is window raising non-functional on GNOME for what I'm guessing
   // is purely political reasons, it's also very unreliable on KDE too. Sometimes raising works, other times
   // it doesn't. Deferring the request doesn't seem to help either. Can't be arsed to debug, just force all
   // Wayland down the reverse path of showing the log window first.
-  if (QtHost::IsRunningOnWayland())
+  if (IsRunningOnWayland())
   {
     LogWindow::deferredShow();
     QApplication::sync();
@@ -3731,18 +3737,18 @@ int main(int argc, char* argv[])
 #endif
 
   // When running in batch mode, ensure game list is loaded, but don't scan for any new files.
-  if (!QtHost::s_state.batch_mode)
+  if (!s_state.batch_mode)
     g_main_window->refreshGameList(false);
 
   // Don't bother showing the window in no-gui mode.
-  if (!QtHost::s_state.nogui_mode)
+  if (!s_state.nogui_mode)
     QtUtils::ShowOrRaiseWindow(g_main_window, nullptr, true);
 
   // Initialize big picture mode if requested.
-  if (QtHost::s_state.start_fullscreen_ui)
+  if (s_state.start_fullscreen_ui || Core::GetBaseBoolSettingValue("Main", "StartFullscreenUI", false))
     g_core_thread->startFullscreenUI();
   else
-    QtHost::s_state.start_fullscreen_ui_fullscreen = false;
+    s_state.start_fullscreen_ui_fullscreen = false;
 
   // Always kick off update check. It'll take over if the user is booting a game fullscreen.
   g_main_window->startupUpdateCheck();
@@ -3773,7 +3779,7 @@ shutdown_and_exit:
   delete g_main_window;
   Assert(!g_main_window);
 
-  QtHost::ProcessShutdown();
+  ProcessShutdown();
 
   return result;
 }

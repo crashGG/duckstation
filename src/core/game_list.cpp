@@ -128,6 +128,8 @@ static void ScanFile(std::unique_lock<std::recursive_mutex>& lock, std::string p
                      const PlayedTimeMap& played_time_map, const INISettingsInterface& custom_attributes_ini,
                      const Achievements::ProgressDatabase& achievements_progress, const std::string& path_for_cache,
                      BinaryFileWriter& cache_writer);
+static void Refresh(std::unique_lock<std::recursive_mutex>& lock, bool invalidate_cache, bool only_cache,
+                    ProgressCallback* progress);
 
 static bool LoadOrInitializeCache(std::FILE* fp, bool invalidate_cache);
 static bool LoadEntriesFromCache(BinaryFileReader& reader);
@@ -339,12 +341,12 @@ bool GameList::GetDiscListEntry(const std::string& path, Entry* entry)
   // use the same buffer for game and achievement hashing, to avoid double decompression
   std::string id, executable_name;
   std::vector<u8> executable_data;
-  if (System::GetGameDetailsFromImage(cdi.get(), &id, &entry->hash, &executable_name, &executable_data))
+  std::optional<Achievements::GameHash> achievements_hash;
+  if (System::GetGameDetailsFromImage(cdi.get(), &id, &entry->hash, &achievements_hash) &&
+      achievements_hash.has_value())
   {
     // used for achievement count lookup later
-    const std::optional<Achievements::GameHash> hash = Achievements::GetGameHash(executable_name, executable_data);
-    if (hash.has_value())
-      entry->achievements_hash = hash.value();
+    entry->achievements_hash = achievements_hash.value();
   }
 
   // try the database first
@@ -847,23 +849,14 @@ void GameList::SetCustomSerialOnEntry(Entry* entry, std::string serial, bool upd
 
 void GameList::PopulateEntryAchievements(Entry* entry, const Achievements::ProgressDatabase& achievements_progress)
 {
-  const Achievements::HashDatabaseEntry* hentry = Achievements::LookupGameHash(entry->achievements_hash);
-  if (!hentry)
+  const Achievements::ProgressDatabase::Entry* aentry = achievements_progress.LookupHash(entry->achievements_hash);
+  if (!aentry)
     return;
 
-  entry->achievements_game_id = hentry->game_id;
-  entry->num_achievements = Truncate16(hentry->num_achievements);
-  entry->unlocked_achievements = 0;
-  entry->unlocked_achievements_hc = 0;
-  if (entry->num_achievements > 0)
-  {
-    const Achievements::ProgressDatabase::Entry* apd_entry = achievements_progress.LookupGame(hentry->game_id);
-    if (apd_entry)
-    {
-      entry->unlocked_achievements = apd_entry->num_achievements_unlocked;
-      entry->unlocked_achievements_hc = apd_entry->num_hc_achievements_unlocked;
-    }
-  }
+  entry->achievements_game_id = aentry->game_id;
+  entry->num_achievements = Truncate16(aentry->num_achievements);
+  entry->unlocked_achievements = aentry->num_achievements_unlocked;
+  entry->unlocked_achievements_hc = aentry->num_hc_achievements_unlocked;
 }
 
 void GameList::UpdateAchievementData(std::span<const u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
@@ -1075,6 +1068,12 @@ size_t GameList::GetEntryCount()
 void GameList::Refresh(bool invalidate_cache, bool only_cache, ProgressCallback* progress /* = nullptr */)
 {
   std::unique_lock lock(s_state.mutex);
+  Refresh(lock, invalidate_cache, only_cache, progress);
+}
+
+void GameList::Refresh(std::unique_lock<std::recursive_mutex>& lock, bool invalidate_cache, bool only_cache,
+                       ProgressCallback* progress)
+{
   if (s_state.game_list_loaded == ListState::Loading)
   {
     // if another thread is loading, wait for them to finish
@@ -1119,11 +1118,8 @@ void GameList::Refresh(bool invalidate_cache, bool only_cache, ProgressCallback*
   custom_attributes_ini.Load();
 
   Achievements::ProgressDatabase achievements_progress;
-  if (Achievements::HasSavedCredentials())
-  {
-    if (!achievements_progress.Load(&error))
-      WARNING_LOG("Failed to load achievements progress: {}", error.GetDescription());
-  }
+  if (!achievements_progress.Load(&error))
+    WARNING_LOG("Failed to load achievements progress: {}", error.GetDescription());
 
 #ifdef __ANDROID__
   recursive_dirs.push_back(Path::Combine(EmuFolders::DataRoot, "games"));
@@ -1167,6 +1163,14 @@ void GameList::Refresh(bool invalidate_cache, bool only_cache, ProgressCallback*
   s_state.game_list_loaded = ListState::Loaded;
 
   INFO_LOG("Finished game list refresh in {} ms", timer.GetTimeMilliseconds());
+}
+
+void GameList::EnsureLoaded(std::unique_lock<std::recursive_mutex>& lock)
+{
+  if (s_state.game_list_loaded == ListState::Loaded)
+    return;
+
+  Refresh(lock, false, false, ProgressCallback::NullProgressCallback);
 }
 
 void GameList::RefreshDiscSetEntries()

@@ -19,7 +19,6 @@
 #include "common/file_system.h"
 
 #include <QtWidgets/QInputDialog>
-#include <QtWidgets/QTextEdit>
 #include <array>
 
 #include "moc_controllersettingswindow.cpp"
@@ -110,7 +109,8 @@ ControllerSettingsWindow::ControllerSettingsWindow(INISettingsInterface* game_si
 
 ControllerSettingsWindow::~ControllerSettingsWindow() = default;
 
-void ControllerSettingsWindow::editControllerSettingsForGame(QWidget* parent, INISettingsInterface* sif)
+ControllerSettingsWindow* ControllerSettingsWindow::editControllerSettingsForGame(QWidget* parent,
+                                                                                  INISettingsInterface* sif)
 {
   ControllerSettingsWindow* dlg = new ControllerSettingsWindow(sif, false, parent);
   dlg->setWindowFlag(Qt::Window);
@@ -119,6 +119,7 @@ void ControllerSettingsWindow::editControllerSettingsForGame(QWidget* parent, IN
   dlg->setWindowTitle(parent->windowTitle());
   dlg->setWindowIcon(parent->windowIcon());
   dlg->show();
+  return dlg;
 }
 
 int ControllerSettingsWindow::getHotkeyCategoryIndex() const
@@ -534,8 +535,7 @@ std::array<bool, 2> ControllerSettingsWindow::getEnabledMultitaps() const
       getStringValue("ControllerPorts", "MultitapMode", Settings::GetMultitapModeName(Settings::DEFAULT_MULTITAP_MODE))
         .c_str())
       .value_or(Settings::DEFAULT_MULTITAP_MODE);
-  return {{(mtap_mode == MultitapMode::Port1Only || mtap_mode == MultitapMode::BothPorts),
-           (mtap_mode == MultitapMode::Port2Only || mtap_mode == MultitapMode::BothPorts)}};
+  return Controller::GetMultitapEnabledPorts(mtap_mode);
 }
 
 void ControllerSettingsWindow::refreshProfileList()

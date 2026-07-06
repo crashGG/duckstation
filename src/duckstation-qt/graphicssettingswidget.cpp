@@ -63,7 +63,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
 
   // Rendering Tab
 
-  connect(m_dialog, &SettingsWindow::debugOptionsVisibiltyChanged, this,
+  connect(m_dialog, &SettingsWindow::debugOptionsVisibilityChanged, this,
           &GraphicsSettingsWidget::onShowDebugSettingsChanged);
 
   if (!m_dialog->isPerGameSettings())
@@ -296,6 +296,9 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
                                                Settings::ParseGPUWireframeMode, Settings::GetGPUWireframeModeName,
                                                &Settings::GetGPUWireframeModeDisplayName,
                                                Settings::DEFAULT_GPU_WIREFRAME_MODE, GPUWireframeMode::Count);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gpuDisableTextures, "GPU", "DisableTextures", false);
+  SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gpuDisableVertexLighting, "GPU", "DisableVertexLighting",
+                                               false);
 
   SettingWidgetBinder::BindWidgetToEnumSetting(
     sif, m_ui.gpuDumpCompressionMode, "GPU", "DumpCompressionMode", &Settings::ParseGPUDumpCompressionMode,
@@ -536,6 +539,12 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* dialog, QWidget* 
   dialog->registerWidgetHelp(m_ui.gpuWireframeMode, tr("Wireframe Mode"), tr("Disabled"),
                              tr("Draws a wireframe outline of the triangles rendered by the console's GPU, either as a "
                                 "replacement or an overlay."));
+  dialog->registerWidgetHelp(
+    m_ui.gpuDisableTextures, tr("Disable Textures"), tr("Unchecked"),
+    tr("Disables texture emulation in the GPU, forcing all primitives to only show vertex colours."));
+  dialog->registerWidgetHelp(
+    m_ui.gpuDisableVertexLighting, tr("Disable Vertex Lighting"), tr("Unchecked"),
+    tr("Disables vertex lighting in the GPU, forcing all primitives to only show raw texture colours."));
   dialog->registerWidgetHelp(
     m_ui.useDebugDevice, tr("Use Debug Device"), tr("Unchecked"),
     tr("Enable debugging when supported by the host's renderer API. <strong>Only for developer use.</strong>"));
@@ -827,6 +836,12 @@ void GraphicsSettingsWidget::populateAndConnectUpscalingModes(int max_scale)
                                               "ResolutionScale", 1);
   connect(m_ui.resolutionScale, &QComboBox::currentIndexChanged, this,
           &GraphicsSettingsWidget::updateResolutionDependentOptions);
+
+  m_ui.resolutionScaleWarningIcon->setPixmap(
+    QIcon(QtHost::GetResourceQPath("images/warning.svg", true)).pixmap(16, 16));
+  m_ui.resolutionScaleWarningIcon->setToolTip(
+    tr("PGXP is not enabled. Increasing the resolution without enabling PGXP will result in visible polygon "
+       "glitches."));
 }
 
 void GraphicsSettingsWidget::populateUpscalingModes(QComboBox* const cb, int max_scale)
@@ -843,8 +858,8 @@ void GraphicsSettingsWidget::populateUpscalingModes(QComboBox* const cb, int max
   {
     const auto it = std::find_if(std::begin(templates), std::end(templates),
                                  [&scale](const std::pair<int, const char*>& it) { return scale == it.first; });
-    cb->addItem((it != std::end(templates)) ? qApp->translate("GraphicsSettingsWidget", it->second) :
-                                              qApp->translate("GraphicsSettingsWidget", "%1x Native").arg(scale));
+    cb->addItem((it != std::end(templates)) ? QCoreApplication::translate("GraphicsSettingsWidget", it->second) :
+                                              QCoreApplication::translate("GraphicsSettingsWidget", "%1x Native").arg(scale));
   }
 }
 
@@ -869,7 +884,7 @@ void GraphicsSettingsWidget::createAspectRatioSetting(QComboBox* const cb, QSpin
   // AR requires special handling because of the custom option.
   if (sif)
   {
-    cb->addItem(qApp->translate("SettingsDialog", "Use Global Setting [%1]")
+    cb->addItem(QCoreApplication::translate("SettingWidgetBinder", "Use Global Setting [%1]")
                   .arg(QtUtils::StringViewToQString(Settings::GetDisplayAspectRatioDisplayName(
                     Settings::ParseDisplayAspectRatio(Core::GetBaseStringSettingValue(CONFIG_SECTION, CONFIG_KEY))
                       .value_or(Settings::DEFAULT_DISPLAY_ASPECT_RATIO)))));
@@ -993,18 +1008,22 @@ void GraphicsSettingsWidget::updatePGXPSettingsEnabled()
   m_ui.pgxpDisableOn2DPolygons->setEnabled(enabled &&
                                            !m_dialog->hasGameTrait(GameDatabase::Trait::DisablePGXPOn2DPolygons));
   m_ui.pgxpTransparentDepthTest->setEnabled(depth_enabled);
+  updateResolutionDependentOptions();
 }
 
 void GraphicsSettingsWidget::updateResolutionDependentOptions()
 {
   const bool is_hardware = (getEffectiveRenderer() != GPURenderer::Software);
   const int scale = m_dialog->getEffectiveIntValue("GPU", "ResolutionScale", 1);
+  const bool pgxp_enabled = (is_hardware && m_dialog->getEffectiveBoolValue("GPU", "PGXPEnable", false) &&
+                             !m_dialog->hasGameTrait(GameDatabase::Trait::DisablePGXP));
   const GPUTextureFilter texture_filtering =
     Settings::ParseTextureFilterName(m_dialog->getEffectiveStringValue("GPU", "TextureFilter").c_str())
       .value_or(Settings::DEFAULT_GPU_TEXTURE_FILTER);
   m_ui.forceRoundedTexcoords->setEnabled(
     is_hardware && scale != 1 && texture_filtering == GPUTextureFilter::Nearest &&
     !m_dialog->hasGameTrait(GameDatabase::Trait::ForceRoundUpscaledTextureCoordinates));
+  m_ui.resolutionScaleWarningIcon->setVisible(scale != 1 && !pgxp_enabled);
 }
 
 void GraphicsSettingsWidget::warnAboutRendererChange()

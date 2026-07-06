@@ -24,6 +24,7 @@ add_library(core
   cdrom_subq_replacement.h
   cheats.cpp
   cheats.h
+  cheats_private.h
   controller.cpp
   controller.h
   controller_helpers.h
@@ -160,7 +161,7 @@ set(RECOMPILER_SRCS
 target_precompile_headers(core PRIVATE "pch.h")
 target_include_directories(core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_link_libraries(core PUBLIC Threads::Threads common util)
-target_link_libraries(core PRIVATE xxhash imgui rapidyaml rcheevos cpuinfo::cpuinfo ZLIB::ZLIB zstd::libzstd_shared libzip::zip speex_resampler_headers)
+target_link_libraries(core PRIVATE xxhash imgui rapidyaml rcheevos cpuinfo::cpuinfo ZLIB::ZLIB zstd::libzstd_shared speex_resampler_headers)
 
 if(CPU_ARCH_X64)
   target_compile_definitions(core PUBLIC "ENABLE_RECOMPILER=1" "ENABLE_MMAP_FASTMEM=1")

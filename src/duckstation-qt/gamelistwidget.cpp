@@ -75,23 +75,31 @@ static constexpr QSize ACHIEVEMENT_PIXMAP_SIZE(16, 16);
 static constexpr QSize COMPATIBILITY_PIXMAP_SIZE(96, 24);
 
 static const char* SUPPORTED_FORMATS_STRING =
-  QT_TRANSLATE_NOOP(GameListWidget, ".cue (Cue Sheets)\n"
-                                    ".iso (Single Track Image)\n"
-                                    ".ecm (Error Code Modeling Image)\n"
-                                    ".mds (Media Descriptor Sidecar)\n"
-                                    ".ccd (CloneCD Image)\n"
-                                    ".chd (Compressed Hunks of Data)\n"
-                                    ".pbp (PlayStation Portable, Only Decrypted)");
+  QT_TRANSLATE_NOOP("GameListWidget", ".cue (Cue Sheets)\n"
+                                      ".iso (Single Track Image)\n"
+                                      ".ecm (Error Code Modeling Image)\n"
+                                      ".mds (Media Descriptor Sidecar)\n"
+                                      ".ccd (CloneCD Image)\n"
+                                      ".chd (Compressed Hunks of Data)\n"
+                                      ".pbp (PlayStation Portable, Only Decrypted)");
 
 static constexpr std::array<const char*, GameListModel::Column_Count> s_column_names = {{
-  QT_TRANSLATE_NOOP("GameListModel", "Icon"), QT_TRANSLATE_NOOP("GameListModel", "Serial"),
-  QT_TRANSLATE_NOOP("GameListModel", "Title"), QT_TRANSLATE_NOOP("GameListModel", "File Title"),
-  QT_TRANSLATE_NOOP("GameListModel", "Developer"), QT_TRANSLATE_NOOP("GameListModel", "Publisher"),
-  QT_TRANSLATE_NOOP("GameListModel", "Genre"), QT_TRANSLATE_NOOP("GameListModel", "Year"),
-  QT_TRANSLATE_NOOP("GameListModel", "Players"), QT_TRANSLATE_NOOP("GameListModel", "Time Played"),
-  QT_TRANSLATE_NOOP("GameListModel", "Last Played"), QT_TRANSLATE_NOOP("GameListModel", "Size"),
-  QT_TRANSLATE_NOOP("GameListModel", "Data Size"), QT_TRANSLATE_NOOP("GameListModel", "Region"),
-  QT_TRANSLATE_NOOP("GameListModel", "Achievements"), QT_TRANSLATE_NOOP("GameListModel", "Compatibility"),
+  QT_TRANSLATE_NOOP("GameListModel", "Icon"),
+  QT_TRANSLATE_NOOP("GameListModel", "Serial"),
+  QT_TRANSLATE_NOOP("GameListModel", "Title"),
+  QT_TRANSLATE_NOOP("GameListModel", "File Title"),
+  QT_TRANSLATE_NOOP("GameListModel", "Developer"),
+  QT_TRANSLATE_NOOP("GameListModel", "Publisher"),
+  QT_TRANSLATE_NOOP("GameListModel", "Genre"),
+  QT_TRANSLATE_NOOP("GameListModel", "Year"),
+  QT_TRANSLATE_NOOP("GameListModel", "Players"),
+  QT_TRANSLATE_NOOP("GameListModel", "Time Played"),
+  QT_TRANSLATE_NOOP("GameListModel", "Last Played"),
+  QT_TRANSLATE_NOOP("GameListModel", "Size"),
+  QT_TRANSLATE_NOOP("GameListModel", "Data Size"),
+  QT_TRANSLATE_NOOP("GameListModel", "Region"),
+  QT_TRANSLATE_NOOP("GameListModel", "Achievements"),
+  QT_TRANSLATE_NOOP("GameListModel", "Compatibility"),
   "Cover", // Do not translate.
 }};
 
@@ -211,7 +219,7 @@ static QString sizeToString(s64 size)
 {
   static constexpr s64 one_mb = 1024 * 1024;
   return (size >= 0) ? QStringLiteral("%1 MB").arg((size + (one_mb - 1)) / one_mb) :
-                       qApp->translate("GameListModel", "Unknown");
+                       QCoreApplication::translate("GameListModel", "Unknown");
 }
 
 std::optional<GameListModel::Column> GameListModel::getColumnIdForName(std::string_view name)
@@ -1102,7 +1110,7 @@ QVariant GameListModel::headerData(int section, Qt::Orientation orientation, int
 {
   QVariant ret;
   if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < Column_Count)
-    ret = qApp->translate("GameListModel", s_column_names[static_cast<u32>(section)]);
+    ret = QCoreApplication::translate("GameListModel", s_column_names[static_cast<u32>(section)]);
 
   return ret;
 }
@@ -1859,7 +1867,7 @@ GameListWidget::GameListWidget(QWidget* parent, QAction* action_view_list, QActi
   m_empty_widget = new QWidget(m_ui.stack);
   Ui::EmptyGameListWidget empty_ui;
   empty_ui.setupUi(m_empty_widget);
-  empty_ui.supportedFormats->setText(qApp->translate("GameListWidget", SUPPORTED_FORMATS_STRING));
+  empty_ui.supportedFormats->setText(tr(SUPPORTED_FORMATS_STRING));
   empty_ui.icon->setSource(u":/icons/monochrome/svg/information-line.svg"_s);
   m_ui.stack->insertWidget(2, m_empty_widget);
 
@@ -1899,11 +1907,6 @@ GameListWidget::GameListWidget(QWidget* parent, QAction* action_view_list, QActi
 
   connect(g_main_window, &MainWindow::themeChanged, this, &GameListWidget::onThemeChanged);
 
-  const bool grid_view = Core::GetBaseBoolSettingValue("UI", "GameListGridView", false);
-  if (grid_view)
-    action_view_grid->setChecked(true);
-  else
-    action_view_list->setChecked(true);
   action_merge_disc_sets->setChecked(m_sort_model->isMergingDiscSets());
   action_show_localized_titles->setChecked(m_model->getShowLocalizedTitles());
   action_show_list_icons->setChecked(m_model->getShowGameIcons());
@@ -1912,11 +1915,16 @@ GameListWidget::GameListWidget(QWidget* parent, QAction* action_view_list, QActi
   action_show_grid_titles->setChecked(m_model->getShowCoverTitles());
   onIconSizeChanged(m_model->getIconSize());
 
-  setViewMode(grid_view ? VIEW_MODE_GRID : VIEW_MODE_LIST);
+  reloadViewModeFromSettings();
   updateBackground(true);
 }
 
 GameListWidget::~GameListWidget() = default;
+
+QString GameListWidget::getSupportedFormatsString()
+{
+  return tr(SUPPORTED_FORMATS_STRING);
+}
 
 bool GameListWidget::isShowingGameList() const
 {
@@ -2096,6 +2104,8 @@ void GameListWidget::onRefreshComplete()
   // if we still had no games, switch to the helper widget
   if (m_model->rowCount() == 0)
     setViewMode(VIEW_MODE_NO_GAMES);
+  else
+    reloadViewModeFromSettings();
 }
 
 void GameListWidget::onSelectionModelCurrentChanged(const QModelIndex& current, const QModelIndex& previous)
@@ -2165,8 +2175,7 @@ void GameListWidget::onSearchReturnPressed()
 
   QAbstractItemView* const target =
     isShowingGameGrid() ? static_cast<QAbstractItemView*>(m_grid_view) : static_cast<QAbstractItemView*>(m_list_view);
-  target->selectionModel()->select(m_sort_model->index(0, 0),
-                                   QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+  target->setCurrentIndex(m_sort_model->index(0, 0));
   target->setFocus(Qt::ShortcutFocusReason);
 }
 
@@ -2192,6 +2201,16 @@ void GameListWidget::showGameGrid()
   Host::CommitBaseSettingChanges();
 
   setViewMode(VIEW_MODE_GRID);
+}
+
+void GameListWidget::reloadViewModeFromSettings()
+{
+  const bool grid_view = Core::GetBaseBoolSettingValue("UI", "GameListGridView", false);
+  m_ui.viewGameList->defaultAction()->setChecked(!grid_view);
+  m_ui.viewGameGrid->defaultAction()->setChecked(grid_view);
+
+  if (m_model->rowCount() > 0 || m_ui.stack->currentIndex() != VIEW_MODE_NO_GAMES)
+    setViewMode(grid_view ? VIEW_MODE_GRID : VIEW_MODE_LIST);
 }
 
 void GameListWidget::setMergeDiscSets(bool enabled)
@@ -2410,6 +2429,7 @@ GameListListView::GameListListView(GameListModel* model, GameListSortModel* sort
   setContextMenuPolicy(Qt::CustomContextMenu);
   setAlternatingRowColors(true);
   setShowGrid(false);
+  setTabKeyNavigation(false);
 
   QHeaderView* const horizontal_header = horizontalHeader();
   horizontal_header->setHighlightSections(false);
@@ -2488,15 +2508,16 @@ void GameListListView::updateFixedColumnWidths()
 
   // Played time is a little trickier, since some locales might have longer words for "hours" and "minutes".
   setFixedColumnWidth(fm, GameListModel::Column_TimePlayed,
-                      std::max({width_for(qApp->translate("GameList", "%n seconds", "", 59)),
-                                width_for(qApp->translate("GameList", "%n minutes", "", 59)),
-                                width_for(qApp->translate("GameList", "%n hours", "", 1000))}));
+                      std::max({width_for(QCoreApplication::translate("GameList", "%n seconds", "", 59)),
+                                width_for(QCoreApplication::translate("GameList", "%n minutes", "", 59)),
+                                width_for(QCoreApplication::translate("GameList", "%n hours", "", 1000))}));
 
   // And this is a monstrosity.
   setFixedColumnWidth(
     fm, GameListModel::Column_LastPlayed,
-    std::max({width_for(qApp->translate("GameList", "Today")), width_for(qApp->translate("GameList", "Yesterday")),
-              width_for(qApp->translate("GameList", "Never")),
+    std::max({width_for(QCoreApplication::translate("GameList", "Today")),
+              width_for(QCoreApplication::translate("GameList", "Yesterday")),
+              width_for(QCoreApplication::translate("GameList", "Never")),
               width_for(QtHost::FormatNumber(Host::NumberFormatType::ShortDate,
                                              static_cast<s64>(QDateTime::currentSecsSinceEpoch())))}));
 

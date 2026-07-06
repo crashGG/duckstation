@@ -288,9 +288,19 @@ enum class TransitionState : u8
   Active,
 };
 
+enum class TransitionEffect : u8
+{
+  Fade,
+  ZoomIn,
+  ZoomOut,
+  SlideLeft,
+  SlideRight,
+};
+
 using TransitionStartCallback = std::function<void()>;
 void BeginTransition(TransitionStartCallback func, float time = DEFAULT_TRANSITION_TIME);
 void BeginTransition(float time, TransitionStartCallback func);
+void BeginTransition(TransitionEffect effect, float time, TransitionStartCallback func);
 void CancelTransition();
 bool IsTransitionActive();
 TransitionState GetTransitionState();
@@ -424,6 +434,7 @@ void RenderAutoLabelText(ImDrawList* draw_list, ImFont* font, float font_size, f
 void TextAlignedMultiLine(float align_x, const char* text, const char* text_end = nullptr, float wrap_width = -1.0f);
 void TextUnformatted(std::string_view text);
 void MenuHeading(std::string_view title, bool draw_line = true);
+void MenuSeparator();
 bool MenuHeadingButton(std::string_view title, std::string_view value = {}, float font_size = UIStyle.LargeFontSize,
                        bool enabled = true, bool draw_line = true);
 bool MenuButton(std::string_view title, std::string_view summary, bool enabled = true,
@@ -435,6 +446,9 @@ bool MenuButtonWithValue(std::string_view title, std::string_view summary, std::
 bool MenuButtonWithVisibilityQuery(std::string_view str_id, std::string_view title, std::string_view summary,
                                    std::string_view value, bool* visible, bool enabled = true,
                                    const ImVec2& text_align = ImVec2(0.0f, 0.0f));
+bool MenuButtonWithInlineValue(std::string_view title, std::string_view value, std::string_view right_value,
+                               bool enabled = true, const float min_title_width = 0.0f,
+                               const ImVec2& text_align = ImVec2(0.0f, 0.0f));
 bool MenuImageButton(std::string_view title, std::string_view summary, std::string_view value, ImTextureID image,
                      const ImVec2& image_size = ImVec2(0.0f, 0.0f), bool enabled = true,
                      const ImVec2& uv0 = ImVec2(0.0f, 0.0f), const ImVec2& uv1 = ImVec2(1.0f, 1.0f));
@@ -540,10 +554,15 @@ bool AreAnyWidgetsDialogInteractable();
 using FileSelectorCallback = std::function<void(std::string path)>;
 using FileSelectorFilters = std::vector<std::string>;
 bool IsFileSelectorOpen();
-void OpenFileSelector(std::string_view title, bool select_directory, FileSelectorCallback callback,
-                      FileSelectorFilters filters = FileSelectorFilters(),
-                      std::string initial_directory = std::string());
+void OpenFileSelector(std::string_view title, FileSelectorFilters filters, std::string initial_directory,
+                      FileSelectorCallback callback);
 void CloseFileSelector();
+
+using DirectorySelectorCallback = std::function<void(std::string path)>;
+bool IsDirectorySelectorOpen();
+void OpenDirectorySelector(std::string_view title, std::string initial_directory, std::string default_directory,
+                           DirectorySelectorCallback callback);
+void CloseDirectorySelector();
 
 using ChoiceDialogCallback = std::function<void(s32 index, const std::string& title, bool checked)>;
 using ChoiceDialogOptions = std::vector<std::pair<std::string, bool>>;
@@ -563,7 +582,7 @@ void CloseDropdownDialog();
 using InputStringDialogCallback = std::function<void(std::string text)>;
 bool IsInputDialogOpen();
 void OpenInputStringDialog(std::string_view title, std::string message, std::string caption, std::string ok_button_text,
-                           InputStringDialogCallback callback);
+                           std::string initial_value, InputStringDialogCallback callback);
 void CloseInputDialog();
 
 using ConfirmMessageDialogCallback = std::function<void(bool)>;

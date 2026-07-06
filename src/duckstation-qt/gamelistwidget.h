@@ -283,6 +283,7 @@ public:
 
   void showGameList();
   void showGameGrid();
+  void reloadViewModeFromSettings();
   void setMergeDiscSets(bool enabled);
   void setShowLocalizedTitles(bool enabled);
   void setShowGameIcons(bool enabled);
@@ -290,6 +291,9 @@ public:
   void setPreferAchievementGameIcons(bool enabled);
   void setShowCoverTitles(bool enabled);
   void focusSearchWidget();
+
+  // Returns translated supported formats string. Formats are separated by newlines.
+  static QString getSupportedFormatsString();
 
 Q_SIGNALS:
   void refreshProgress(const QString& status, int current, int total);

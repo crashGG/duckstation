@@ -800,6 +800,7 @@ void ImGuiManager::UpdateInputOverlay()
   ubuffer->num_active_pads = num_active_pads;
 
   size_t out_index = 0;
+  const std::array<bool, 2> multitap_ports = Controller::GetMultitapEnabledPorts(g_settings.multitap_mode);
   for (const u32 pad : Controller::PortDisplayOrder)
   {
     const Controller* controller = System::GetController(pad);
@@ -808,11 +809,10 @@ void ImGuiManager::UpdateInputOverlay()
 
     const ControllerType ctype = controller->GetType();
     const auto& [port, slot] = Controller::ConvertPadToPortAndSlot(pad);
-    const bool multitap = g_settings.IsMultitapPortEnabled(port);
     InputOverlayState::PadState& pstate = ubuffer->pads[out_index++];
     pstate.port = Truncate8(port);
     pstate.slot = Truncate8(slot);
-    pstate.multitap = multitap;
+    pstate.multitap = multitap_ports[port];
     pstate.ctype = ctype;
     pstate.icon_color = NORMAL_ICON_COLOR;
 
@@ -964,6 +964,7 @@ struct State
   llvm::SmallVector<ListEntry, System::PER_GAME_SAVE_STATE_SLOTS + System::GLOBAL_SAVE_STATE_SLOTS> slots;
   s32 current_slot = 0;
   bool current_slot_global = false;
+  bool global_slots_enabled = false;
 
   float open_time = 0.0f;
   float close_time = 0.0f;
@@ -997,8 +998,16 @@ void SaveStateSelectorUI::Open(float open_time /* = DEFAULT_OPEN_TIME */)
     s_state.placeholder_texture = FullscreenUI::LoadTexture("no-save.png");
 
   s_state.is_open = true;
+  s_state.global_slots_enabled = System::AreGlobalSaveStatesEnabled();
   RefreshList();
   RefreshHotkeyLegend();
+
+  if (s_state.slots.empty())
+  {
+    FullscreenUI::ShowToast(OSDMessageType::Info, {},
+                            TRANSLATE_STR("SaveStateSelectorUI", "No save state slots available."));
+    Close();
+  }
 }
 
 void SaveStateSelectorUI::Close()
@@ -1038,30 +1047,31 @@ void SaveStateSelectorUI::RefreshList()
       s_state.slots.push_back(std::move(li));
     }
   }
-  else
+
+  if (s_state.global_slots_enabled)
   {
     // reset slot if it's not global
-    if (!s_state.current_slot_global)
+    if (serial.empty() && !s_state.current_slot_global)
     {
       s_state.current_slot = 0;
       s_state.current_slot_global = true;
     }
-  }
 
-  for (s32 i = 1; i <= System::GLOBAL_SAVE_STATE_SLOTS; i++)
-  {
-    Error error;
-    bool exists;
-    std::string path = System::GetGlobalSaveStatePath(i);
-    std::optional<ExtendedSaveStateInfo> ssi = System::GetExtendedSaveStateInfo(path.c_str(), &error, &exists);
+    for (s32 i = 1; i <= System::GLOBAL_SAVE_STATE_SLOTS; i++)
+    {
+      Error error;
+      bool exists;
+      std::string path = System::GetGlobalSaveStatePath(i);
+      std::optional<ExtendedSaveStateInfo> ssi = System::GetExtendedSaveStateInfo(path.c_str(), &error, &exists);
 
-    ListEntry li;
-    if (ssi)
-      InitializeListEntry(&li, &ssi.value(), std::move(path), i, true);
-    else
-      InitializePlaceholderListEntry(&li, std::move(path), i, true, exists, std::move(error));
+      ListEntry li;
+      if (ssi)
+        InitializeListEntry(&li, &ssi.value(), std::move(path), i, true);
+      else
+        InitializePlaceholderListEntry(&li, std::move(path), i, true, exists, std::move(error));
 
-    s_state.slots.push_back(std::move(li));
+      s_state.slots.push_back(std::move(li));
+    }
   }
 }
 
@@ -1125,7 +1135,7 @@ void SaveStateSelectorUI::SelectNextSlot(bool open_selector)
   s_state.current_slot++;
   if (s_state.current_slot >= total_slots)
   {
-    if (!VideoThread::GetGameSerial().empty())
+    if (s_state.global_slots_enabled && !VideoThread::GetGameSerial().empty())
       s_state.current_slot_global ^= true;
     s_state.current_slot -= total_slots;
   }
@@ -1134,8 +1144,8 @@ void SaveStateSelectorUI::SelectNextSlot(bool open_selector)
   {
     if (!s_state.is_open)
       Open();
-
-    s_state.open_time = 0.0f;
+    else
+      s_state.open_time = 0.0f; // stay open for the full duration
   }
   else
   {
@@ -1148,7 +1158,7 @@ void SaveStateSelectorUI::SelectPreviousSlot(bool open_selector)
   s_state.current_slot--;
   if (s_state.current_slot < 0)
   {
-    if (!VideoThread::GetGameSerial().empty())
+    if (s_state.global_slots_enabled && !VideoThread::GetGameSerial().empty())
       s_state.current_slot_global ^= true;
     s_state.current_slot +=
       s_state.current_slot_global ? System::GLOBAL_SAVE_STATE_SLOTS : System::PER_GAME_SAVE_STATE_SLOTS;
@@ -1158,8 +1168,8 @@ void SaveStateSelectorUI::SelectPreviousSlot(bool open_selector)
   {
     if (!s_state.is_open)
       Open();
-
-    s_state.open_time = 0.0f;
+    else
+      s_state.open_time = 0.0f; // stay open for the full duration
   }
   else
   {

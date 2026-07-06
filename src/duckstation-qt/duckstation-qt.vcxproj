@@ -6,11 +6,13 @@
     <ClCompile Include="achievementsettingswidget.cpp" />
     <ClCompile Include="achievementlogindialog.cpp" />
     <ClCompile Include="advancedsettingswidget.cpp" />
+    <ClCompile Include="animatedstackedwidget.cpp" />
     <ClCompile Include="asynchttprequest.cpp" />
     <ClCompile Include="asyncpixmaploader.cpp" />
     <ClCompile Include="audiosettingswidget.cpp" />
     <ClCompile Include="autoupdaterdialog.cpp" />
     <ClCompile Include="biossettingswidget.cpp" />
+    <ClCompile Include="cardradiobutton.cpp" />
     <ClCompile Include="capturesettingswidget.cpp" />
     <ClCompile Include="colorpickerbutton.cpp" />
     <ClCompile Include="consolesettingswidget.cpp" />
@@ -52,6 +54,7 @@
     <ClCompile Include="qtprogresscallback.cpp" />
     <ClCompile Include="qtutils.cpp" />
     <ClCompile Include="qtwindowinfo.cpp" />
+    <ClCompile Include="searchbox.cpp" />
     <ClCompile Include="selectdiscdialog.cpp" />
     <ClCompile Include="settingswindow.cpp" />
     <ClCompile Include="setupwizarddialog.cpp" />
@@ -109,8 +112,11 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="qtwindowinfo.h" />
     <ClInclude Include="resource.h" />
+    <QtMoc Include="searchbox.h" />
     <QtMoc Include="selectdiscdialog.h" />
     <ClInclude Include="settingwidgetbinder.h" />
+    <QtMoc Include="cardradiobutton.h" />
+    <QtMoc Include="animatedstackedwidget.h" />
     <QtMoc Include="consolesettingswidget.h" />
     <QtMoc Include="emulationsettingswidget.h" />
     <QtMoc Include="gamelistsettingswidget.h" />
@@ -340,10 +346,18 @@
       <FileType>Document</FileType>
     </QtUi>
     <None Include="svgiconengine.json" />
-    <None Include="translations\duckstation-qt_az.ts" />
-    <None Include="translations\duckstation-qt_es-es.ts" />
-    <None Include="translations\duckstation-qt_sv.ts" />
-    <None Include="translations\duckstation-qt_tr.ts" />
+    <QtTs Include="translations\duckstation-qt_az.ts">
+      <FileType>Document</FileType>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_es-es.ts">
+      <FileType>Document</FileType>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_sv.ts">
+      <FileType>Document</FileType>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_tr.ts">
+      <FileType>Document</FileType>
+    </QtTs>
   </ItemGroup>
   <ItemGroup>
     <CommonDataFiles Include="$(SolutionDir)data\**\*.*">

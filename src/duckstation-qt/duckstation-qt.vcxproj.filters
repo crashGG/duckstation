@@ -15,11 +15,13 @@
     <ClCompile Include="qtprogresscallback.cpp" />
     <ClCompile Include="interfacesettingswidget.cpp" />
     <ClCompile Include="advancedsettingswidget.cpp" />
+    <ClCompile Include="animatedstackedwidget.cpp" />
     <ClCompile Include="aboutdialog.cpp" />
     <ClCompile Include="memorycardsettingswidget.cpp" />
     <ClCompile Include="inputbindingdialog.cpp" />
     <ClCompile Include="autoupdaterdialog.cpp" />
     <ClCompile Include="biossettingswidget.cpp" />
+    <ClCompile Include="cardradiobutton.cpp" />
     <ClCompile Include="memorycardeditorwindow.cpp" />
     <ClCompile Include="postprocessingsettingswidget.cpp" />
     <ClCompile Include="debuggerwindow.cpp" />
@@ -56,6 +58,7 @@
     <ClCompile Include="asynchttprequest.cpp" />
     <ClCompile Include="svgiconengine.cpp" />
     <ClCompile Include="svgwidget.cpp" />
+    <ClCompile Include="searchbox.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="qtutils.h" />
@@ -124,6 +127,9 @@
     <QtMoc Include="asynchttprequest.h" />
     <QtMoc Include="svgiconengine.h" />
     <QtMoc Include="svgwidget.h" />
+    <QtMoc Include="cardradiobutton.h" />
+    <QtMoc Include="animatedstackedwidget.h" />
+    <QtMoc Include="searchbox.h" />
   </ItemGroup>
   <ItemGroup>
     <QtUi Include="consolesettingswidget.ui" />
@@ -192,18 +198,6 @@
     </QtResource>
   </ItemGroup>
   <ItemGroup>
-    <None Include="translations\duckstation-qt_tr.ts">
-      <Filter>translations</Filter>
-    </None>
-    <None Include="translations\duckstation-qt_es-es.ts">
-      <Filter>translations</Filter>
-    </None>
-    <None Include="translations\duckstation-qt_sv.ts">
-      <Filter>translations</Filter>
-    </None>
-    <None Include="translations\duckstation-qt_az.ts">
-      <Filter>translations</Filter>
-    </None>
     <None Include="svgiconengine.json" />
   </ItemGroup>
   <ItemGroup>
@@ -247,6 +241,18 @@
       <Filter>translations</Filter>
     </QtTs>
     <QtTs Include="translations\duckstation-qt_ko.ts">
+      <Filter>translations</Filter>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_az.ts">
+      <Filter>translations</Filter>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_es-es.ts">
+      <Filter>translations</Filter>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_sv.ts">
+      <Filter>translations</Filter>
+    </QtTs>
+    <QtTs Include="translations\duckstation-qt_tr.ts">
       <Filter>translations</Filter>
     </QtTs>
   </ItemGroup>

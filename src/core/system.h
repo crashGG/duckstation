@@ -8,6 +8,9 @@
 
 #include "util/image.h"
 
+#include <array>
+#include <ctime>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -150,9 +153,8 @@ std::string GetExecutableNameForImage(CDImage* cdi, bool strip_subdirectories);
 bool ReadExecutableFromImage(CDImage* cdi, std::string* out_executable_name, std::vector<u8>* out_executable_data);
 
 std::string GetGameHashId(GameHash hash);
-bool GetGameDetailsFromImage(CDImage* cdi, std::string* out_id = nullptr, GameHash* out_hash = nullptr,
-                             std::string* out_executable_name = nullptr,
-                             std::vector<u8>* out_executable_data = nullptr);
+bool GetGameDetailsFromImage(CDImage* cdi, std::string* out_id, GameHash* out_hash,
+                             std::optional<std::array<u8, 16>>* out_achievements_hash);
 GameHash GetGameHashFromFile(const char* path);
 GameHash GetGameHashFromBuffer(const std::string_view path, const std::span<const u8> data);
 DiscRegion GetRegionForSerial(const std::string_view serial);
@@ -252,7 +254,7 @@ bool PopulateGameListEntryFromCurrentGame(GameList::Entry* entry, Error* error);
 
 void FormatLatencyStats(SmallStringBase& str);
 
-void SetDefaultSettings(SettingsInterface& si);
+void SetDefaultSettings(SettingsInterface& si, bool ignore_user_prefs);
 
 /// Reloads settings, and applies any changes present.
 void ApplySettings(bool display_osd_messages);
@@ -297,6 +299,9 @@ void SaveStateToSlot(bool global, s32 slot);
 
 /// State data access, use with care as the media path is not updated.
 bool SaveStateDataToBuffer(std::span<u8> data, size_t* data_size, Error* error);
+
+/// Returns true if global states should be include in the slot list.
+bool AreGlobalSaveStatesEnabled();
 
 /// Runs the VM until the CPU execution is canceled.
 void Execute();

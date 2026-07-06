@@ -51,6 +51,8 @@
 		<file>icons/flags/sv@2x.png</file>
 		<file>icons/flags/tr.png</file>
 		<file>icons/flags/tr@2x.png</file>
+		<file>icons/flags/uk.png</file>
+		<file>icons/flags/uk@2x.png</file>
 		<file>icons/flags/zh-CN.png</file>
 		<file>icons/flags/zh-CN@2x.png</file>
 		<file>icons/media-record.png</file>
@@ -130,8 +132,10 @@
 		<file>icons/monochrome/svg/lightbulb-line.svg</file>
 		<file>icons/monochrome/svg/list-check.svg</file>
 		<file>icons/monochrome/svg/login-box-line.svg</file>
+		<file>icons/monochrome/svg/logout-box-line.svg</file>
 		<file>icons/monochrome/svg/mag-line.svg</file>
 		<file>icons/monochrome/svg/memcard-line.svg</file>
+		<file>icons/monochrome/svg/memcards-line.svg</file>
 		<file>icons/monochrome/svg/minus-line.svg</file>
 		<file>icons/monochrome/svg/mouse-line.svg</file>
 		<file>icons/monochrome/svg/multi-discs.svg</file>
@@ -147,6 +151,7 @@
 		<file>icons/monochrome/svg/pushpin-line.svg</file>
 		<file>icons/monochrome/svg/refresh-line.svg</file>
 		<file>icons/monochrome/svg/restart-line.svg</file>
+		<file>icons/monochrome/svg/ruler-line.svg</file>
 		<file>icons/monochrome/svg/save-3-line.svg</file>
 		<file>icons/monochrome/svg/screenshot-2-line.svg</file>
 		<file>icons/monochrome/svg/settings-3-line.svg</file>
@@ -163,6 +168,7 @@
 		<file>icons/monochrome/svg/trash-fill.svg</file>
 		<file>icons/monochrome/svg/trophy-line.svg</file>
 		<file>icons/monochrome/svg/tv-2-line.svg</file>
+		<file>icons/monochrome/svg/user-add-line.svg</file>
 		<file>icons/monochrome/svg/video-on-line.svg</file>
 		<file>icons/monochrome/svg/vidicon-line.svg</file>
 		<file>icons/monochrome/svg/volume-up-line.svg</file>
