@@ -276,7 +276,7 @@ void FullscreenUI::OnSystemResumed()
       return;
 
     // get rid of pause menu if we unpaused another way
-    if (s_locals.current_main_window == MainWindowType::PauseMenu)
+    if (s_locals.current_main_window != MainWindowType::None)
       ClosePauseMenuImmediately();
 
     UpdateRunIdleState();
@@ -301,7 +301,7 @@ void FullscreenUI::OnSystemDestroyed()
 
 void FullscreenUI::PauseAndOpenMenuFromCoreThread(void (*callback)())
 {
-  DebugAssert(!VideoThread::IsOnThread());
+  DebugAssert(Host::IsOnCoreThread());
   if (!System::IsValid())
     return;
 
@@ -1893,10 +1893,7 @@ bool FullscreenUI::InitializeSaveStateListEntryFromPath(SaveStateListEntry* li, 
 void FullscreenUI::ClearSaveStateEntryList()
 {
   for (SaveStateListEntry& entry : s_locals.save_state_selector_slots)
-  {
-    if (entry.preview_texture)
-      g_gpu_device->RecycleTexture(std::move(entry.preview_texture));
-  }
+    QueueTextureRecycle(std::move(entry.preview_texture));
   s_locals.save_state_selector_slots.clear();
 }
 
@@ -1982,17 +1979,19 @@ void FullscreenUI::DrawSaveStateSelector()
   static constexpr auto do_load_state = [](const SaveStateListEntry& entry) {
     if (VideoThread::HasGPUBackend())
     {
-      const s32 slot = entry.slot;
-      const bool global = entry.global;
-      const bool is_undo = entry.state_path.empty();
-      ClearSaveStateEntryList(); // entry no longer valid
-      ClosePauseMenu(TransitionEffect::Fade, LONG_TRANSITION_TIME);
-
       // Loading undo state?
-      if (is_undo)
+      if (entry.state_path.empty())
+      {
         Host::RunOnCoreThread(&System::UndoLoadState);
+      }
       else
-        Host::RunOnCoreThread([global, slot]() { System::LoadStateFromSlot(global, slot); });
+      {
+        Host::RunOnCoreThread(
+          [global = entry.global, slot = entry.slot]() { System::LoadStateFromSlot(global, slot); });
+      }
+
+      ClearSaveStateEntryList();
+      ClosePauseMenu(TransitionEffect::Fade, LONG_TRANSITION_TIME);
     }
     else
     {
@@ -2001,12 +2000,9 @@ void FullscreenUI::DrawSaveStateSelector()
   };
 
   static constexpr auto do_save_state = [](const SaveStateListEntry& entry) {
-    const s32 slot = entry.slot;
-    const bool global = entry.global;
-    ClearSaveStateEntryList(); // entry no longer valid
+    Host::RunOnCoreThread([slot = entry.slot, global = entry.global]() { System::SaveStateToSlot(global, slot); });
+    ClearSaveStateEntryList();
     ClosePauseMenu(TransitionEffect::Fade, LONG_TRANSITION_TIME);
-
-    Host::RunOnCoreThread([slot, global]() { System::SaveStateToSlot(global, slot); });
   };
 
   ImGuiIO& io = ImGui::GetIO();
@@ -2167,8 +2163,7 @@ void FullscreenUI::DrawSaveStateSelector()
                   ShowToast(OSDMessageType::Quick, {}, fmt::format(FSUI_FSTR("{} deleted."), RemoveHash(entry.title)));
 
                   // need to preserve the texture, since it's going to be drawn this frame
-                  // TODO: do this with a transition for safety
-                  g_gpu_device->RecycleTexture(std::move(entry.preview_texture));
+                  QueueTextureRecycle(std::move(entry.preview_texture));
 
                   if (s_locals.save_state_selector_loading)
                   {
